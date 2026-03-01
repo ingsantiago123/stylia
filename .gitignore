@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Next.js
+.next/
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Docker
+*.log
+
+# MinIO data
+miniodata/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Env
+.env
+.env.backup
+.env.old
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (large files)
+models/*.gguf
+models/*.bin
+models/*.safetensors
+
+# Debug / temp scripts
+backend/debug_*.py
+*.txt.bak
+test_document.txt
+test_openai_integration.txt
+demo_response.json
+ejemplo_*.md
+
+# MinIO persistent data
+miniodata/
+
+# Postgres data
+pgdata/

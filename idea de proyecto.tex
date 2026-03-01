@@ -1,0 +1,536 @@
+% ---------------------------------------------------
+% LaTeX document generated from Markdown report
+% This file is intended to be compiled with LuaLaTeX.
+
+\documentclass[12pt]{article}
+
+% Use modern fonts via fontspec (LuaLaTeX/XeLaTeX only)
+\usepackage{fontspec}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{graphicx}
+
+% Set page geometry
+\geometry{margin=1in}
+
+% Configure hyperlink colors
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue
+}
+
+% Set a main font for LuaLaTeX; adjust as needed
+\setmainfont{Latin Modern Roman}
+
+% Macro to typeset tether IDs as footnotes safely.  It uses \detokenize
+% so that the special characters inside the tether ID are not interpreted
+% by LaTeX.  Each citation in the report is thus preserved as a
+% footnote containing the original tether string.
+\newcommand{\tcite}[1]{\footnote{\textnormal{\detokenize{#1}}}}
+
+\begin{document}
+
+\title{Arquitectura integral de un sistema de corrección de estilo con preservación de formato}
+\author{}
+\date{}
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Introducción y objetivos}
+
+Los libros y cartillas digitales, especialmente los que contienen diagramación, tablas e imágenes, requieren
+un proceso de corrección de ortografía y de estilo que no modifique la estructura visual.  El objetivo
+de este proyecto es procesar documentos largos (\textit{200--600 páginas}), corregir errores ortográficos y de
+redacción de manera automatizada y mantener la fidelidad visual página por página.  Se busca evitar el uso
+excesivo de servicios de terceros (APIs de OCR y LLMs en la nube) por razones de coste y privacidad.
+
+Los documentos de entrada pueden ser \emph{PDF “born‑digital”}, \emph{PDF escaneados} o \emph{archivos DOCX}.
+La salida principal es un PDF con la corrección aplicada sobre cada bloque de texto sin alterar imágenes,
+tablas ni diseño.  Opcionalmente se genera un DOCX editable con correcciones.
+
+\section{Requerimientos del sistema}
+
+\subsection{Requerimientos funcionales}
+
+\begin{itemize}
+  \item \textbf{Ingreso de documentos}. La aplicación acepta archivos PDF y DOCX.  Si el documento
+        está en formato DOCX, se convierte a PDF de forma automatizada mediante el modo sin GUI de
+        \texttt{LibreOffice} (\texttt{soffice --convert-to pdf})\tcite{【333465169400446†L90-L98】}.
+
+  \item \textbf{Extracción estructural}. Para PDFs digitales se extraen bloques de texto con
+        información de posición utilizando la función \texttt{Page.get\_text("blocks")} de PyMuPDF, la
+        cual devuelve una lista de bloques con \emph{coordenadas (\textit{bounding boxes})}\tcite{【915511594145204†L134-L142】}.
+        Para PDFs escaneados se usa un motor de OCR que detecta y reconoce cada palabra (como
+        \texttt{docTR}, que dispone de un pipeline de detección y reconocimiento de texto con prestaciones
+        comparables a servicios de Google o AWS)\tcite{【191659958827309†L64-L73】}.  Para documentos muy
+        complejos se usa \texttt{Layout Parser}, que permite detectar estructuras de página con modelos
+        de \emph{deep learning} y abstraer las regiones en objetos \texttt{Coordinates}, \texttt{TextBlock}
+        y \texttt{Layout}\tcite{【964225940706161†L47-L52】【964225940706161†L72-L76】}.
+
+  \item \textbf{Corrección ortográfica y gramatical}. Se ejecuta un corrector local basado en
+        \texttt{LanguageTool}, un corrector ortográfico, gramatical y de estilo multilingüe\tcite{【209408010763411†L104-L106】}.
+        El modo ``perfeccionista'' ofrece sugerencias de estilo y tono, detecta frases largas
+        o complejas y reconoce coloquialismos y redundancias\tcite{【209408010763411†L134-L139】}.
+
+  \item \textbf{Corrección de estilo (LLM)}. Se utiliza un \emph{modelo grande de lenguaje} (LLM)
+        ejecutado localmente mediante \texttt{llama.cpp} o \texttt{vLLM}.  `llama.cpp` fue diseñado
+        para ejecutar modelos LLM con un montaje mínimo, con soporte de CPU + GPU y
+        cuantizaciones de 1,5 a 8 bits\tcite{【949920289085484†L520-L537】}.  Los modelos permiten generar
+        parches de estilo (pequeñas sustituciones) para cada bloque sin reescribir todo el contenido.
+
+  \item \textbf{Control de desbordamiento}.  Cada corrección se vuelve a insertar en su
+        \emph{bounding box} y se valida que el texto corregido quepa.  Si no cabe, se aplican
+        reglas de ajuste (reducción de tamaño de fuente o espaciado) o se marca para revisión
+        manual.
+
+  \item \textbf{Continuidad y coherencia}. El sistema crea \emph{instantáneas de contexto} que almacenan
+        glosarios, preferencias de estilo y entidades detectadas hasta la página \(N\) para garantizar
+        consistencia en terminología y tono en páginas siguientes.
+
+  \item \textbf{Interfaz de usuario}. La aplicación ofrece una vista de diferencias lado a lado
+        (original vs corregido) con resaltado por tipo de cambio y botones para aceptar o
+        rechazar correcciones.  Permite ajustar reglas de estilo, diccionarios personalizados y
+        glosarios por proyecto.
+
+  \item \textbf{Salida final}. Se genera un PDF con el texto corregido sobreimpreso conservando
+        imágenes y diagramación.  Opcionalmente se genera un DOCX editable para futuras ediciones.
+\end{itemize}
+
+\subsection{Requerimientos no funcionales}
+
+\begin{itemize}
+  \item \textbf{Precisión y fidelidad}.  El texto debe corregirse sin introducir nuevos errores ni
+        alterar el significado.  La corrección no debe desordenar el diseño de página.
+
+  \item \textbf{Escalabilidad}.  El sistema debe procesar documentos de cientos de páginas en
+        paralelo.  Se usan tareas asincrónicas mediante \texttt{Celery}; Celery es un sistema
+        distribuido que procesa grandes cantidades de mensajes, con enfoque en procesamiento en
+        tiempo real y soporte para la programación de tareas\tcite{【227726339796927†L13-L19】}.
+
+  \item \textbf{Privacidad y coste}.  La ejecución de OCR y LLM debe realizarse en servidores
+        controlados por la organización para reducir costes y proteger datos sensibles.
+
+  \item \textbf{Extensibilidad}.  El sistema debe permitir la sustitución de componentes (por
+        ejemplo, cambiar el motor de OCR o LLM) y la personalización de reglas de estilo sin
+        reescribir todo el pipeline.
+
+  \item \textbf{Tolerancia a fallos}.  Debe permitir recuperar procesos en caso de fallo de
+        hardware o software.  Los artefactos intermedios se almacenan en un repositorio de objetos
+        y la base de datos mantiene el estado de cada etapa.
+
+  \item \textbf{Seguridad}.  Los archivos y metadatos deben almacenarse de forma cifrada; el
+        acceso a la interfaz debe estar protegido mediante autenticación y control de roles.
+\end{itemize}
+
+\section{Arquitectura general}
+
+\subsection{Visión de alto nivel}
+
+La aplicación se construye siguiendo una \emph{arquitectura de microservicios} con un front‑end y un
+back‑end desacoplados.  El sistema se compone de los siguientes bloques principales:
+
+\begin{enumerate}[label=\arabic*.]
+  \item \textbf{UI Web} (Next.js / React) – Permite subir documentos, mostrar el progreso,
+        revisar correcciones y descargar resultados.
+  \item \textbf{API} (FastAPI) – Maneja peticiones del cliente, autentica usuarios y orquesta
+        tareas.
+  \item \textbf{Cola de tareas} (Celery con Redis o RabbitMQ) – Gestiona trabajos pesados
+        (extracción, OCR, corrección, renderizado).  Celery ofrece un sistema de colas
+        distribuido y flexible\tcite{【227726339796927†L13-L19】}.
+  \item \textbf{Workers} – Conjunto de servicios que ejecutan etapas de procesamiento (ingesta,
+        extracción, corrección, renderizado) de forma paralela.
+  \item \textbf{Almacenamiento de objetos} (MinIO) – Se usa como repositorio S3 compatible para
+        almacenar documentos originales, artefactos intermedios, salidas y datos binarios.
+        MinIO es un almacenamiento de objetos de alto rendimiento compatible con S3, diseñado
+        para velocidad y escalabilidad en cargas de trabajo de IA/ML y análisis\tcite{【870299264509201†L414-L421】}.
+  \item \textbf{Base de datos} (PostgreSQL) – Gestiona el modelo de datos relacional y el estado
+        de cada documento.  PostgreSQL es un sistema de base de datos objeto‑relacional de código
+        abierto con más de 35 años de desarrollo y reputación de fiabilidad, robustez y
+        rendimiento\tcite{【357047729773606†L23-L25】}.
+  \item \textbf{Módulos de procesamiento}:
+    \begin{itemize}
+      \item \emph{Conversión a PDF} (LibreOffice headless) – Convierte DOCX a PDF sin interfaz
+            gráfica con el comando \texttt{soffice --convert-to pdf}, que activa el modo
+            headless\tcite{【333465169400446†L90-L98】}.
+      \item \emph{Extracción de layout} – Usa PyMuPDF para obtener bloques de texto y sus
+            posiciones en PDFs digitales.  En PDFs escaneados se usa docTR para OCR de dos
+            etapas\tcite{【191659958827309†L64-L73】} y Layout Parser para detectar estructuras de página
+            mediante modelos de \emph{deep learning}\tcite{【964225940706161†L47-L52】}.
+      \item \emph{Corrección determinista} – \texttt{LanguageTool} local para ortografía, gramática y
+            estilo\tcite{【209408010763411†L104-L106】}.
+      \item \emph{Corrección LLM} – Un LLM local (por ejemplo, Qwen/Mistral) ejecutado con
+            \texttt{llama.cpp}.  `llama.cpp` permite inferencia de modelos grandes en C/C++ con
+            soporte de CPU y GPU, con optimizaciones por plataforma y cuantización de 1,5 a 8 bits\tcite{【949920289085484†L520-L537】}.
+      \item \emph{Renderizado} – Reescribe el texto en su misma caja mediante PyMuPDF,
+            validando la cabida y ajustando la fuente si es necesario.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Diagrama de componentes}
+
+\begin{figure}[h!]
+  \centering
+  \begin{tikzpicture}[node distance=1.5cm, every node/.style={font=\small}]
+    % Define component nodes
+    \node (client) [draw, rectangle, rounded corners, fill=blue!10, minimum width=3cm, minimum height=0.8cm] {Cliente Web};
+    \node (api) [draw, rectangle, rounded corners, fill=green!10, below=of client] {API FastAPI};
+    \node (db) [draw, rectangle, rounded corners, fill=yellow!10, right=3cm of api] {PostgreSQL};
+    \node (queue) [draw, rectangle, rounded corners, fill=orange!10, below=of api] {Cola Celery};
+    \node (workers) [draw, rectangle, rounded corners, fill=red!10, below=of queue] {Workers};
+    \node (storage) [draw, rectangle, rounded corners, fill=purple!10, right=3cm of workers] {Almacenamiento MinIO};
+    
+    % Draw arrows between components
+    \draw[->] (client) -- (api);
+    \draw[->] (api) -- (queue);
+    \draw[->] (api) -- (db);
+    \draw[->] (queue) -- (workers);
+    \draw[->] (workers) -- (storage);
+    \draw[->] (workers) |- (db);
+
+    % Legend or labels if needed
+    \node[above=0.3cm of client] {\textbf{Front‑end}};
+    \node[above=0.3cm of api] {\textbf{Back‑end}};
+  \end{tikzpicture}
+  \caption{Diagrama de componentes de alto nivel.}
+  \label{fig:componentes}
+\end{figure}
+
+En la Figura \ref{fig:componentes} se representa la interacción entre los componentes principales del sistema. El
+usuario carga un archivo a través de la interfaz web; la API gestiona las peticiones y guarda el
+archivo en MinIO, además de registrar la entrada en la base de datos.  Los trabajos pesados se envían a
+la cola de Celery, que los distribuye entre los trabajadores.  Estos procesan cada etapa y almacenan
+los artefactos en MinIO y el estado en Postgres.
+
+\section{Flujo de procesamiento}
+
+El sistema se organiza en etapas encadenadas para asegurar la fidelidad y la coherencia.  Cada etapa
+produce artefactos intermedios que se almacenan y se asocian a un registro en la base de datos.
+
+\subsection{Etapa A: Ingesta}
+
+\begin{enumerate}[label=\arabic*.]
+  \item \textbf{Subida y normalización}. El documento original se guarda en \texttt{source/}
+        en MinIO y se registra en la tabla \texttt{documents}.
+  \item \textbf{Conversión a PDF}.  Si el archivo es DOCX u otro formato soportado se
+        convierte a PDF con LibreOffice headless (\texttt{soffice --convert-to pdf})\tcite{【333465169400446†L90-L98】}.
+        El PDF convertido se almacena en \texttt{pdf/}.
+  \item \textbf{Conteo de páginas}. Se calcula el número de páginas y se crean registros
+        \texttt{pages} con estado inicial.
+\end{enumerate}
+
+\subsection{Etapa B: Extracción de layout}
+
+Se ejecuta un \emph{worker} por página:
+
+\begin{itemize}
+  \item Para PDFs digitales, \textbf{PyMuPDF} analiza cada página y extrae bloques de texto
+        (\texttt{get\_text("blocks")}) con coordenadas, fuentes y estilos\tcite{【915511594145204†L134-L142】}.  También se
+        extraen imágenes y tablas.  Cada página genera un JSON \texttt{layout} con campos
+        \{\texttt{bbox}, tipo, spans\} y una imagen de vista previa.
+
+  \item Para PDFs escaneados, \textbf{docTR} realiza detección y reconocimiento de texto en
+        dos etapas\tcite{【191659958827309†L64-L73】}.  Se obtienen cajas de texto (palabras) y su
+        contenido.
+
+  \item Cuando las páginas contienen estructuras complejas, \textbf{Layout Parser} ejecuta
+        modelos de \emph{deep learning} para detectar regiones (cabeceras, párrafos, tablas,
+        figuras) en pocas líneas de código y sin reglas fijas\tcite{【964225940706161†L47-L52】}.  El
+        resultado se almacena en la abstracción \texttt{Layout}, compuesta por objetos
+        \texttt{Coordinates}, \texttt{TextBlock} y \texttt{Layout}\tcite{【964225940706161†L72-L76】}.
+
+  \item Cada página almacena sus recursos (layout JSON, texto plano, imágenes) en MinIO.
+\end{itemize}
+
+\subsection{Etapa C: Construcción de contexto}
+
+Una vez procesada una ventana de \(N\) páginas (por ejemplo, 10 páginas), se crea una instantánea de
+contexto que almacena glosarios, entidades, preferencias de estilo y resumen del hilo para
+mantener coherencia a lo largo del documento.  Este contexto se actualiza de manera incremental:
+
+\begin{itemize}
+  \item Se combinan las entidades y términos detectados en las páginas previas.
+  \item Se aplican reglas de estilo (tuteo/usted, marcas de cita) y glosarios personalizados.
+  \item Se almacena un resumen de la narrativa para que las correcciones posteriores respeten
+        continuidad temática.
+\end{itemize}
+
+El contexto se asocia a un campo \texttt{snapshot} en la base de datos y cada corrección lo utiliza
+como referencia.
+
+\subsection{Etapa D: Corrección por página}
+
+El proceso de corrección se aplica por bloque dentro de cada página.  Se controla el desbordamiento
+para que el texto corregido quepa en su caja original.  Los pasos son los siguientes:
+
+\begin{enumerate}[label=\arabic*.]
+  \item \textbf{Pre‑chequeo determinista}.  Se ejecuta \texttt{LanguageTool} sobre cada bloque
+        de texto para corregir ortografía, gramática y puntuación.
+  \item \textbf{Corrección de estilo con LLM}.  Un modelo LLM local revisa el bloque y genera
+        parches de estilo (reemplazos, inserciones, eliminaciones) acotados.  Las respuestas
+        se devuelven como una estructura JSON de operaciones y no como texto libre.
+  \item \textbf{Validación de cabida}.  Se inserta el texto corregido en su bounding box usando
+        PyMuPDF.  Si el nuevo texto no cabe:
+    \begin{enumerate}[label=\alph*.]
+      \item Se aplica una reducción de tamaño de fuente o un ajuste de espaciado hasta un
+            umbral (por ejemplo, −10 %).
+      \item Si la reducción no es suficiente, se marca el bloque para revisión manual.
+    \end{enumerate}
+  \item \textbf{Post‑chequeo}.  Se vuelve a ejecutar \texttt{LanguageTool} para asegurar que no
+        queden errores.  Se calcula una métrica de calidad (\textit{qa\_score}) y se registra el
+        \emph{flag} de desbordamiento.
+  \item \textbf{Guardar parches}.  El parche y las métricas se guardan en la tabla
+        \texttt{patches} y en la ruta correspondiente en MinIO.
+\end{enumerate}
+
+\subsection{Etapa E: Renderizado y ensamble}
+
+Finalmente se generan las páginas del PDF final.  Para cada página se aplica el parche
+validado sobre la capa de texto original usando PyMuPDF; se reinsertan imágenes y tablas
+sin modificación.  Una vez procesadas todas las páginas, se ensamblan en un único PDF.
+
+El flujo completo se resume en el diagrama de la Figura~\ref{fig:pipeline}, donde cada
+etapa se representa como un bloque en una cadena y se muestra la interacción con el
+almacenamiento y la base de datos.
+
+\begin{figure}[h!]
+  \centering
+  \begin{tikzpicture}[node distance=2.2cm, every node/.style={font=\small}, align=center]
+    % Define nodes for pipeline stages
+    \node (ingest) [draw, rectangle, rounded corners, fill=blue!10, minimum width=3.2cm] {Etapa A\\Ingesta};
+    \node (extract) [draw, rectangle, rounded corners, fill=green!10, right=of ingest] {Etapa B\\Extracción de layout};
+    \node (context) [draw, rectangle, rounded corners, fill=yellow!10, right=of extract] {Etapa C\\Construcción de contexto};
+    \node (correct) [draw, rectangle, rounded corners, fill=orange!10, right=of context] {Etapa D\\Corrección};
+    \node (render) [draw, rectangle, rounded corners, fill=red!10, right=of correct] {Etapa E\\Renderizado};
+
+    % Arrows connecting pipeline stages
+    \draw[->] (ingest) -- (extract);
+    \draw[->] (extract) -- (context);
+    \draw[->] (context) -- (correct);
+    \draw[->] (correct) -- (render);
+
+    % Storage and DB on the side
+    \node (storage2) [draw, rectangle, rounded corners, fill=purple!10, below=1.2cm of extract, minimum width=3cm] {MinIO};
+    \node (db2) [draw, rectangle, rounded corners, fill=pink!10, below=1.2cm of correct, minimum width=3cm] {PostgreSQL};
+
+    % Arrows to storage and DB
+    \draw[->] (ingest.south) -- (storage2.north west);
+    \draw[->] (extract.south) -- (storage2.north);
+    \draw[->] (context.south) -- (db2.north west);
+    \draw[->] (correct.south) -- (db2.north);
+    \draw[->] (render.south) -- (storage2.north east);
+
+    % Label arrows to indicate artifacts
+    \node at ($(ingest.south)!0.5!(storage2.north west)$) [left=0.1cm] {\scriptsize artefactos};
+    \node at ($(extract.south)!0.5!(storage2.north)$) {\scriptsize layouts/imagenes};
+    \node at ($(context.south)!0.5!(db2.north west)$) {\scriptsize snapshots};
+    \node at ($(correct.south)!0.5!(db2.north)$) {\scriptsize parches};
+    \node at ($(render.south)!0.5!(storage2.north east)$) {\scriptsize PDF final};
+  \end{tikzpicture}
+  \caption{Flujo de procesamiento y generación de artefactos.}
+  \label{fig:pipeline}
+\end{figure}
+
+\section{Modelo de datos y almacenamiento}
+
+El sistema utiliza una base de datos relacional (PostgreSQL) junto con un repositorio de objetos
+(MinIO) para gestionar tanto los metadatos como los contenidos binarios.  El modelo de datos se
+resume en la Tabla~\ref{tab:datos}, donde cada tabla principal se describe con sus campos más
+relevantes.
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{3cm}p{4.5cm}p{6.5cm}}
+  \caption{Tablas principales del modelo de datos.}\label{tab:datos}\\
+  \toprule
+  \textbf{Tabla} & \textbf{Campos (resumen)} & \textbf{Descripción} \\
+  \midrule
+  \endfirsthead
+  \caption[]{Tablas principales del modelo de datos (continuación).}\\
+  \toprule
+  \textbf{Tabla} & \textbf{Campos (resumen)} & \textbf{Descripción} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+  \texttt{documents} & \texttt{id}, \texttt{filename}, \texttt{source\_uri}, \texttt{pdf\_uri}, \texttt{total\_pages}, \texttt{status}, \texttt{config\_json}, \texttt{created\_at} & Registro de cada documento. \texttt{config\_json} almacena reglas de estilo, idioma y preferencias. \\
+  \addlinespace
+  \texttt{pages} & \texttt{id}, \texttt{doc\_id}, \texttt{page\_no}, \texttt{layout\_uri}, \texttt{text\_uri}, \texttt{status}, \texttt{preview\_uri} & Cada página del documento. Guarda su layout JSON, el texto plano y la miniatura. \\
+  \addlinespace
+  \texttt{patches} & \texttt{id}, \texttt{page\_id}, \texttt{version}, \texttt{patch\_uri}, \texttt{qa\_score}, \texttt{overflow\_flag}, \texttt{applied} & Cambios propuestos por LLM y LanguageTool. \texttt{applied} indica si se usó para renderizar; \texttt{qa\_score} mide la calidad. \\
+  \addlinespace
+  \texttt{context\_snapshots} & \texttt{id}, \texttt{doc\_id}, \texttt{upto\_page\_no}, \texttt{snapshot\_uri}, \texttt{created\_at} & Instantáneas de contexto acumulado hasta cierta página.  Incluye glosarios, entidades y preferencias. \\
+  \addlinespace
+  \texttt{jobs} & \texttt{id}, \texttt{doc\_id}, \texttt{task\_type}, \texttt{status}, \texttt{started\_at}, \texttt{finished\_at}, \texttt{error} & Registros de trabajos en Celery: ingesta, extracción, corrección y renderizado. \\
+\end{longtable}
+
+\subsection{Almacenamiento en objetos (MinIO)}
+
+El contenido binario se organiza en una estructura de carpetas jerárquica en MinIO.  Cada
+documento tiene su propio espacio y las rutas se dividen de la siguiente manera:
+
+\begin{itemize}
+  \item \texttt{source/} – Documentos originales cargados.
+  \item \texttt{pdf/} – Documentos convertidos a PDF (en caso de entrada DOCX).
+  \item \texttt{pages/layout/} – Archivos JSON con la estructura de cada página.
+  \item \texttt{pages/text/} – Texto plano de cada página.
+  \item \texttt{pages/preview/} – Imágenes de vista previa para la interfaz.
+  \item \texttt{pages/patch/} – Parches generados por la IA.
+  \item \texttt{pages/output/} – Fragmentos de páginas después de la renderización.
+  \item \texttt{final/} – Documentos finales listos para descarga.
+\end{itemize}
+
+MinIO es un almacenamiento de objetos de alto rendimiento, compatible con la API S3 y optimizado para
+cargas de trabajo de IA y análisis\tcite{【870299264509201†L414-L421】}.  Por tanto, es adecuado para manejar
+grandes volúmenes de archivos y escala horizontalmente.
+
+\section{Tecnologías y justificación}
+
+En la Tabla~\ref{tab:tecnologias} se listan los componentes principales, la tecnología
+seleccionada y la justificación basada en las fuentes consultadas.
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{3.5cm}p{3.5cm}p{6cm}}
+  \caption{Tecnologías utilizadas y justificación.}\label{tab:tecnologias}\\
+  \toprule
+  \textbf{Componente} & \textbf{Tecnología} & \textbf{Justificación y cita} \\
+  \midrule
+  \endfirsthead
+  \caption[]{Tecnologías utilizadas y justificación (continuación).}\\
+  \toprule
+  \textbf{Componente} & \textbf{Tecnología} & \textbf{Justificación y cita} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+  Extracción de PDFs & \textbf{PyMuPDF} & Permite obtener bloques de texto y sus bounding boxes mediante \texttt{Page.get\_text("blocks")}\tcite{【915511594145204†L134-L142】} y extrae imágenes y tablas. \\
+  \addlinespace
+  OCR de escaneados & \textbf{docTR} (Mindee) & Librería con pipeline de detección y reconocimiento de texto en dos etapas, con rendimiento comparable a servicios comerciales\tcite{【191659958827309†L64-L73】}. \\
+  \addlinespace
+  Detección de layout & \textbf{Layout Parser} & Toolkit de \emph{deep learning} para extraer estructuras complejas de documentos con pocas líneas de código y sin reglas fijas\tcite{【964225940706161†L47-L52】}; ofrece estructuras \texttt{Coordinates}, \texttt{TextBlock} y \texttt{Layout}\tcite{【964225940706161†L72-L76】}. \\
+  \addlinespace
+  Conversión de DOCX & \textbf{LibreOffice headless} & Permite convertir DOCX a PDF sin interfaz gráfica, activando automáticamente el modo headless cuando se usa \texttt{--convert-to pdf}\tcite{【333465169400446†L90-L98】}. \\
+  \addlinespace
+  Corrección determinista & \textbf{LanguageTool local} & Corrector ortográfico, gramatical y de estilo multilingüe\tcite{【209408010763411†L104-L106】} que sugiere mejoras de estilo y detecta frases largas\tcite{【209408010763411†L134-L139】}. \\
+  \addlinespace
+  Corrección LLM & \textbf{llama.cpp / vLLM} & `llama.cpp` permite ejecutar modelos LLM localmente con mínima configuración y soporte para CPU+GPU, con optimizaciones y cuantización de 1,5 hasta 8 bits\tcite{【949920289085484†L520-L537】}. \\
+  \addlinespace
+  Orquestación de tareas & \textbf{Celery} & Cola de tareas distribuida enfocada en procesamiento en tiempo real y programación de tareas\tcite{【227726339796927†L13-L19】}. \\
+  \addlinespace
+  API backend & \textbf{FastAPI} (Python) & Framework asíncrono para construir APIs rápidas, con tipado, validación y
+        integración sencilla con Pydantic. \\
+  \addlinespace
+  Frontend & \textbf{Next.js / React} & Construye una interfaz reactiva con vista de diferencias, permite SSR y generación estática. \\
+  \addlinespace
+  Base de datos & \textbf{PostgreSQL} & Sistema de base de datos relacional robusto y de alto rendimiento\tcite{【357047729773606†L23-L25】}. \\
+  \addlinespace
+  Almacenamiento & \textbf{MinIO} & Almacenamiento de objetos de alto rendimiento, compatible con S3 y optimizado para IA/ML\tcite{【870299264509201†L414-L421】}. \\
+  \addlinespace
+  Contenedor y despliegue & \textbf{Docker + Kubernetes} & Permiten empaquetar servicios y escalar workers de manera horizontal; se pueden aprovechar GPUs para OCR y LLM. \\
+  \addlinespace
+  Mensajería interna & \textbf{Redis} o RabbitMQ & Servidores de cola utilizados por Celery para distribuir trabajos a los workers. \\
+  \addlinespace
+  Caché & \textbf{Redis} & Cache para contextos y resultados de consultas frecuentes. \\
+  \addlinespace
+  Monitorización & \textbf{Prometheus + Grafana} & Recopilan métricas de workers, uso de memoria y tiempos de cada etapa; permiten ajustar el dimensionamiento. \\
+\end{longtable}
+
+\section{Despliegue y escalado}
+
+Para garantizar un funcionamiento robusto y un escalado flexible, el despliegue utiliza contenedores
+orquestados por Kubernetes.  Las consideraciones principales son:
+
+\begin{itemize}
+  \item \textbf{Contenedores}.  Cada componente (API, workers, Celery, MinIO, Redis, PostgreSQL)
+        se despliega en contenedores individuales.
+  \item \textbf{Kubernetes}.  Se utiliza un orquestador para escalar horizontalmente los workers
+        según la carga y administrar reinicios automáticos.
+  \item \textbf{GPU opcional}.  Los workers de OCR y LLM pueden tener acceso a GPU; Kubernetes
+        programa pods en nodos con GPU mediante etiquetas.
+  \item \textbf{Persistencia}.  MinIO se ejecuta en modo distribuido (al menos 4 nodos para
+        paridad) para tolerancia a fallos.  PostgreSQL se despliega con réplicas y almacenamiento
+        persistente.
+  \item \textbf{Seguridad}.  Se definen roles y políticas de acceso en API y MinIO (por ejemplo,
+        bucket‑policies S3).  Se utiliza TLS para todas las comunicaciones y se almacena el
+        modelo de credenciales en un gestor de secretos (Vault/Secrets).
+  \item \textbf{Actualizaciones}.  Los modelos de IA y los componentes se versionan y se
+        despliegan con \emph{rolling updates} para minimizar tiempos de inactividad.
+\end{itemize}
+
+\section{Consideraciones de rendimiento y calidad}
+
+\begin{itemize}
+  \item \textbf{Optimización de OCR}.  Para documentos mixtos, se utiliza OCR solo en
+        páginas escaneadas.  \texttt{docTR} es eficiente y optimizado tanto para CPU como GPU\tcite{【191659958827309†L64-L73】}.
+
+  \item \textbf{Paralelismo por ventana}.  Las páginas se dividen en ventanas (por ejemplo, 10 páginas)
+        para procesar varias en paralelo mientras se mantiene el contexto entre ventanas.
+
+  \item \textbf{Cuantización de LLM}.  La cuantización a 4 u 8 bits de los modelos LLM reduce la
+        memoria y acelera la inferencia; `llama.cpp` soporta cuantizaciones de 1,5 hasta 8 bits\tcite{【949920289085484†L520-L537】}.
+
+  \item \textbf{Control de desbordamiento}.  Se establecen límites de reducción de fuente (por ejemplo,
+        hasta –10 %) para garantizar que el texto siga siendo legible y que los cambios no
+        distorsionen la paginación.
+
+  \item \textbf{Métricas}.  Se definen métricas como: número de errores detectados y corregidos,
+        tasa de desbordamiento, tiempo de procesamiento por página y número de revisiones manuales
+        necesarias.
+\end{itemize}
+
+\section{Seguridad y privacidad}
+
+\begin{itemize}
+  \item \textbf{Aislamiento de datos}.  Los documentos se almacenan en MinIO con cifrado en
+        reposo y se separan por cliente.
+
+  \item \textbf{Cifrado en tránsito}.  Todas las comunicaciones (API, Celery, MinIO) usan TLS.
+
+  \item \textbf{Control de acceso}.  Los usuarios tienen roles (editor, revisor, administrador).
+        Los tokens o claves se rotan periódicamente.
+
+  \item \textbf{Auditoría}.  Se registra cada acción en la base de datos y se pueden generar
+        trazas por bloque (qué se cambió y por qué).
+
+  \item \textbf{Cumplimiento}.  Se pueden activar configuraciones de MinIO para inmovilizar
+        objetos e impedir su borrado durante períodos definidos (retención)\tcite{【870299264509201†L414-L421】}.
+\end{itemize}
+
+\section{Mantenimiento y extensibilidad}
+
+\begin{itemize}
+  \item \textbf{Actualización de modelos}.  Los modelos de OCR y LLM se actualizan de forma
+        modular.  Los datos de entrenamiento y los glosarios se almacenan para realizar
+        \emph{fine‑tuning} si se dispone de corpus corregidos.
+
+  \item \textbf{Personalización de reglas}.  El sistema permite añadir reglas de estilo
+        específicas (por ejemplo, usar siempre “documento” en lugar de “dossier”) y glosarios
+        por proyecto.
+
+  \item \textbf{Internacionalización}.  \texttt{LanguageTool} admite más de 25 idiomas\tcite{【209408010763411†L104-L119】}; se pueden instalar recursos adicionales.
+
+  \item \textbf{API externa}.  La aplicación expone endpoints REST y GraphQL para integrarse
+        con sistemas externos.
+
+  \item \textbf{Documentación y pruebas}.  El backend se documenta con OpenAPI/Swagger.
+        Se incluyen pruebas unitarias y de integración para cada etapa del pipeline.
+\end{itemize}
+
+\section{Conclusión}
+
+Este documento presenta una \emph{arquitectura integral para un sistema de corrección de estilo} que
+preserva la estructura visual de documentos complejos.  Combina tecnologías de extracción
+(PyMuPDF, Layout Parser, docTR) con correctores deterministas (LanguageTool) y LLMs locales
+ejecutados mediante `llama.cpp`.  El diseño modular y la orquestación asíncrona permiten procesar
+libros de cientos de páginas con fidelidad, garantizando escalabilidad y control de costes.
+
+La adopción de almacenamiento de objetos S3‑compatible (MinIO)\tcite{【870299264509201†L414-L421】}, una base de datos robusta
+(PostgreSQL)\tcite{【357047729773606†L23-L25】} y una cola distribuida (Celery)\tcite{【227726339796927†L13-L19】} asegura que el sistema
+sea extensible, seguro y sostenible.
+
+\end{document}

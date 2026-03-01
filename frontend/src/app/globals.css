@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --carbon: #121212;
+  --carbon-50: #2A2A2A;
+  --carbon-100: #1E1E1E;
+  --carbon-200: #1A1A1A;
+  --krypton: #D4FF00;
+  --krypton-dim: rgba(212, 255, 0, 0.15);
+  --krypton-glow: rgba(212, 255, 0, 0.3);
+  --bruma: #F5F5F7;
+  --plomo: #8E8E93;
+}
+
+body {
+  background: var(--carbon);
+  color: var(--bruma);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--carbon-200);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--carbon-50);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--plomo);
+}
+
+/* Selection highlight */
+::selection {
+  background: var(--krypton-dim);
+  color: var(--krypton);
+}
+
+/* Krypton glow effect for active elements */
+.krypton-glow {
+  box-shadow: 0 0 15px rgba(212, 255, 0, 0.2), 0 0 30px rgba(212, 255, 0, 0.1);
+}
+
+/* Subtle underline for corrections */
+.correction-underline {
+  text-decoration: underline;
+  text-decoration-color: rgba(212, 255, 0, 0.4);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 2px;
+}

@@ -1,0 +1,55 @@
+"""
+Schemas para parches / correcciones.
+"""
+
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel
+
+
+class PatchOperation(BaseModel):
+    """Una operación individual de corrección."""
+    offset: int
+    length: int
+    original: str
+    replacement: str | None = None
+    rule_id: str | None = None
+    category: str | None = None
+    message: str | None = None
+
+
+class PatchListItem(BaseModel):
+    """Item de lista de parches."""
+    id: UUID
+    block_id: UUID
+    block_no: int | None = None
+    version: int
+    source: str
+    original_text: str
+    corrected_text: str
+    review_status: str
+    overflow_flag: bool = False
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PatchDetail(BaseModel):
+    """Detalle completo de un parche."""
+    id: UUID
+    block_id: UUID
+    block_no: int | None = None
+    version: int
+    source: str
+    original_text: str
+    corrected_text: str
+    operations_json: list[dict] = []
+    qa_score: float | None = None
+    overflow_flag: bool = False
+    font_adjusted: bool = False
+    review_status: str
+    applied: bool = False
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

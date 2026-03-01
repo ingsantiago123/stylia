@@ -1,0 +1,281 @@
+"use client";
+
+import { useState, useMemo } from "react";
+import { PatchListItem } from "@/lib/api";
+
+interface CorrectionHistoryProps {
+  corrections: PatchListItem[];
+}
+
+type FilterSource = "all" | "languagetool" | "llm";
+
+export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
+  const [filterSource, setFilterSource] = useState<FilterSource>("all");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
+
+  const filtered = useMemo(() => {
+    let result = corrections;
+    if (filterSource !== "all") {
+      result = result.filter((c) => c.source === filterSource);
+    }
+    if (searchTerm.trim()) {
+      const term = searchTerm.toLowerCase();
+      result = result.filter(
+        (c) =>
+          c.original_text.toLowerCase().includes(term) ||
+          c.corrected_text.toLowerCase().includes(term)
+      );
+    }
+    return result;
+  }, [corrections, filterSource, searchTerm]);
+
+  const stats = useMemo(() => {
+    const lt = corrections.filter((c) => c.source === "languagetool").length;
+    const llm = corrections.filter((c) => c.source === "llm").length;
+    return { total: corrections.length, languagetool: lt, llm };
+  }, [corrections]);
+
+  if (corrections.length === 0) {
+    return (
+      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-8 text-center">
+        <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-carbon-200 flex items-center justify-center">
+          <svg className="w-6 h-6 text-plomo" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        </div>
+        <p className="text-bruma font-medium">Sin correcciones</p>
+        <p className="text-plomo text-sm mt-1">El documento no necesitó correcciones o aún se está procesando</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Stats bar */}
+      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-4">
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          {/* Counters */}
+          <div className="flex items-center gap-6">
+            <div className="text-center">
+              <div className="text-2xl font-bold text-krypton">{stats.total}</div>
+              <div className="text-[10px] uppercase tracking-wider text-plomo">Total</div>
+            </div>
+            <div className="h-8 w-px bg-carbon-300" />
+            <div className="text-center">
+              <div className="text-lg font-semibold text-bruma">{stats.languagetool}</div>
+              <div className="text-[10px] uppercase tracking-wider text-plomo">LanguageTool</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-semibold text-bruma">{stats.llm}</div>
+              <div className="text-[10px] uppercase tracking-wider text-plomo">LLM</div>
+            </div>
+          </div>
+
+          {/* Filters */}
+          <div className="flex items-center gap-2">
+            {(["all", "languagetool", "llm"] as FilterSource[]).map((f) => (
+              <button
+                key={f}
+                onClick={() => setFilterSource(f)}
+                className={`
+                  px-3 py-1.5 text-xs font-medium rounded-lg transition-all
+                  ${filterSource === f
+                    ? "bg-krypton text-carbon"
+                    : "bg-carbon-200 text-plomo hover:text-bruma hover:bg-carbon-300"
+                  }
+                `}
+              >
+                {f === "all" ? "Todas" : f === "languagetool" ? "LanguageTool" : "LLM"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Search */}
+        <div className="mt-3 relative">
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-plomo" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Buscar en correcciones..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full bg-carbon-200 border border-carbon-300 rounded-lg pl-10 pr-4 py-2 text-sm text-bruma placeholder:text-plomo focus:outline-none focus:border-krypton/50 focus:ring-1 focus:ring-krypton/20 transition-colors"
+          />
+        </div>
+      </div>
+
+      {/* Corrections list */}
+      <div className="space-y-2">
+        {filtered.length === 0 ? (
+          <div className="text-center py-8 text-plomo text-sm">
+            No se encontraron correcciones con ese filtro
+          </div>
+        ) : (
+          filtered.map((patch, index) => (
+            <CorrectionCard
+              key={patch.id}
+              patch={patch}
+              index={index + 1}
+              isExpanded={expandedId === patch.id}
+              onToggle={() => setExpandedId(expandedId === patch.id ? null : patch.id)}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CorrectionCard({
+  patch,
+  index,
+  isExpanded,
+  onToggle,
+}: {
+  patch: PatchListItem;
+  index: number;
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
+  // Simple word-level diff
+  const diffWords = useMemo(() => {
+    const origWords = patch.original_text.split(/(\s+)/);
+    const corrWords = patch.corrected_text.split(/(\s+)/);
+
+    const maxLen = Math.max(origWords.length, corrWords.length);
+    const origDiff: { text: string; changed: boolean }[] = [];
+    const corrDiff: { text: string; changed: boolean }[] = [];
+
+    for (let i = 0; i < maxLen; i++) {
+      const ow = origWords[i] || "";
+      const cw = corrWords[i] || "";
+      const changed = ow !== cw;
+      if (ow) origDiff.push({ text: ow, changed });
+      if (cw) corrDiff.push({ text: cw, changed });
+    }
+
+    return { origDiff, corrDiff };
+  }, [patch.original_text, patch.corrected_text]);
+
+  return (
+    <div
+      className={`
+        bg-carbon-100 border rounded-xl transition-all duration-300 overflow-hidden cursor-pointer
+        ${isExpanded ? "border-krypton/40 shadow-[0_0_20px_rgba(212,255,0,0.05)]" : "border-carbon-300 hover:border-carbon-200"}
+      `}
+      onClick={onToggle}
+    >
+      {/* Header */}
+      <div className="px-4 py-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="text-xs font-mono text-plomo w-6 text-right flex-shrink-0">
+            #{index}
+          </span>
+          <span
+            className={`
+              inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] uppercase tracking-wider font-semibold flex-shrink-0
+              ${patch.source === "languagetool"
+                ? "bg-blue-900/30 text-blue-400"
+                : "bg-purple-900/30 text-purple-400"
+              }
+            `}
+          >
+            {patch.source === "languagetool" ? "LT" : "LLM"}
+          </span>
+          <span className="text-sm text-plomo truncate">
+            Bloque #{patch.block_no || "?"}
+          </span>
+          {patch.overflow_flag && (
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-yellow-900/30 text-yellow-500 text-[10px] font-medium flex-shrink-0">
+              OVERFLOW
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className={`
+            inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium
+            ${patch.review_status === "accepted" ? "bg-krypton/15 text-krypton" : ""}
+            ${patch.review_status === "rejected" ? "bg-red-900/20 text-red-400" : ""}
+            ${patch.review_status === "pending" ? "bg-carbon-200 text-plomo" : ""}
+          `}>
+            {patch.review_status === "accepted" && "✓ Aceptada"}
+            {patch.review_status === "rejected" && "✕ Rechazada"}
+            {patch.review_status === "pending" && "● Pendiente"}
+          </span>
+          <svg
+            className={`w-4 h-4 text-plomo transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+          </svg>
+        </div>
+      </div>
+
+      {/* Expanded content */}
+      {isExpanded && (
+        <div className="px-4 pb-4 space-y-3" onClick={(e) => e.stopPropagation()}>
+          <div className="h-px bg-carbon-300" />
+
+          {/* Diff view */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* Original */}
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2 h-2 rounded-full bg-red-500" />
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-plomo">Original</span>
+              </div>
+              <div className="bg-carbon-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words border border-carbon-300">
+                {diffWords.origDiff.map((w, i) => (
+                  <span
+                    key={i}
+                    className={w.changed ? "bg-red-900/40 text-red-300 rounded px-0.5" : "text-bruma/80"}
+                  >
+                    {w.text}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {/* Corrected */}
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2 h-2 rounded-full bg-krypton" />
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-plomo">Corregido</span>
+              </div>
+              <div className="bg-carbon-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words border border-krypton/20">
+                {diffWords.corrDiff.map((w, i) => (
+                  <span
+                    key={i}
+                    className={w.changed ? "bg-krypton/20 text-krypton rounded px-0.5" : "text-bruma/80"}
+                  >
+                    {w.text}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Metadata */}
+          <div className="flex items-center gap-4 text-[11px] text-plomo pt-1">
+            <span>Versión {patch.version}</span>
+            <span>·</span>
+            <span>
+              {new Date(patch.created_at).toLocaleDateString("es", {
+                day: "numeric",
+                month: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
