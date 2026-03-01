@@ -143,8 +143,6 @@ services:
       - "3000:3000"
     depends_on:
       - backend
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
     restart: unless-stopped
 
 volumes:

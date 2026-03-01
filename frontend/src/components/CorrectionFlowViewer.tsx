@@ -43,8 +43,7 @@ export function CorrectionFlowViewer({ docId }: CorrectionFlowViewerProps) {
     const fetchFlow = async () => {
       try {
         setLoading(true);
-        // Si no hay documento real, usar demo
-        const data = await getCorrectionFlow(docId === "new" ? "demo" : "demo");
+        const data = await getCorrectionFlow(docId === "new" ? "demo" : docId);
         setFlowData(data);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Error cargando flujo");

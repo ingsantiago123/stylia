@@ -405,19 +405,15 @@ async def _get_pages_summary(db: AsyncSession, doc_id: UUID) -> dict:
 
 
 @router.get("/documents/{doc_id}/correction-flow")
-async def get_correction_flow(doc_id: str):
+async def get_correction_flow(doc_id: str, db: AsyncSession = Depends(get_db)):
     """
-    DEMO: Muestra cómo será el flujo de corrección con ChatGPT API.
-    Simula el contexto acumulado y las peticiones paso a paso.
+    Flujo de corrección de un documento.
+    - Para doc_id="demo": devuelve datos simulados de ejemplo.
+    - Para un UUID real: lee los parches reales de la BD.
     """
-    # Por ahora usamos datos simulados
-    # En producción, leería el contexto real del documento
-    
     if doc_id == "demo":
-        # Generar flujo de ejemplo
         service, sample_doc_id, requests = generate_sample_document_flow()
         summary = service.get_context_summary(sample_doc_id)
-        
         return {
             "document_id": doc_id,
             "flow_type": "simulation",
@@ -433,7 +429,7 @@ async def get_correction_flow(doc_id: str):
                         {
                             "block_no": cb.block_no,
                             "corrected_text": cb.corrected_text[:100] + "..." if len(cb.corrected_text) > 100 else cb.corrected_text
-                        } 
+                        }
                         for cb in req.context_blocks
                     ],
                     "prompt": req.prompt,
@@ -442,28 +438,79 @@ async def get_correction_flow(doc_id: str):
                 for i, req in enumerate(requests)
             ]
         }
-    else:
-        # Intentar obtener contexto real del documento
-        if doc_id in context_service.contexts:
-            history = context_service.get_correction_history(doc_id)
-            summary = context_service.get_context_summary(doc_id)
-            
-            return {
-                "document_id": doc_id,
-                "flow_type": "real",
-                "summary": summary,
-                "requests": [
-                    {
-                        "step": i + 1,
-                        "type": req.request_type,
-                        "block_no": req.block_current.block_no,
-                        "original_text": req.block_current.original_text,
-                        "context_blocks_count": len(req.context_blocks),
-                        "prompt": req.prompt if len(req.prompt) < 500 else req.prompt[:500] + "...",
-                        "timestamp": req.timestamp.isoformat(),
-                    }
-                    for i, req in enumerate(history)
-                ]
-            }
-        else:
-            raise HTTPException(404, "No hay contexto de corrección para este documento")
+
+    # Documento real — leer parches de la BD
+    try:
+        doc_uuid = UUID(doc_id)
+    except ValueError:
+        raise HTTPException(400, "ID de documento inválido")
+
+    doc_result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    doc = doc_result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(404, "Documento no encontrado")
+
+    # Obtener todos los parches del documento ordenados por creación
+    patches_result = await db.execute(
+        select(Patch)
+        .join(Block, Patch.block_id == Block.id)
+        .join(Page, Block.page_id == Page.id)
+        .where(Page.doc_id == doc_uuid)
+        .order_by(Patch.created_at)
+    )
+    patches = patches_result.scalars().all()
+
+    if not patches:
+        raise HTTPException(404, "Este documento aún no tiene correcciones registradas")
+
+    lt_count = sum(1 for p in patches if p.source == "languagetool")
+    gpt_count = sum(1 for p in patches if "chatgpt" in p.source)
+
+    # Reconstruir el flujo con contexto acumulado
+    corrected_context: list[str] = []
+    requests_list = []
+
+    for i, patch in enumerate(patches):
+        # Paso LanguageTool
+        if patch.operations_json:
+            requests_list.append({
+                "step": len(requests_list) + 1,
+                "type": "languagetool",
+                "block_no": i,
+                "original_text": patch.original_text,
+                "context_blocks_count": 0,
+                "prompt": f"LanguageTool: {len(patch.operations_json)} correcciones aplicadas",
+                "timestamp": patch.created_at.isoformat(),
+            })
+
+        # Paso ChatGPT (si el source lo indica)
+        if "chatgpt" in patch.source:
+            ctx_preview = [
+                {"block_no": j, "corrected_text": t[:100] + "..." if len(t) > 100 else t}
+                for j, t in enumerate(corrected_context[-3:])
+            ]
+            requests_list.append({
+                "step": len(requests_list) + 1,
+                "type": "chatgpt_style",
+                "block_no": i,
+                "original_text": patch.original_text,
+                "corrected_text": patch.corrected_text,
+                "context_blocks_count": len(corrected_context),
+                "context_preview": ctx_preview,
+                "prompt": f"Mejora de estilo con contexto de {len(corrected_context)} párrafos previos",
+                "timestamp": patch.created_at.isoformat(),
+            })
+
+        corrected_context.append(patch.corrected_text)
+
+    return {
+        "document_id": doc_id,
+        "flow_type": "real",
+        "summary": {
+            "total_blocks": len(patches),
+            "total_requests": len(requests_list),
+            "languagetool_requests": lt_count,
+            "chatgpt_requests": gpt_count,
+        },
+        "requests": requests_list,
+    }

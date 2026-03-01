@@ -2,7 +2,9 @@
  * Cliente API STYLIA — Comunicación con el backend FastAPI.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+// En producción/ngrok el frontend proxea las llamadas al backend via Next.js rewrites.
+// En desarrollo local con `npm run dev` puede usarse NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
 
 export interface DocumentUploadResponse {
   id: string;

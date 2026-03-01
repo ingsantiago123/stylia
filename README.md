@@ -154,6 +154,64 @@ OPENAI_MAX_TOKENS=1000
 OPENAI_TEMPERATURE=0.3
 ```
 
+## Compartir con amigos (ngrok)
+
+Puedes exponer la aplicación temporalmente a internet para que alguien externo la pruebe sin necesidad de despliegue en servidor.
+
+### Requisitos previos
+
+1. Crear cuenta gratuita en [ngrok.com](https://ngrok.com) y obtener el auth token en el [dashboard](https://dashboard.ngrok.com/get-started/your-authtoken).
+2. Descargar ngrok desde [ngrok.com/download](https://ngrok.com/download) (versión ≥ 3.20).
+
+### Pasos
+
+**1. Instala ngrok (solo la primera vez):**
+```powershell
+# Windows — descarga el ZIP y extrae ngrok.exe a una carpeta de tu elección
+# O usa winget (puede instalar versión antigua; si falla, descarga manualmente):
+winget install ngrok.ngrok
+```
+
+**2. Configura tu auth token (solo la primera vez):**
+```powershell
+ngrok config add-authtoken TU_TOKEN_DE_NGROK
+```
+
+**3. Levanta los servicios:**
+```powershell
+docker compose up -d
+```
+
+**4. Arranca el túnel:**
+```powershell
+ngrok http 3000
+```
+
+Ngrok mostrará en la terminal una línea como:
+```
+Forwarding  https://xxxx-xxxx.ngrok-free.app -> http://localhost:3000
+```
+
+**5. Comparte esa URL** con tus amigos. Al entrar verán una pantalla de ngrok con un botón "Visit Site" (es normal en el plan gratuito, solo hay que hacer clic una vez).
+
+### Notas importantes
+
+- La URL cambia cada vez que reinicias ngrok (plan gratuito). Si la quieres fija, necesitas plan de pago.
+- El túnel solo funciona mientras ngrok esté corriendo en tu máquina. Al cerrar la terminal, la URL deja de funcionar.
+- Si `ngrok` no se reconoce tras la instalación, abre una **nueva terminal** (el PATH se actualiza solo al reiniciar la sesión).
+- La app enruta todas las llamadas API internamente (`/api/v1/*` → backend), por lo que solo necesitas exponer el puerto 3000.
+
+### Fix del worker tras cada reinicio
+
+Hasta que se reconstruya la imagen Docker por completo, el worker pierde el paquete `openai` al reiniciar. Ejecuta esto cada vez que levantes los servicios:
+
+```powershell
+docker exec correctordeestilos-worker-1 pip install openai==1.51.0 httpx==0.27.2 -q
+docker restart correctordeestilos-worker-1
+```
+
+---
+
 ## Fases de implementación
 
 - [x] **Fase 1** — Pipeline mínimo: DOCX entra, se corrige, sale DOCX+PDF corregido
