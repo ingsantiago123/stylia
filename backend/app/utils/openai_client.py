@@ -56,6 +56,7 @@ class OpenAIClient:
             if len(selected) >= settings.openai_max_context_blocks:
                 break
 
+        # Puede ocurrir cuando context_blocks tiene entradas vacías o espacios.
         if not selected:
             return ""
 
@@ -142,7 +143,7 @@ Formato de respuesta JSON requerido:
             content = response.choices[0].message.content
             
             if not content:
-                logger.warning("OpenAI devolvió contenido vacío")
+                logger.error("OpenAI devolvió contenido vacío")
                 return original_text
 
             # Parsear y validar JSON response
@@ -174,7 +175,7 @@ Formato de respuesta JSON requerido:
             return original_text
         except Exception as e:
             logger.error(f"Error al llamar OpenAI API: {e}")
-            return None
+            return original_text
     
     def _simulate_correction(self, text: str) -> str:
         """Simulación de corrección cuando no hay API key."""
