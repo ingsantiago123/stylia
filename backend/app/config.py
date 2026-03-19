@@ -47,8 +47,13 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_max_tokens: int = 500
     openai_temperature: float = 0.3
+    # Máximo de bloques previos incluidos en cada prompt (se aplican ambos límites y se detiene al alcanzar cualquiera).
+    # Valor inicial pensado para mantener coherencia sin inflar costo/tokens.
     openai_max_context_blocks: int = 8
+    # Límite de caracteres acumulados para el contexto (se aplican ambos límites y se detiene al alcanzar cualquiera).
+    # Valor inicial pensado para prompts compactos y estables en gpt-4o-mini.
     openai_max_context_chars: int = 2400
+    # Umbral 0.0-1.0 para aceptar correcciones; 0.8 implica al menos 80% de similitud.
     openai_min_similarity_ratio: float = 0.8
 
     # --- LLM (llama.cpp) - Fase 2 ---

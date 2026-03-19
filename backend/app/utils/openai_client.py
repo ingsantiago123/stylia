@@ -3,7 +3,6 @@ Cliente OpenAI para corrección de estilo con contexto.
 Usa gpt-4o-mini para ser económico y eficiente.
 """
 
-import json
 import logging
 from difflib import SequenceMatcher
 from typing import Optional
@@ -13,12 +12,14 @@ from pydantic import BaseModel, ValidationError
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+# Se compara solo una muestra para mantener costo computacional bajo en textos largos.
+MAX_SIMILARITY_COMPARISON_CHARS = 1500
 
 
 class StyleCorrectionResponse(BaseModel):
     corrected_text: str
     changes_made: list[str] = []
-    character_count: int
+    character_count: Optional[int] = None
 
 
 class OpenAIClient:
@@ -48,9 +49,17 @@ class OpenAIClient:
             clean = block.strip()
             if not clean:
                 continue
-            projected = used_chars + len(clean)
-            if selected and projected > settings.openai_max_context_chars:
+            remaining_chars = settings.openai_max_context_chars - used_chars
+            if remaining_chars <= 0:
                 break
+            if len(clean) > remaining_chars:
+                logger.warning(
+                    "Bloque de contexto truncado de %s a %s caracteres",
+                    len(clean),
+                    remaining_chars,
+                )
+                clean = clean[:remaining_chars]
+            projected = used_chars + len(clean)
             selected.append(clean)
             used_chars = projected
             if len(selected) >= settings.openai_max_context_blocks:
@@ -60,6 +69,7 @@ class OpenAIClient:
         if not selected:
             return ""
 
+        # Se mantiene en español porque el corrector está orientado a documentos en español.
         selected.reverse()
         context_lines = [f"Párrafo {i}: {block}" for i, block in enumerate(selected, 1)]
         return (
@@ -70,7 +80,16 @@ class OpenAIClient:
     @staticmethod
     def _is_semantically_safe(original_text: str, corrected_text: str) -> bool:
         """Valida cambios extremos para evitar desviación de significado."""
-        ratio = SequenceMatcher(None, original_text, corrected_text).ratio()
+        compare_len = min(
+            len(original_text),
+            len(corrected_text),
+            MAX_SIMILARITY_COMPARISON_CHARS,
+        )
+        ratio = SequenceMatcher(
+            None,
+            original_text[:compare_len],
+            corrected_text[:compare_len],
+        ).ratio()
         return ratio >= settings.openai_min_similarity_ratio
         
     def correct_text_style(
@@ -147,8 +166,7 @@ Formato de respuesta JSON requerido:
                 return original_text
 
             # Parsear y validar JSON response
-            correction_data = json.loads(content)
-            parsed = StyleCorrectionResponse.model_validate(correction_data)
+            parsed = StyleCorrectionResponse.model_validate_json(content)
             corrected_text = parsed.corrected_text
             
             # Validar longitud
@@ -162,15 +180,16 @@ Formato de respuesta JSON requerido:
                 return original_text
                 
             logger.info(f"OpenAI: {len(parsed.changes_made)} cambios aplicados")
-            logger.info(
-                "OpenAI usage: prompt=%s completion=%s total=%s",
-                getattr(response.usage, "prompt_tokens", 0),
-                getattr(response.usage, "completion_tokens", 0),
-                getattr(response.usage, "total_tokens", 0),
-            )
+            if response.usage:
+                logger.info(
+                    "OpenAI usage: prompt=%s completion=%s total=%s",
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                    response.usage.total_tokens,
+                )
             return corrected_text
             
-        except (json.JSONDecodeError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Respuesta OpenAI inválida: {e}")
             return original_text
         except Exception as e:
