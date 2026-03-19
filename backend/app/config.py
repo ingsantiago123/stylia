@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_max_tokens: int = 500
     openai_temperature: float = 0.3
+    openai_max_context_blocks: int = 8
+    openai_max_context_chars: int = 2400
+    openai_min_similarity_ratio: float = 0.8
 
     # --- LLM (llama.cpp) - Fase 2 ---
     llama_url: str = "http://localhost:8080"

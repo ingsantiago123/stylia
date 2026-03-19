@@ -5,12 +5,20 @@ Usa gpt-4o-mini para ser económico y eficiente.
 
 import json
 import logging
+from difflib import SequenceMatcher
 from typing import Optional
 
 from openai import OpenAI
+from pydantic import BaseModel, ValidationError
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class StyleCorrectionResponse(BaseModel):
+    corrected_text: str
+    changes_made: list[str] = []
+    character_count: int
 
 
 class OpenAIClient:
@@ -28,6 +36,41 @@ class OpenAIClient:
         else:
             self.client = None
             logger.warning("OpenAI API key no configurada")
+
+    def _build_context_text(self, context_blocks: list[str]) -> str:
+        """Construye contexto acotado para controlar consumo de tokens/caracteres."""
+        if not context_blocks:
+            return ""
+
+        selected: list[str] = []
+        used_chars = 0
+        for block in reversed(context_blocks):
+            clean = block.strip()
+            if not clean:
+                continue
+            projected = used_chars + len(clean)
+            if selected and projected > settings.openai_max_context_chars:
+                break
+            selected.append(clean)
+            used_chars = projected
+            if len(selected) >= settings.openai_max_context_blocks:
+                break
+
+        if not selected:
+            return ""
+
+        selected.reverse()
+        context_lines = [f"Párrafo {i}: {block}" for i, block in enumerate(selected, 1)]
+        return (
+            "\n\nCONTEXTO PREVIO (párrafos ya corregidos):\n"
+            f"{chr(10).join(context_lines)}\n\n"
+        )
+
+    @staticmethod
+    def _is_semantically_safe(original_text: str, corrected_text: str) -> bool:
+        """Valida cambios extremos para evitar desviación de significado."""
+        ratio = SequenceMatcher(None, original_text, corrected_text).ratio()
+        return ratio >= settings.openai_min_similarity_ratio
         
     def correct_text_style(
         self,
@@ -50,13 +93,8 @@ class OpenAIClient:
             logger.warning("OpenAI cliente no disponible, usando simulación")
             return self._simulate_correction(original_text)
             
-        # Construir contexto
-        context_text = ""
-        if context_blocks:
-            context_lines = []
-            for i, block in enumerate(context_blocks[-3:], 1):  # Últimos 3 bloques
-                context_lines.append(f"Párrafo {i}: {block}")
-            context_text = f"\\n\\nCONTEXTO PREVIO (párrafos ya corregidos):\\n{chr(10).join(context_lines)}\\n\\n"
+        # Construir contexto acotado por configuración
+        context_text = self._build_context_text(context_blocks)
         
         # Calcular longitud máxima permitida
         max_length = int(len(original_text) * max_length_ratio)
@@ -103,19 +141,37 @@ Formato de respuesta JSON requerido:
             
             content = response.choices[0].message.content
             
-            # Parsear JSON response
+            if not content:
+                logger.warning("OpenAI devolvió contenido vacío")
+                return original_text
+
+            # Parsear y validar JSON response
             correction_data = json.loads(content)
-            corrected_text = correction_data.get("corrected_text", original_text)
+            parsed = StyleCorrectionResponse.model_validate(correction_data)
+            corrected_text = parsed.corrected_text
             
             # Validar longitud
             if len(corrected_text) > max_length:
                 logger.warning(f"Texto corregido excede longitud máxima ({len(corrected_text)} > {max_length})")
                 return original_text  # Retornar original si excede
+
+            # Validar coherencia semántica aproximada
+            if not self._is_semantically_safe(original_text, corrected_text):
+                logger.warning("OpenAI devolvió una corrección demasiado distante; se conserva texto original")
+                return original_text
                 
-            logger.info(f"OpenAI: {len(correction_data.get('changes_made', []))} cambios aplicados")
-            logger.info(f"OpenAI response: {correction_data.get('changes_made', [])}")
+            logger.info(f"OpenAI: {len(parsed.changes_made)} cambios aplicados")
+            logger.info(
+                "OpenAI usage: prompt=%s completion=%s total=%s",
+                getattr(response.usage, "prompt_tokens", 0),
+                getattr(response.usage, "completion_tokens", 0),
+                getattr(response.usage, "total_tokens", 0),
+            )
             return corrected_text
             
+        except (json.JSONDecodeError, ValidationError) as e:
+            logger.error(f"Respuesta OpenAI inválida: {e}")
+            return original_text
         except Exception as e:
             logger.error(f"Error al llamar OpenAI API: {e}")
             return None

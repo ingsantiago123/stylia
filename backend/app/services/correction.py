@@ -248,7 +248,7 @@ def correct_docx_sync(
         # === PASO 2: ChatGPT (estilo, claridad, fluidez) ===
         chatgpt_text = openai_client.correct_text_style(
             original_text=post_lt_text,
-            context_blocks=corrected_context[-3:],
+            context_blocks=corrected_context,
             max_length_ratio=1.15,
         )
 
