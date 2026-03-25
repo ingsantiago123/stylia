@@ -6,15 +6,18 @@ import {
   getDocument,
   getDocumentCorrections,
   listPages,
+  getProfile,
   downloadPdf,
   downloadDocx,
   DocumentDetail,
   PatchListItem,
   PageListItem,
+  StyleProfile,
 } from "@/lib/api";
 import { PipelineFlow } from "@/components/PipelineFlow";
 import { CorrectionHistory } from "@/components/CorrectionHistory";
 import { CorrectionFlowViewer } from "@/components/CorrectionFlowViewer";
+import { DiffCompareView } from "@/components/DiffCompareView";
 
 type Tab = "pipeline" | "corrections" | "pages" | "api-flow";
 
@@ -26,20 +29,23 @@ export default function DocumentDetailPage() {
   const [doc, setDoc] = useState<DocumentDetail | null>(null);
   const [corrections, setCorrections] = useState<PatchListItem[]>([]);
   const [pages, setPages] = useState<PageListItem[]>([]);
+  const [profile, setProfile] = useState<StyleProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("pipeline");
 
   const fetchData = useCallback(async () => {
     try {
-      const [docData, correctionsData, pagesData] = await Promise.all([
+      const [docData, correctionsData, pagesData, profileData] = await Promise.all([
         getDocument(docId),
         getDocumentCorrections(docId).catch(() => []),
         listPages(docId).catch(() => []),
+        getProfile(docId).catch(() => null),
       ]);
       setDoc(docData);
       setCorrections(correctionsData);
       setPages(pagesData);
+      setProfile(profileData);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error");
@@ -168,7 +174,7 @@ export default function DocumentDetailPage() {
           { key: "pipeline" as Tab, label: "Resumen", icon: "◎" },
           { key: "corrections" as Tab, label: `Correcciones (${corrections.length})`, icon: "✎" },
           { key: "api-flow" as Tab, label: "Flujo API", icon: "⚡" },
-          { key: "pages" as Tab, label: `Páginas (${pages.length})`, icon: "▣" },
+          { key: "pages" as Tab, label: `Comparar (${corrections.length})`, icon: "▣" },
         ]).map((tab) => (
           <button
             key={tab.key}
@@ -189,7 +195,7 @@ export default function DocumentDetailPage() {
 
       {/* Tab content */}
       {activeTab === "pipeline" && (
-        <SummaryTab doc={doc} corrections={corrections} pages={pages} isProcessing={isProcessing} />
+        <SummaryTab doc={doc} corrections={corrections} pages={pages} isProcessing={isProcessing} profile={profile} />
       )}
 
       {activeTab === "corrections" && (
@@ -204,20 +210,65 @@ export default function DocumentDetailPage() {
                 <span className="text-krypton text-sm">⚡</span>
               </div>
               <div>
-                <h3 className="text-sm font-semibold text-bruma mb-1">Diseño del flujo ChatGPT API</h3>
+                <h3 className="text-sm font-semibold text-bruma mb-1">Flujo de corrección</h3>
                 <p className="text-xs text-plomo">
-                  Esta vista muestra cómo se enviará cada bloque de texto a ChatGPT con contexto acumulado 
-                  para mantener consistencia de estilo. Cada petición incluye los párrafos anteriores ya corregidos.
+                  Muestra cómo se procesó cada párrafo: LanguageTool (ortografía) → LLM (estilo con contexto acumulado).
+                  {profile ? " Cada petición al LLM usa el perfil editorial para parametrizar el prompt." : " Sin perfil editorial — prompt genérico."}
                 </p>
               </div>
             </div>
           </div>
+
+          {/* Profile prompt preview */}
+          {profile && (
+            <div className="bg-carbon-100 border border-krypton/20 rounded-xl p-5">
+              <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-3">Configuración del prompt LLM</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <span className="text-[10px] text-plomo uppercase tracking-wider block mb-2">Parámetros del perfil enviados al LLM</span>
+                  <div className="bg-carbon-200 border border-carbon-300 rounded-lg px-4 py-3 text-xs font-mono text-bruma/80 space-y-1">
+                    <div>PERFIL: <span className="text-krypton">{profile.register}</span> | Intervención: <span className="text-krypton">{profile.intervention_level}</span></div>
+                    <div>Audiencia: <span className="text-krypton">{profile.audience_type || "general"}</span> ({profile.audience_expertise})</div>
+                    <div>Tono: <span className="text-krypton">{profile.tone || "neutro"}</span></div>
+                    <div>Preservar voz: <span className="text-krypton">{profile.preserve_author_voice ? "sí" : "no"}</span></div>
+                    <div>Max reescritura: <span className="text-krypton">{Math.round(profile.max_rewrite_ratio * 100)}%</span></div>
+                    {profile.style_priorities.length > 0 && (
+                      <div>Prioridades: <span className="text-krypton">{profile.style_priorities.join(", ")}</span></div>
+                    )}
+                    {profile.protected_terms.length > 0 && (
+                      <div>Proteger: <span className="text-purple-400">{profile.protected_terms.join(", ")}</span></div>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <span className="text-[10px] text-plomo uppercase tracking-wider block mb-2">System prompt (resumen)</span>
+                  <div className="bg-carbon-200 border border-carbon-300 rounded-lg px-4 py-3 text-xs text-bruma/70 space-y-1">
+                    <p>El LLM recibe un system prompt estático con:</p>
+                    <ul className="list-disc list-inside space-y-0.5 text-plomo">
+                      <li>Reglas de corrección (no cambiar significado, respetar intervención)</li>
+                      <li>9 categorías de cambios (redundancia, claridad, léxico...)</li>
+                      <li>3 niveles de severidad (crítico, importante, sugerencia)</li>
+                      <li>Schema JSON de respuesta estructurada</li>
+                      <li>Ejemplos de corrección y de no-corrección</li>
+                    </ul>
+                    <p className="mt-2 text-plomo">Cada párrafo se envía con el perfil codificado + contexto del párrafo anterior.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           <CorrectionFlowViewer docId={doc.id} />
         </div>
       )}
 
       {activeTab === "pages" && (
-        <PagesTab pages={pages} docId={doc.id} />
+        <DiffCompareView
+          corrections={corrections}
+          totalPages={doc.total_pages}
+          docId={doc.id}
+          docStatus={doc.status}
+        />
       )}
     </div>
   );
@@ -256,17 +307,141 @@ function StatCard({ label, value, isStatus, highlight }: {
   );
 }
 
-function SummaryTab({ doc, corrections, pages, isProcessing }: {
+const CATEGORY_LABELS: Record<string, string> = {
+  redundancia: "Redundancia",
+  claridad: "Claridad",
+  registro: "Registro",
+  cohesion: "Cohesión",
+  lexico: "Léxico",
+  estructura: "Estructura",
+  puntuacion: "Puntuación",
+  ritmo: "Ritmo",
+  muletilla: "Muletilla",
+};
+
+const CATEGORY_COLORS: Record<string, string> = {
+  redundancia: "bg-orange-500",
+  claridad: "bg-blue-500",
+  registro: "bg-indigo-500",
+  cohesion: "bg-cyan-500",
+  lexico: "bg-teal-500",
+  estructura: "bg-violet-500",
+  puntuacion: "bg-amber-500",
+  ritmo: "bg-pink-500",
+  muletilla: "bg-rose-500",
+};
+
+const INTERVENTION_LABELS: Record<string, { label: string; color: string }> = {
+  minima: { label: "Mínima", color: "bg-emerald-900/30 text-emerald-400" },
+  sutil: { label: "Sutil", color: "bg-blue-900/30 text-blue-400" },
+  moderada: { label: "Moderada", color: "bg-yellow-900/30 text-yellow-400" },
+  agresiva: { label: "Agresiva", color: "bg-red-900/30 text-red-400" },
+};
+
+function SummaryTab({ doc, corrections, pages, isProcessing, profile }: {
   doc: DocumentDetail;
   corrections: PatchListItem[];
   pages: PageListItem[];
   isProcessing: boolean;
+  profile: StyleProfile | null;
 }) {
   const ltCount = corrections.filter((c) => c.source === "languagetool").length;
-  const llmCount = corrections.filter((c) => c.source === "llm").length;
+  const llmCount = corrections.filter((c) => c.source.includes("chatgpt") || c.source === "llm").length;
+
+  // Category breakdown
+  const categoryBreakdown = corrections.reduce<Record<string, number>>((acc, c) => {
+    if (c.category) {
+      acc[c.category] = (acc[c.category] || 0) + 1;
+    }
+    return acc;
+  }, {});
+  const hasCategories = Object.keys(categoryBreakdown).length > 0;
+
+  // Severity breakdown
+  const severityBreakdown = corrections.reduce<Record<string, number>>((acc, c) => {
+    if (c.severity) {
+      acc[c.severity] = (acc[c.severity] || 0) + 1;
+    }
+    return acc;
+  }, {});
+
+  // Average confidence
+  const confidences = corrections.filter((c) => c.confidence != null).map((c) => c.confidence!);
+  const avgConfidence = confidences.length > 0
+    ? Math.round((confidences.reduce((a, b) => a + b, 0) / confidences.length) * 100)
+    : null;
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* Profile card */}
+      {profile ? (
+        <div className="bg-carbon-100 border border-krypton/20 rounded-xl p-5 md:col-span-2">
+          <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-4">Perfil editorial</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4">
+            <div>
+              <span className="text-plomo text-[10px] uppercase tracking-wider block mb-1">Preset</span>
+              <span className="text-krypton font-semibold text-sm">{profile.preset_name || "Custom"}</span>
+            </div>
+            <div>
+              <span className="text-plomo text-[10px] uppercase tracking-wider block mb-1">Intervención</span>
+              <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${INTERVENTION_LABELS[profile.intervention_level]?.color || "bg-carbon-200 text-plomo"}`}>
+                {INTERVENTION_LABELS[profile.intervention_level]?.label || profile.intervention_level}
+              </span>
+            </div>
+            <div>
+              <span className="text-plomo text-[10px] uppercase tracking-wider block mb-1">Registro</span>
+              <span className="text-bruma text-sm capitalize">{profile.register}</span>
+            </div>
+            <div>
+              <span className="text-plomo text-[10px] uppercase tracking-wider block mb-1">Tono</span>
+              <span className="text-bruma text-sm capitalize">{profile.tone || "neutro"}</span>
+            </div>
+            <div>
+              <span className="text-plomo text-[10px] uppercase tracking-wider block mb-1">Audiencia</span>
+              <span className="text-bruma text-sm capitalize">{profile.audience_type || "general"}</span>
+            </div>
+            <div>
+              <span className="text-plomo text-[10px] uppercase tracking-wider block mb-1">Max reescritura</span>
+              <span className="text-bruma text-sm">{Math.round(profile.max_rewrite_ratio * 100)}%</span>
+            </div>
+          </div>
+          {/* Protected terms & priorities */}
+          <div className="mt-4 pt-3 border-t border-carbon-300 flex flex-wrap gap-4">
+            {profile.style_priorities && profile.style_priorities.length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-plomo text-[10px] uppercase tracking-wider">Prioridades:</span>
+                {profile.style_priorities.map((p) => (
+                  <span key={p} className="text-[10px] bg-krypton/10 text-krypton px-2 py-0.5 rounded">{p}</span>
+                ))}
+              </div>
+            )}
+            {profile.protected_terms && profile.protected_terms.length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-plomo text-[10px] uppercase tracking-wider">Protegidos:</span>
+                {profile.protected_terms.map((t) => (
+                  <span key={t} className="text-[10px] bg-purple-900/20 text-purple-400 px-2 py-0.5 rounded">{t}</span>
+                ))}
+              </div>
+            )}
+            {profile.preserve_author_voice && (
+              <span className="text-[10px] bg-emerald-900/20 text-emerald-400 px-2 py-0.5 rounded">Preservar voz del autor</span>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5 md:col-span-2">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-carbon-200 flex items-center justify-center">
+              <span className="text-plomo text-sm">—</span>
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-bruma">Sin perfil editorial</h3>
+              <p className="text-xs text-plomo">Corrección genérica (MVP1). Selecciona un perfil para obtener correcciones categorizadas.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Processing status */}
       <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5">
         <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-4">Estado del proceso</h3>
@@ -313,57 +488,98 @@ function SummaryTab({ doc, corrections, pages, isProcessing }: {
           </div>
         ) : (
           <div className="space-y-4">
-            {/* Breakdown chart */}
-            <div className="flex gap-2 h-4 rounded-full overflow-hidden">
+            {/* Source breakdown bar */}
+            <div className="flex gap-1 h-3 rounded-full overflow-hidden">
               {ltCount > 0 && (
                 <div
-                  className="bg-blue-500 rounded-full transition-all duration-500"
+                  className="bg-blue-500 transition-all duration-500"
                   style={{ width: `${(ltCount / corrections.length) * 100}%` }}
                   title={`LanguageTool: ${ltCount}`}
                 />
               )}
               {llmCount > 0 && (
                 <div
-                  className="bg-purple-500 rounded-full transition-all duration-500"
+                  className="bg-purple-500 transition-all duration-500"
                   style={{ width: `${(llmCount / corrections.length) * 100}%` }}
                   title={`LLM: ${llmCount}`}
                 />
               )}
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <div className="flex items-center justify-between text-sm">
                 <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded bg-blue-500" />
+                  <div className="w-2.5 h-2.5 rounded bg-blue-500" />
                   <span className="text-plomo">LanguageTool</span>
                 </div>
                 <span className="text-bruma font-medium">{ltCount}</span>
               </div>
               <div className="flex items-center justify-between text-sm">
                 <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded bg-purple-500" />
+                  <div className="w-2.5 h-2.5 rounded bg-purple-500" />
                   <span className="text-plomo">LLM (estilo)</span>
                 </div>
                 <span className="text-bruma font-medium">{llmCount}</span>
               </div>
             </div>
 
-            {/* Recent corrections preview */}
-            <div className="pt-3 border-t border-carbon-300">
-              <span className="text-xs text-plomo uppercase tracking-wider">Últimas correcciones</span>
-              <div className="mt-2 space-y-1.5">
-                {corrections.slice(0, 3).map((c) => (
-                  <div key={c.id} className="text-xs text-plomo truncate">
-                    <span className="text-red-400/80 line-through">{c.original_text.slice(0, 40)}</span>
-                    {" → "}
-                    <span className="text-krypton/80">{c.corrected_text.slice(0, 40)}</span>
+            {/* Severity breakdown */}
+            {Object.keys(severityBreakdown).length > 0 && (
+              <div className="pt-3 border-t border-carbon-300 space-y-1.5">
+                <span className="text-xs text-plomo uppercase tracking-wider">Por severidad</span>
+                {severityBreakdown.critico && (
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-red-400 text-xs">Crítico</span>
+                    <span className="text-bruma font-medium">{severityBreakdown.critico}</span>
                   </div>
-                ))}
+                )}
+                {severityBreakdown.importante && (
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-yellow-400 text-xs">Importante</span>
+                    <span className="text-bruma font-medium">{severityBreakdown.importante}</span>
+                  </div>
+                )}
+                {severityBreakdown.sugerencia && (
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-emerald-400 text-xs">Sugerencia</span>
+                    <span className="text-bruma font-medium">{severityBreakdown.sugerencia}</span>
+                  </div>
+                )}
               </div>
-            </div>
+            )}
+
+            {/* Confidence */}
+            {avgConfidence != null && (
+              <div className="pt-3 border-t border-carbon-300">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-plomo uppercase tracking-wider">Confianza promedio</span>
+                  <span className={`text-sm font-semibold ${avgConfidence >= 80 ? "text-krypton" : avgConfidence >= 50 ? "text-yellow-400" : "text-red-400"}`}>
+                    {avgConfidence}%
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Category breakdown — full width */}
+      {hasCategories && (
+        <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5 md:col-span-2">
+          <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-4">Correcciones por categoría</h3>
+          <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
+            {Object.entries(categoryBreakdown)
+              .sort(([, a], [, b]) => b - a)
+              .map(([cat, count]) => (
+                <div key={cat} className="text-center bg-carbon-200 rounded-lg p-3">
+                  <div className={`w-3 h-3 rounded-full mx-auto mb-2 ${CATEGORY_COLORS[cat] || "bg-plomo"}`} />
+                  <div className="text-lg font-bold text-bruma">{count}</div>
+                  <div className="text-[10px] text-plomo uppercase tracking-wider">{CATEGORY_LABELS[cat] || cat}</div>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {/* Document info */}
       <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5 md:col-span-2">
@@ -395,65 +611,3 @@ function SummaryTab({ doc, corrections, pages, isProcessing }: {
   );
 }
 
-function PagesTab({ pages, docId }: { pages: PageListItem[]; docId: string }) {
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
-
-  if (pages.length === 0) {
-    return (
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-8 text-center">
-        <p className="text-plomo">No hay páginas disponibles aún</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-      {pages.map((page) => {
-        const statusColors: Record<string, string> = {
-          pending: "bg-carbon-200 text-plomo",
-          extracting: "bg-krypton/15 text-krypton",
-          correcting: "bg-krypton/15 text-krypton",
-          rendering: "bg-krypton/15 text-krypton",
-          completed: "bg-krypton/20 text-krypton",
-          failed: "bg-red-900/30 text-red-400",
-        };
-
-        return (
-          <div
-            key={page.id}
-            className="bg-carbon-100 border border-carbon-300 rounded-xl p-4 hover:border-krypton/30 transition-all"
-          >
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-semibold text-bruma">Página {page.page_no}</span>
-              <span className={`text-[10px] uppercase tracking-wider font-medium px-2 py-0.5 rounded-full ${statusColors[page.status] || "bg-carbon-200 text-plomo"}`}>
-                {page.status}
-              </span>
-            </div>
-
-            {/* Preview thumbnail */}
-            {page.preview_uri && page.status !== "pending" && (
-              <div className="mb-3 rounded-lg overflow-hidden bg-carbon-200 aspect-[3/4] flex items-center justify-center">
-                <img
-                  src={`${API_BASE}/documents/${docId}/pages/${page.page_no}/preview`}
-                  alt={`Página ${page.page_no}`}
-                  className="w-full h-full object-contain"
-                  loading="lazy"
-                />
-              </div>
-            )}
-
-            <div className="flex items-center justify-between text-xs text-plomo">
-              <span>{page.page_type || "—"}</span>
-              {page.has_corrections && (
-                <span className="text-krypton flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-krypton" />
-                  {page.patches_count} correcciones
-                </span>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}

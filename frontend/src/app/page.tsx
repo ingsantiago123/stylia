@@ -3,12 +3,16 @@
 import { useState, useEffect, useCallback } from "react";
 import { DocumentUploader } from "@/components/DocumentUploader";
 import { DocumentList } from "@/components/DocumentList";
+import { ProfileSelector } from "@/components/ProfileSelector";
 import { listDocuments, DocumentListItem } from "@/lib/api";
 
 export default function HomePage() {
   const [documents, setDocuments] = useState<DocumentListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // MVP2: documento pendiente de asignar perfil
+  const [pendingDoc, setPendingDoc] = useState<{ id: string; filename: string } | null>(null);
 
   const fetchDocuments = useCallback(async () => {
     try {
@@ -34,6 +38,21 @@ export default function HomePage() {
     fetchDocuments();
   };
 
+  const handleDocUploaded = (docId: string, filename: string) => {
+    setPendingDoc({ id: docId, filename });
+    fetchDocuments();
+  };
+
+  const handleProcessStarted = () => {
+    setPendingDoc(null);
+    fetchDocuments();
+  };
+
+  const handleCancelProfile = () => {
+    setPendingDoc(null);
+    fetchDocuments();
+  };
+
   const processingCount = documents.filter(
     (d) => !["completed", "failed", "uploaded"].includes(d.status)
   ).length;
@@ -56,13 +75,28 @@ export default function HomePage() {
         )}
       </section>
 
-      {/* Sección de subida */}
+      {/* Sección de subida / selector de perfil */}
       <section>
         <div className="flex items-center gap-3 mb-4">
           <div className="w-1 h-6 bg-krypton rounded-full" />
-          <h2 className="text-lg font-semibold text-bruma">Subir documento</h2>
+          <h2 className="text-lg font-semibold text-bruma">
+            {pendingDoc ? "Configurar correccion" : "Subir documento"}
+          </h2>
         </div>
-        <DocumentUploader onSuccess={handleUploadSuccess} />
+
+        {pendingDoc ? (
+          <ProfileSelector
+            docId={pendingDoc.id}
+            filename={pendingDoc.filename}
+            onProcessStarted={handleProcessStarted}
+            onCancel={handleCancelProfile}
+          />
+        ) : (
+          <DocumentUploader
+            onSuccess={handleUploadSuccess}
+            onUploaded={handleDocUploaded}
+          />
+        )}
       </section>
 
       {/* Lista de documentos */}

@@ -17,6 +17,7 @@ from app.models.page import Page
 from app.models.block import Block
 from app.models.patch import Patch
 from app.models.job import Job
+from app.models.style_profile import DocumentProfile
 
 from app.services.ingestion import process_ingestion_sync
 from app.services.extraction import extract_page_layout_sync
@@ -94,6 +95,18 @@ def process_document_pipeline(self, doc_id: str):
         job = _create_job(db, doc_id, "full_pipeline", self.request.id)
 
         logger.info(f"=== INICIO PIPELINE: {doc.filename} ({doc_id}) ===")
+
+        # =============================================
+        # LIMPIEZA: eliminar datos previos (para re-procesamiento)
+        # =============================================
+        existing_pages = db.execute(
+            select(Page).where(Page.doc_id == doc_id)
+        ).scalars().all()
+        if existing_pages:
+            logger.info(f"Limpiando {len(existing_pages)} páginas previas para re-procesamiento...")
+            for page in existing_pages:
+                db.delete(page)  # CASCADE elimina blocks y patches
+            db.commit()
 
         # =============================================
         # ETAPA A: INGESTA — Convertir DOCX a PDF
@@ -206,11 +219,35 @@ def process_document_pipeline(self, doc_id: str):
         # Esto evita el bug de fragmentación PDF → mayúsculas aleatorias
         docx_patches = []
         if doc.original_format == "docx":
+            # MVP2: cargar perfil editorial si existe
+            profile_row = db.execute(
+                select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+            ).scalar_one_or_none()
+
+            profile_dict = None
+            if profile_row:
+                profile_dict = {
+                    "register": profile_row.register,
+                    "intervention_level": profile_row.intervention_level,
+                    "audience_type": profile_row.audience_type,
+                    "audience_expertise": profile_row.audience_expertise,
+                    "tone": profile_row.tone,
+                    "preserve_author_voice": profile_row.preserve_author_voice,
+                    "max_rewrite_ratio": profile_row.max_rewrite_ratio,
+                    "max_expansion_ratio": profile_row.max_expansion_ratio,
+                    "style_priorities": profile_row.style_priorities or [],
+                    "protected_terms": profile_row.protected_terms or [],
+                    "forbidden_changes": profile_row.forbidden_changes or [],
+                    "lt_disabled_rules": profile_row.lt_disabled_rules or [],
+                }
+                logger.info(f"[Etapa D] Perfil editorial: {profile_row.preset_name or 'custom'}")
+
             logger.info("[Etapa D] Ruta 1: corrigiendo párrafos directamente del DOCX...")
             docx_patches = correct_docx_sync(
                 doc_id=str(doc_id),
                 docx_uri=doc.source_uri,
                 config=config,
+                profile=profile_dict,
             )
 
             # Registrar parches en BD (vinculados al primer bloque de cada página)
@@ -223,18 +260,47 @@ def process_document_pipeline(self, doc_id: str):
                         select(Block).where(Block.page_id == first_page.id).order_by(Block.block_no)
                     ).scalars().first()
                     if db_block:
-                        patch = Patch(
-                            block_id=db_block.id,
-                            version=patch_version,
-                            source=patch_data["source"],
-                            original_text=patch_data["original_text"],
-                            corrected_text=patch_data["corrected_text"],
-                            operations_json=patch_data.get("lt_operations", []),
-                            review_status="auto_accepted",
-                            applied=False,
-                        )
-                        db.add(patch)
-                        patch_version += 1
+                        # MVP2: si hay cambios individuales del LLM, crear un patch por cambio
+                        llm_changes = patch_data.get("changes", [])
+                        if llm_changes:
+                            for change in llm_changes:
+                                patch = Patch(
+                                    block_id=db_block.id,
+                                    version=patch_version,
+                                    source=patch_data["source"],
+                                    original_text=patch_data["original_text"],
+                                    corrected_text=patch_data["corrected_text"],
+                                    operations_json=patch_data.get("lt_operations", []),
+                                    review_status="auto_accepted",
+                                    applied=False,
+                                    category=change.get("category"),
+                                    severity=change.get("severity"),
+                                    explanation=change.get("explanation"),
+                                    confidence=patch_data.get("confidence"),
+                                    rewrite_ratio=patch_data.get("rewrite_ratio"),
+                                    pass_number=2 if "chatgpt" in patch_data["source"] else 1,
+                                    model_used=patch_data.get("model_used", "languagetool"),
+                                )
+                                db.add(patch)
+                                patch_version += 1
+                        else:
+                            # MVP1 fallback o solo LanguageTool
+                            patch = Patch(
+                                block_id=db_block.id,
+                                version=patch_version,
+                                source=patch_data["source"],
+                                original_text=patch_data["original_text"],
+                                corrected_text=patch_data["corrected_text"],
+                                operations_json=patch_data.get("lt_operations", []),
+                                review_status="auto_accepted",
+                                applied=False,
+                                confidence=patch_data.get("confidence"),
+                                rewrite_ratio=patch_data.get("rewrite_ratio"),
+                                pass_number=1,
+                                model_used=patch_data.get("model_used", "languagetool"),
+                            )
+                            db.add(patch)
+                            patch_version += 1
 
             # Marcar todas las páginas como corregidas
             for page in pages:

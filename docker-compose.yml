@@ -23,6 +23,24 @@ services:
     restart: unless-stopped
 
   # =============================================
+  # pgAdmin (interfaz gráfica para PostgreSQL)
+  # =============================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@stylia.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin123}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    restart: unless-stopped
+
+  # =============================================
   # Redis (broker Celery + caché)
   # =============================================
   redis:
@@ -143,8 +161,16 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/next.config.js:/app/next.config.js
+      - ./frontend/tailwind.config.js:/app/tailwind.config.js
+    environment:
+      - WATCHPACK_POLLING=true
     restart: unless-stopped
 
 volumes:
   pgdata:
   miniodata:
+  pgadmin_data:

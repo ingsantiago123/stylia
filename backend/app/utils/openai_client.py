@@ -120,6 +120,51 @@ Formato de respuesta JSON requerido:
             logger.error(f"Error al llamar OpenAI API: {e}")
             return None
     
+    def correct_with_profile(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_length: int | None = None,
+    ) -> dict | None:
+        """
+        MVP2: Corrección con prompts parametrizados.
+        Retorna dict con la respuesta estructurada del LLM, o None si falla.
+        """
+        if not self.client:
+            logger.warning("OpenAI cliente no disponible")
+            return None
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            data = json.loads(content)
+
+            # Validar longitud si se especifica
+            corrected = data.get("corrected_text", "")
+            if max_length and corrected and len(corrected) > max_length:
+                logger.warning(
+                    f"Texto corregido excede máximo ({len(corrected)} > {max_length}), descartando"
+                )
+                data["action"] = "skip"
+                data["corrected_text"] = ""
+                data["changes"] = []
+
+            return data
+
+        except Exception as e:
+            logger.error(f"Error en correct_with_profile: {e}")
+            return None
+
     def _simulate_correction(self, text: str) -> str:
         """Simulación de corrección cuando no hay API key."""
         # Mejoras básicas de estilo como respaldo

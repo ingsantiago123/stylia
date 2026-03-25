@@ -3,14 +3,18 @@ Punto de entrada de la aplicación FastAPI.
 MVP 1: Dashboard básico + flujo DOCX → corrección → PDF.
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.config import settings
 from app.database import engine, Base
 from app.api.v1 import documents
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -19,6 +23,22 @@ async def lifespan(app: FastAPI):
     # Startup: crear tablas si no existen (en MVP; en prod usar Alembic)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # MVP2: agregar columnas nuevas a tabla patches si no existen
+    # (create_all NO agrega columnas a tablas existentes)
+    async with engine.begin() as conn:
+        migrations = [
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS category VARCHAR(30)",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS severity VARCHAR(15)",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS explanation TEXT",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS confidence FLOAT",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS rewrite_ratio FLOAT",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS pass_number INTEGER",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS model_used VARCHAR(50)",
+        ]
+        for sql in migrations:
+            await conn.execute(text(sql))
+        logger.info("MVP2: columnas de patches verificadas/creadas")
 
     # Inicializar bucket de MinIO
     from app.utils.minio_client import ensure_bucket

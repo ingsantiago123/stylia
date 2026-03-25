@@ -1,6 +1,6 @@
 """
-Endpoints de documentos — MVP 1.
-Upload, listado, detalle, descarga de resultados.
+Endpoints de documentos — MVP 1 + MVP 2 (Lote 1: perfiles editoriales).
+Upload, listado, detalle, descarga de resultados, perfiles editoriales.
 """
 
 import io
@@ -20,13 +20,18 @@ from app.models.document import Document
 from app.models.page import Page
 from app.models.block import Block
 from app.models.patch import Patch
+from app.models.style_profile import DocumentProfile
 from app.schemas.document import DocumentUploadResponse, DocumentDetail, DocumentListItem
 from app.schemas.page import PageListItem
 from app.schemas.patch import PatchDetail, PatchListItem
+from app.schemas.style_profile import (
+    StyleProfileCreate, StyleProfileUpdate, StyleProfileResponse, PresetListItem
+)
 from app.services.ingestion import ingest_document
 from app.services.context_accumulator import ContextualCorrectionService, generate_sample_document_flow
 from app.workers.tasks_pipeline import process_document_pipeline
 from app.utils import minio_client
+from app.data.profiles import get_preset, list_presets_ui, PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -73,26 +78,180 @@ async def upload_document(
     await db.commit()
     await db.refresh(document)
 
-    # Inicializar contexto de corrección
-    document_info = {
-        "filename": document.filename,
-        "format": document.original_format,
-        "status": document.status
-    }
-    context_service.init_document_context(str(document.id), document_info)
-
-    # Lanzar pipeline de procesamiento en Celery
-    task = process_document_pipeline.delay(str(document.id))
-
-    logger.info(f"Pipeline lanzado: doc={document.id}, task={task.id}")
+    logger.info(f"Documento subido: doc={document.id}, filename={document.filename}")
 
     return DocumentUploadResponse(
         id=document.id,
         filename=document.filename,
         original_format=document.original_format,
         status=document.status,
-        message="Documento recibido. Procesamiento iniciado.",
+        message="Documento recibido. Selecciona un perfil editorial para iniciar el procesamiento.",
     )
+
+
+# =============================================
+# PROCESAR (lanza pipeline Celery — separado de upload)
+# =============================================
+
+@router.post("/documents/{doc_id}/process")
+async def process_document(
+    doc_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Lanza el pipeline de procesamiento para un documento ya subido.
+    Requiere que el documento esté en status 'uploaded'.
+    """
+    doc = await _get_doc_or_404(db, doc_id)
+
+    allowed_statuses = ("uploaded", "failed", "completed")
+    if doc.status not in allowed_statuses:
+        raise HTTPException(
+            400,
+            f"Solo se puede procesar un documento en status {allowed_statuses}. Status actual: {doc.status}"
+        )
+
+    # Reset status para reprocesamiento
+    if doc.status != "uploaded":
+        doc.status = "uploaded"
+        doc.error_message = None
+        await db.commit()
+
+    # Inicializar contexto de corrección
+    document_info = {
+        "filename": doc.filename,
+        "format": doc.original_format,
+        "status": doc.status,
+    }
+    context_service.init_document_context(str(doc.id), document_info)
+
+    # Lanzar pipeline
+    task = process_document_pipeline.delay(str(doc.id))
+    logger.info(f"Pipeline lanzado: doc={doc.id}, task={task.id}")
+
+    return {"message": "Procesamiento iniciado", "task_id": task.id}
+
+
+# =============================================
+# PERFILES EDITORIALES
+# =============================================
+
+@router.get("/presets", response_model=list[PresetListItem])
+async def list_available_presets():
+    """Lista los 10 perfiles editoriales predeterminados."""
+    return list_presets_ui()
+
+
+@router.post("/documents/{doc_id}/profile", response_model=StyleProfileResponse)
+async def create_profile(
+    doc_id: UUID,
+    body: StyleProfileCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Crea el perfil editorial de un documento.
+    Si preset_name viene, carga valores del preset y aplica overrides.
+    Si no viene preset, crea perfil con defaults + overrides.
+    """
+    doc = await _get_doc_or_404(db, doc_id)
+
+    # Verificar que no tenga perfil ya
+    existing = await db.execute(
+        select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(400, "El documento ya tiene un perfil. Usa PUT para actualizar.")
+
+    # Base: preset o defaults
+    if body.preset_name and body.preset_name in PRESETS:
+        base = get_preset(body.preset_name)
+        source = "preset"
+    else:
+        base = {
+            "genre": None,
+            "subgenre": None,
+            "audience_type": None,
+            "audience_age_range": None,
+            "audience_expertise": "medio",
+            "register": "neutro",
+            "tone": "neutro",
+            "intervention_level": "moderada",
+            "preserve_author_voice": True,
+            "max_rewrite_ratio": 0.30,
+            "max_expansion_ratio": 1.10,
+            "target_inflesz_min": None,
+            "target_inflesz_max": None,
+            "style_priorities": ["claridad", "fluidez", "cohesion", "precision_lexica"],
+            "protected_terms": [],
+            "forbidden_changes": [],
+            "lt_disabled_rules": [],
+        }
+        source = "user" if not body.preset_name else "user"
+
+    # Aplicar overrides del body
+    overrides = body.model_dump(exclude_unset=True, exclude={"preset_name"})
+    for key, value in overrides.items():
+        if value is not None:
+            base[key] = value
+
+    profile = DocumentProfile(
+        doc_id=doc_id,
+        preset_name=body.preset_name,
+        source=source,
+        **base,
+    )
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+
+    logger.info(f"Perfil creado: doc={doc_id}, preset={body.preset_name}, source={source}")
+    return profile
+
+
+@router.get("/documents/{doc_id}/profile", response_model=StyleProfileResponse)
+async def get_profile(
+    doc_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Lee el perfil editorial de un documento."""
+    await _get_doc_or_404(db, doc_id)
+
+    result = await db.execute(
+        select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(404, "El documento no tiene perfil editorial configurado.")
+    return profile
+
+
+@router.put("/documents/{doc_id}/profile", response_model=StyleProfileResponse)
+async def update_profile(
+    doc_id: UUID,
+    body: StyleProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Actualiza el perfil editorial de un documento."""
+    await _get_doc_or_404(db, doc_id)
+
+    result = await db.execute(
+        select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(404, "El documento no tiene perfil. Usa POST para crear uno.")
+
+    updates = body.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        if value is not None:
+            setattr(profile, key, value)
+
+    profile.source = "user"  # Si el usuario modifica, la fuente es "user"
+    await db.commit()
+    await db.refresh(profile)
+
+    logger.info(f"Perfil actualizado: doc={doc_id}")
+    return profile
 
 
 # =============================================
@@ -238,6 +397,14 @@ async def list_corrections(
             review_status=patch.review_status,
             overflow_flag=patch.overflow_flag,
             created_at=patch.created_at,
+            # MVP2 — campos enriquecidos
+            category=patch.category,
+            severity=patch.severity,
+            explanation=patch.explanation,
+            confidence=patch.confidence,
+            rewrite_ratio=patch.rewrite_ratio,
+            pass_number=patch.pass_number,
+            model_used=patch.model_used,
         ))
 
     return items
@@ -267,6 +434,45 @@ async def get_page_preview(
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@router.get("/documents/{doc_id}/pages/{page_no}/preview-corrected")
+async def get_corrected_page_preview(
+    doc_id: UUID,
+    page_no: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Preview PNG de una página corregida."""
+    doc = await _get_doc_or_404(db, doc_id)
+
+    preview_key = f"pages/{doc_id}/preview_corrected/{page_no}.png"
+    if not minio_client.file_exists(preview_key):
+        raise HTTPException(404, "Preview corregido no disponible")
+
+    file_data = minio_client.download_file(preview_key)
+    return StreamingResponse(
+        io.BytesIO(file_data),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@router.get("/documents/{doc_id}/pages/{page_no}/annotations")
+async def get_page_annotations(
+    doc_id: UUID,
+    page_no: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Metadata de anotaciones para overlay hover en el frontend."""
+    await _get_doc_or_404(db, doc_id)
+
+    annot_key = f"pages/{doc_id}/annotations/{page_no}.json"
+    if not minio_client.file_exists(annot_key):
+        return {"annotations": []}
+
+    file_data = minio_client.download_file(annot_key)
+    import json
+    return json.loads(file_data.decode("utf-8"))
 
 
 # =============================================
@@ -461,7 +667,17 @@ async def get_correction_flow(doc_id: str, db: AsyncSession = Depends(get_db)):
     patches = patches_result.scalars().all()
 
     if not patches:
-        raise HTTPException(404, "Este documento aún no tiene correcciones registradas")
+        return {
+            "document_id": doc_id,
+            "flow_type": "real",
+            "summary": {
+                "total_blocks": 0,
+                "total_requests": 0,
+                "languagetool_requests": 0,
+                "chatgpt_requests": 0,
+            },
+            "requests": [],
+        }
 
     lt_count = sum(1 for p in patches if p.source == "languagetool")
     gpt_count = sum(1 for p in patches if "chatgpt" in p.source)

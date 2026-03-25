@@ -8,16 +8,54 @@ interface CorrectionHistoryProps {
 }
 
 type FilterSource = "all" | "languagetool" | "llm";
+type FilterCategory = "all" | string;
+type FilterSeverity = "all" | "critico" | "importante" | "sugerencia";
+
+const CATEGORY_COLORS: Record<string, { bg: string; text: string }> = {
+  redundancia: { bg: "bg-orange-900/30", text: "text-orange-400" },
+  claridad: { bg: "bg-blue-900/30", text: "text-blue-400" },
+  registro: { bg: "bg-indigo-900/30", text: "text-indigo-400" },
+  cohesion: { bg: "bg-cyan-900/30", text: "text-cyan-400" },
+  lexico: { bg: "bg-teal-900/30", text: "text-teal-400" },
+  estructura: { bg: "bg-violet-900/30", text: "text-violet-400" },
+  puntuacion: { bg: "bg-amber-900/30", text: "text-amber-400" },
+  ritmo: { bg: "bg-pink-900/30", text: "text-pink-400" },
+  muletilla: { bg: "bg-rose-900/30", text: "text-rose-400" },
+};
+
+const SEVERITY_COLORS: Record<string, { bg: string; text: string }> = {
+  critico: { bg: "bg-red-900/30", text: "text-red-400" },
+  importante: { bg: "bg-yellow-900/30", text: "text-yellow-400" },
+  sugerencia: { bg: "bg-emerald-900/30", text: "text-emerald-400" },
+};
 
 export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
   const [filterSource, setFilterSource] = useState<FilterSource>("all");
+  const [filterCategory, setFilterCategory] = useState<FilterCategory>("all");
+  const [filterSeverity, setFilterSeverity] = useState<FilterSeverity>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
+
+  const categories = useMemo(() => {
+    const cats = new Set<string>();
+    corrections.forEach((c) => { if (c.category) cats.add(c.category); });
+    return Array.from(cats).sort();
+  }, [corrections]);
 
   const filtered = useMemo(() => {
     let result = corrections;
     if (filterSource !== "all") {
-      result = result.filter((c) => c.source === filterSource);
+      result = result.filter((c) =>
+        filterSource === "languagetool"
+          ? c.source === "languagetool"
+          : c.source.includes("chatgpt") || c.source === "llm"
+      );
+    }
+    if (filterCategory !== "all") {
+      result = result.filter((c) => c.category === filterCategory);
+    }
+    if (filterSeverity !== "all") {
+      result = result.filter((c) => c.severity === filterSeverity);
     }
     if (searchTerm.trim()) {
       const term = searchTerm.toLowerCase();
@@ -28,11 +66,11 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
       );
     }
     return result;
-  }, [corrections, filterSource, searchTerm]);
+  }, [corrections, filterSource, filterCategory, filterSeverity, searchTerm]);
 
   const stats = useMemo(() => {
     const lt = corrections.filter((c) => c.source === "languagetool").length;
-    const llm = corrections.filter((c) => c.source === "llm").length;
+    const llm = corrections.filter((c) => c.source.includes("chatgpt") || c.source === "llm").length;
     return { total: corrections.length, languagetool: lt, llm };
   }, [corrections]);
 
@@ -73,7 +111,7 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
           </div>
 
           {/* Filters */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {(["all", "languagetool", "llm"] as FilterSource[]).map((f) => (
               <button
                 key={f}
@@ -89,6 +127,34 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
                 {f === "all" ? "Todas" : f === "languagetool" ? "LanguageTool" : "LLM"}
               </button>
             ))}
+
+            {/* Category filter */}
+            {categories.length > 0 && (
+              <select
+                value={filterCategory}
+                onChange={(e) => setFilterCategory(e.target.value)}
+                className="px-2 py-1.5 text-xs font-medium rounded-lg bg-carbon-200 text-plomo border border-carbon-300 focus:outline-none focus:border-krypton/50 cursor-pointer"
+              >
+                <option value="all">Categoría: todas</option>
+                {categories.map((cat) => (
+                  <option key={cat} value={cat}>{cat}</option>
+                ))}
+              </select>
+            )}
+
+            {/* Severity filter */}
+            {corrections.some((c) => c.severity) && (
+              <select
+                value={filterSeverity}
+                onChange={(e) => setFilterSeverity(e.target.value as FilterSeverity)}
+                className="px-2 py-1.5 text-xs font-medium rounded-lg bg-carbon-200 text-plomo border border-carbon-300 focus:outline-none focus:border-krypton/50 cursor-pointer"
+              >
+                <option value="all">Severidad: todas</option>
+                <option value="critico">Crítico</option>
+                <option value="importante">Importante</option>
+                <option value="sugerencia">Sugerencia</option>
+              </select>
+            )}
           </div>
         </div>
 
@@ -188,6 +254,16 @@ function CorrectionCard({
           <span className="text-sm text-plomo truncate">
             Bloque #{patch.block_no || "?"}
           </span>
+          {patch.category && (
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${CATEGORY_COLORS[patch.category]?.bg || "bg-carbon-200"} ${CATEGORY_COLORS[patch.category]?.text || "text-plomo"}`}>
+              {patch.category}
+            </span>
+          )}
+          {patch.severity && (
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${SEVERITY_COLORS[patch.severity]?.bg || "bg-carbon-200"} ${SEVERITY_COLORS[patch.severity]?.text || "text-plomo"}`}>
+              {patch.severity}
+            </span>
+          )}
           {patch.overflow_flag && (
             <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-yellow-900/30 text-yellow-500 text-[10px] font-medium flex-shrink-0">
               OVERFLOW
@@ -261,8 +337,16 @@ function CorrectionCard({
             </div>
           </div>
 
+          {/* Explanation (MVP2) */}
+          {patch.explanation && (
+            <div className="bg-carbon-200/50 border border-carbon-300 rounded-lg px-3 py-2">
+              <div className="text-[10px] uppercase tracking-wider font-semibold text-plomo mb-1">Explicación</div>
+              <p className="text-sm text-bruma/80">{patch.explanation}</p>
+            </div>
+          )}
+
           {/* Metadata */}
-          <div className="flex items-center gap-4 text-[11px] text-plomo pt-1">
+          <div className="flex items-center gap-4 text-[11px] text-plomo pt-1 flex-wrap">
             <span>Versión {patch.version}</span>
             <span>·</span>
             <span>
@@ -273,6 +357,20 @@ function CorrectionCard({
                 minute: "2-digit",
               })}
             </span>
+            {patch.confidence != null && (
+              <>
+                <span>·</span>
+                <span className={patch.confidence >= 0.8 ? "text-krypton/70" : patch.confidence >= 0.5 ? "text-yellow-500/70" : "text-red-400/70"}>
+                  Confianza: {Math.round(patch.confidence * 100)}%
+                </span>
+              </>
+            )}
+            {patch.model_used && (
+              <>
+                <span>·</span>
+                <span>{patch.model_used}</span>
+              </>
+            )}
           </div>
         </div>
       )}

@@ -43,6 +43,35 @@ class Patch(Base):
         comment="auto_accepted, pending, accepted, rejected, manual_review"
     )
     applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # MVP2 — campos enriquecidos
+    category: Mapped[str | None] = mapped_column(
+        String(30), nullable=True,
+        comment="coherencia|cohesion|lexico|registro|claridad|redundancia|estructura|puntuacion|ritmo|muletilla"
+    )
+    severity: Mapped[str | None] = mapped_column(
+        String(15), nullable=True,
+        comment="critico|importante|sugerencia"
+    )
+    explanation: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Razón del cambio en español"
+    )
+    confidence: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="0.0 a 1.0 — confianza del modelo"
+    )
+    rewrite_ratio: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="0.0 a 1.0 — ratio de reescritura"
+    )
+    pass_number: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+        comment="1=LanguageTool, 2=léxica, 3=estilística"
+    )
+    model_used: Mapped[str | None] = mapped_column(
+        String(50), nullable=True,
+        comment="gpt-4o-mini, claude-sonnet-4-5, languagetool"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

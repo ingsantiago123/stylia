@@ -6,9 +6,10 @@ import { uploadDocument } from "@/lib/api";
 
 interface Props {
   onSuccess: () => void;
+  onUploaded?: (docId: string, filename: string) => void;
 }
 
-export function DocumentUploader({ onSuccess }: Props) {
+export function DocumentUploader({ onSuccess, onUploaded }: Props) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -30,7 +31,11 @@ export function DocumentUploader({ onSuccess }: Props) {
       try {
         const result = await uploadDocument(file);
         setMessage(`${result.filename} — ${result.message}`);
-        onSuccess();
+        if (onUploaded) {
+          onUploaded(result.id, result.filename);
+        } else {
+          onSuccess();
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Error al subir");
       } finally {

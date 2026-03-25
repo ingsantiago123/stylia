@@ -18,6 +18,7 @@ from docx import Document as DocxDocument
 from app.config import settings
 from app.utils import minio_client
 from app.utils.openai_client import openai_client
+from app.services.prompt_builder import build_system_prompt, build_user_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -191,20 +192,23 @@ def correct_docx_sync(
     doc_id: str,
     docx_uri: str,
     config: dict,
+    profile: dict | None = None,
 ) -> list[dict]:
     """
     Corrige un DOCX directamente, párrafo por párrafo.
     Pipeline: LanguageTool → ChatGPT (con contexto acumulado).
-    
-    Esto evita el problema de fragmentación: el PDF divide párrafos largos
-    en múltiples bloques, y al intentar aplicar esas correcciones parciales
-    al DOCX se corrompe el texto. Corregir directamente los párrafos del
-    DOCX garantiza que cada run reciba el texto correcto.
-    
-    Retorna lista de parches {paragraph_index, original_text, corrected_text, source}.
+
+    MVP2: Si profile viene, usa PromptBuilder para prompt parametrizado
+    y parsea respuesta estructurada con categorías y explicaciones.
+
+    Retorna lista de parches con campos enriquecidos.
     """
     language = config.get("language", "es")
     disabled_rules = config.get("lt_disabled_rules", [])
+
+    # Si hay perfil, usar sus disabled_rules también
+    if profile and profile.get("lt_disabled_rules"):
+        disabled_rules = list(set(disabled_rules + profile["lt_disabled_rules"]))
 
     # Descargar DOCX
     docx_bytes = minio_client.download_file(docx_uri)
@@ -216,13 +220,14 @@ def correct_docx_sync(
     Path(tmpfile).unlink(missing_ok=True)
 
     patches = []
-    # Contexto acumulado para ChatGPT: últimos párrafos ya corregidos
     corrected_context: list[str] = []
 
-    # Recolectar todos los párrafos (cuerpo + tablas + headers/footers)
     all_paragraphs = _collect_all_paragraphs(doc)
-
     logger.info(f"Documento {doc_id}: {len(all_paragraphs)} párrafos a corregir")
+
+    # MVP2: Construir system prompt UNA VEZ (cacheable)
+    system_prompt = build_system_prompt() if profile else None
+    max_expansion = profile.get("max_expansion_ratio", 1.15) if profile else 1.15
 
     for idx, (para_text, location) in enumerate(all_paragraphs):
         text = para_text.strip()
@@ -245,33 +250,71 @@ def correct_docx_sync(
                 f"Párrafo {idx}: LanguageTool → {len(lt_operations)} correcciones"
             )
 
-        # === PASO 2: ChatGPT (estilo, claridad, fluidez) ===
-        chatgpt_text = openai_client.correct_text_style(
-            original_text=post_lt_text,
-            context_blocks=corrected_context[-3:],
-            max_length_ratio=1.15,
-        )
+        # === PASO 2: LLM (estilo) ===
+        max_length = int(len(post_lt_text) * max_expansion)
+        llm_changes = []
+        llm_confidence = None
+        llm_rewrite_ratio = None
 
-        if chatgpt_text is not None and chatgpt_text != post_lt_text:
-            final_text = chatgpt_text
-            source = "languagetool+chatgpt"
-            logger.info(f"Párrafo {idx}: ChatGPT → estilo mejorado")
+        if profile and system_prompt:
+            # MVP2: Prompt parametrizado con perfil
+            user_prompt = build_user_prompt(
+                text=post_lt_text,
+                profile=profile,
+                context_prev=corrected_context[-1] if corrected_context else None,
+                paragraph_index=idx,
+            )
+            llm_response = openai_client.correct_with_profile(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_length=max_length,
+            )
+
+            if llm_response and llm_response.get("action") == "correct":
+                corrected = llm_response.get("corrected_text", "")
+                if corrected and corrected != post_lt_text:
+                    final_text = corrected
+                    source = "languagetool+chatgpt"
+                    llm_changes = llm_response.get("changes", [])
+                    llm_confidence = llm_response.get("confidence")
+                    llm_rewrite_ratio = llm_response.get("rewrite_ratio")
+                    logger.info(f"Párrafo {idx}: LLM → {len(llm_changes)} cambios (perfil)")
+                else:
+                    final_text = post_lt_text
+            else:
+                final_text = post_lt_text
         else:
-            final_text = post_lt_text
+            # MVP1 fallback: prompt genérico
+            chatgpt_text = openai_client.correct_text_style(
+                original_text=post_lt_text,
+                context_blocks=corrected_context[-3:],
+                max_length_ratio=max_expansion,
+            )
+            if chatgpt_text is not None and chatgpt_text != post_lt_text:
+                final_text = chatgpt_text
+                source = "languagetool+chatgpt"
+                logger.info(f"Párrafo {idx}: ChatGPT → estilo mejorado")
+            else:
+                final_text = post_lt_text
 
-        # Agregar al contexto para coherencia
         corrected_context.append(final_text)
 
         # Solo crear parche si hay cambios
         if final_text != text:
-            patches.append({
+            patch_data = {
                 "paragraph_index": idx,
                 "location": location,
                 "original_text": text,
                 "corrected_text": final_text,
                 "lt_operations": lt_operations,
                 "source": source,
-            })
+                # MVP2: campos enriquecidos
+                "changes": llm_changes,
+                "confidence": llm_confidence,
+                "rewrite_ratio": llm_rewrite_ratio,
+                "model_used": settings.openai_model if "chatgpt" in source else "languagetool",
+            }
+            patches.append(patch_data)
 
     # Guardar parches en MinIO
     if patches:

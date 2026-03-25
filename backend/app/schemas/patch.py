@@ -31,6 +31,14 @@ class PatchListItem(BaseModel):
     review_status: str
     overflow_flag: bool = False
     created_at: datetime
+    # MVP2 — campos enriquecidos
+    category: str | None = None
+    severity: str | None = None
+    explanation: str | None = None
+    confidence: float | None = None
+    rewrite_ratio: float | None = None
+    pass_number: int | None = None
+    model_used: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -51,5 +59,13 @@ class PatchDetail(BaseModel):
     review_status: str
     applied: bool = False
     created_at: datetime
+    # MVP2 — campos enriquecidos
+    category: str | None = None
+    severity: str | None = None
+    explanation: str | None = None
+    confidence: float | None = None
+    rewrite_ratio: float | None = None
+    pass_number: int | None = None
+    model_used: str | None = None
 
     model_config = {"from_attributes": True}

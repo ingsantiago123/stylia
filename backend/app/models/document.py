@@ -59,6 +59,10 @@ class Document(Base):
     jobs: Mapped[list["Job"]] = relationship(  # noqa: F821
         "Job", back_populates="document", cascade="all, delete-orphan"
     )
+    profile: Mapped["DocumentProfile | None"] = relationship(  # noqa: F821
+        "DocumentProfile", back_populates="document", uselist=False,
+        cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         Index("idx_documents_status", "status"),

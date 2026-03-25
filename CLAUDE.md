@@ -49,10 +49,13 @@ corrector de estilos/
 │   │   │   └── documents.py          # Todos los endpoints REST (517 líneas)
 │   │   ├── models/                   # ORM: Document, Page, Block, Patch, Job
 │   │   ├── schemas/                  # Pydantic: request/response validation
+│   │   ├── data/                     # Datos estáticos
+│   │   │   └── profiles.py           # 10 perfiles editoriales predeterminados (MVP2 Lote 1)
 │   │   ├── services/                 # Lógica de negocio
 │   │   │   ├── ingestion.py          # Etapa A: upload + DOCX→PDF
 │   │   │   ├── extraction.py         # Etapa B: layout extraction (PyMuPDF)
-│   │   │   ├── correction.py         # Etapa D: LanguageTool + ChatGPT
+│   │   │   ├── correction.py         # Etapa D: LanguageTool + ChatGPT (con perfil MVP2)
+│   │   │   ├── prompt_builder.py     # MVP2: System/user prompts parametrizados por perfil
 │   │   │   ├── rendering.py          # Etapa E: aplicar patches + generar output
 │   │   │   └── context_accumulator.py # Gestión de contexto acumulado para LLM
 │   │   ├── workers/
@@ -79,7 +82,7 @@ corrector de estilos/
 │   │   │   ├── DocumentUploader.tsx  # Drag-drop .docx (react-dropzone)
 │   │   │   ├── DocumentList.tsx      # Grid de documentos con status
 │   │   │   ├── PipelineFlow.tsx      # Visualización pipeline 6 etapas
-│   │   │   ├── CorrectionHistory.tsx # Lista de correcciones con diff word-level
+│   │   │   ├── CorrectionHistory.tsx # Correcciones con diff, filtros categoría/severidad, badges (MVP2)
 │   │   │   └── CorrectionFlowViewer.tsx # Flujo API ChatGPT con contexto
 │   │   └── lib/
 │   │       └── api.ts                # Cliente API fetch + tipos TypeScript
@@ -150,11 +153,12 @@ ESTADO FINAL            → completed | failed
 
 ## Base de datos (PostgreSQL)
 
-5 tablas principales:
+6 tablas principales:
 
 | Tabla | Propósito | Campos clave |
 |-------|-----------|-------------|
 | `documents` | Documento maestro | id (UUID), filename, status, source_uri, pdf_uri, docx_uri, config_json, total_pages |
+| `document_profiles` | Perfil editorial (MVP2) | doc_id (FK unique), preset_name, source, genre, audience, register, tone, intervention_level, protected_terms, style_priorities |
 | `pages` | Páginas individuales | doc_id (FK), page_no, page_type, layout_uri, text_uri, preview_uri, status |
 | `blocks` | Bloques de texto/imagen | page_id (FK), block_no, block_type, bbox (x0,y0,x1,y1), original_text, font_info |
 | `patches` | Correcciones aplicadas | block_id (FK), version, source, original_text, corrected_text, operations_json, review_status, applied |
@@ -188,7 +192,12 @@ Base: `/api/v1`
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| POST | `/upload` | Sube DOCX, lanza pipeline Celery |
+| POST | `/upload` | Sube DOCX (ya NO lanza pipeline, espera selección de perfil) |
+| POST | `/documents/{id}/process` | Lanza pipeline Celery (requiere status=uploaded) |
+| GET | `/presets` | Lista 10 perfiles editoriales predeterminados |
+| POST | `/documents/{id}/profile` | Crea perfil editorial (desde preset o custom) |
+| GET | `/documents/{id}/profile` | Lee perfil editorial del documento |
+| PUT | `/documents/{id}/profile` | Actualiza perfil editorial |
 | GET | `/documents` | Lista documentos (skip, limit) |
 | GET | `/documents/{id}` | Detalle con pages_summary |
 | GET | `/documents/{id}/pages` | Lista páginas con patches_count |
@@ -330,18 +339,40 @@ MAX_DOCUMENT_PAGES=1000
 - Vista de correcciones con diff word-level
 - Descarga PDF/DOCX corregido
 
-**Fase 2 (MVP 2) — EN DESARROLLO**:
-El rediseño completo del pipeline de corrección. Documentación detallada en:
+**Fase 2 (MVP 2) — EN DESARROLLO (Lotes 1-2 completados)**:
+El rediseño completo del pipeline de corrección. Implementación por lotes verificables.
+
+Documentación:
 - `mvp2.md` → Visión y diseño del pipeline editorial completo
 - `IMPLEMENTACION-MVP2.md` → Guía paso a paso de implementación (fases 2A-2E)
+- `REGISTRO-MVP2.md` → Tracking de progreso IA + humano por lote
 - `CLAUDE-LOGIC.md` → Lógica interna, workflow y flujo de datos del MVP 1
 
-Sub-fases:
-- 2A: Perfiles editoriales + prompt parametrizado + correcciones categorizadas
-- 2B: Etapa C (análisis editorial) + contexto jerárquico
-- 2C: Router de complejidad + quality gates
-- 2D: Revisión humana + track changes en DOCX
-- 2E: Multi-pasada + multi-modelo + prompt caching + métricas INFLESZ
+Lotes de implementación:
+- **Lote 1 (COMPLETADO)**: Perfiles editoriales + flujo upload/process separado + selector UI
+- **Lote 2 (COMPLETADO)**: Prompt parametrizado + patches enriquecidos (category/severity/explanation)
+- Lote 3 (pendiente): Etapa C análisis editorial + modelos section/terms
+- Lote 4 (pendiente): Contexto jerárquico + router de complejidad
+- Lote 5 (pendiente): Quality gates + métricas INFLESZ
+
+Cambios del Lote 1:
+- Tabla `document_profiles` con perfil editorial por documento
+- 10 perfiles predeterminados (infantil, juvenil, novela, ensayo, psicología, marketing, etc.)
+- Upload ya NO lanza pipeline automáticamente → usuario elige perfil primero
+- Nuevo endpoint POST /documents/{id}/process para lanzar pipeline
+- Endpoints CRUD: POST/GET/PUT /documents/{id}/profile
+- Endpoint GET /presets para listar perfiles disponibles
+- Frontend: ProfileSelector (grid de 10 cards) + ProfileEditor (personalización)
+- Flujo: Upload → ProfileSelector → Procesar (o "Sin perfil" para flujo genérico)
+
+Cambios del Lote 2:
+- PromptBuilder: system prompt estático (cacheable) + user prompt dinámico por párrafo con perfil
+- openai_client: nuevo método `correct_with_profile()` para prompts externos
+- correction.py: usa PromptBuilder cuando hay perfil, fallback MVP1 sin perfil
+- tasks_pipeline.py: carga DocumentProfile de BD, pasa como dict a corrección
+- Modelo Patch: 7 nuevas columnas (category, severity, explanation, confidence, rewrite_ratio, pass_number, model_used)
+- API: list_corrections retorna campos enriquecidos
+- Frontend: CorrectionHistory con filtros categoría/severidad, badges coloreados, explicación, confianza %
 
 **Fases futuras (post MVP 2)**:
 - Fase 3: Soporte PDF born-digital
