@@ -46,6 +46,11 @@ class DocumentDetail(BaseModel):
     updated_at: datetime
     progress: float = Field(default=0.0, ge=0.0, le=1.0)
     pages_summary: dict = Field(default_factory=dict, description="Resumen de estados de páginas")
+    # Token usage & cost
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    llm_cost_usd: float | None = None
 
     model_config = {"from_attributes": True}
 
@@ -57,3 +62,51 @@ class DocumentConfigUpdate(BaseModel):
     glossary: dict[str, str] = {}
     perfeccionista: bool = True
     lt_disabled_rules: list[str] = []
+
+
+# =============================================
+# Schemas de costos (LlmUsage)
+# =============================================
+
+class CostSummary(BaseModel):
+    """Resumen global de costos de todos los documentos."""
+    total_cost_usd: float
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+    total_documents: int
+    total_calls: int
+    avg_cost_per_document: float
+    avg_cost_per_call: float
+    model_breakdown: list[dict]
+    pricing: dict
+
+
+class DocumentCostItem(BaseModel):
+    """Fila de costo por documento."""
+    doc_id: UUID
+    filename: str
+    status: str
+    total_pages: int | None = None
+    total_calls: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    total_cost_usd: float
+    created_at: datetime
+
+
+class ParagraphCostItem(BaseModel):
+    """Costo individual de una llamada LLM por párrafo."""
+    id: UUID
+    paragraph_index: int
+    location: str
+    call_type: str
+    model_used: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_usd: float
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

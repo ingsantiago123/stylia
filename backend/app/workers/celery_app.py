@@ -17,11 +17,11 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     task_acks_late=True,
-    worker_prefetch_multiplier=1,
+    worker_prefetch_multiplier=settings.celery_worker_prefetch_multiplier,
     task_reject_on_worker_lost=True,
-    task_time_limit=600,       # 10 min máx por tarea
-    task_soft_time_limit=540,  # Warning a 9 min
-    result_expires=86400,      # Resultados expiran en 24h
+    task_time_limit=settings.celery_task_time_limit,
+    task_soft_time_limit=settings.celery_task_soft_time_limit,
+    result_expires=settings.celery_result_expires,
 )
 
 # Auto-descubrir tareas en los módulos de workers

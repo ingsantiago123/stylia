@@ -47,15 +47,18 @@ corrector de estilos/
 │   │   ├── database.py               # SQLAlchemy async engine + session
 │   │   ├── api/v1/
 │   │   │   └── documents.py          # Todos los endpoints REST (517 líneas)
-│   │   ├── models/                   # ORM: Document, Page, Block, Patch, Job
+│   │   ├── models/                   # ORM: Document, Page, Block, Patch, Job, DocumentProfile, LlmUsage, SectionSummary, TermRegistry
 │   │   ├── schemas/                  # Pydantic: request/response validation
 │   │   ├── data/                     # Datos estáticos
 │   │   │   └── profiles.py           # 10 perfiles editoriales predeterminados (MVP2 Lote 1)
 │   │   ├── services/                 # Lógica de negocio
 │   │   │   ├── ingestion.py          # Etapa A: upload + DOCX→PDF
 │   │   │   ├── extraction.py         # Etapa B: layout extraction (PyMuPDF)
-│   │   │   ├── correction.py         # Etapa D: LanguageTool + ChatGPT (con perfil MVP2)
-│   │   │   ├── prompt_builder.py     # MVP2: System/user prompts parametrizados por perfil
+│   │   │   ├── analysis.py           # Etapa C: análisis editorial (MVP2 Lote 3)
+│   │   │   ├── correction.py         # Etapa D: LanguageTool + ChatGPT (con perfil + router + contexto jerárquico)
+│   │   │   ├── prompt_builder.py     # MVP2: System/user prompts parametrizados por perfil + contexto sección
+│   │   │   ├── complexity_router.py  # MVP2 Lote 4: Router SKIP/CHEAP/EDITORIAL por párrafo
+│   │   │   ├── quality_gates.py     # MVP2 Lote 5: Validación post-corrección (5 gates + INFLESZ)
 │   │   │   ├── rendering.py          # Etapa E: aplicar patches + generar output
 │   │   │   └── context_accumulator.py # Gestión de contexto acumulado para LLM
 │   │   ├── workers/
@@ -136,33 +139,37 @@ celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
 
 ## Arquitectura del pipeline
 
-El procesamiento de un documento sigue 5 etapas secuenciales ejecutadas en un solo Celery task (`process_document_pipeline`):
+El procesamiento de un documento sigue 6 etapas secuenciales ejecutadas en un solo Celery task (`process_document_pipeline`):
 
 ```
 ETAPA A: INGESTA        → Recibe DOCX, convierte a PDF (LibreOffice), cuenta páginas
 ETAPA B: EXTRACCIÓN     → Extrae layout/texto de cada página (PyMuPDF), genera previews PNG
-ETAPA D: CORRECCIÓN     → Por cada párrafo: LanguageTool → ChatGPT (con contexto acumulado)
+ETAPA C: ANÁLISIS       → Inferencia de perfil, detección de secciones, glosario, clasificación párrafos (MVP2 Lote 3)
+ETAPA D: CORRECCIÓN     → Por cada párrafo: LanguageTool → ChatGPT (con contexto acumulado + perfil enriquecido)
 ETAPA E: RENDERIZADO    → Aplica patches al DOCX original, genera PDF corregido
 ESTADO FINAL            → completed | failed
 ```
 
-**Estados del documento**: `uploaded → converting → extracting → correcting → rendering → completed/failed`
+**Estados del documento**: `uploaded → converting → extracting → analyzing → correcting → rendering → completed/failed`
 **Estados de página**: `pending → extracting → extracted → correcting → corrected → rendering → rendered/failed`
 
 ---
 
 ## Base de datos (PostgreSQL)
 
-6 tablas principales:
+9 tablas principales:
 
 | Tabla | Propósito | Campos clave |
 |-------|-----------|-------------|
-| `documents` | Documento maestro | id (UUID), filename, status, source_uri, pdf_uri, docx_uri, config_json, total_pages |
+| `documents` | Documento maestro | id (UUID), filename, status, source_uri, pdf_uri, docx_uri, config_json, total_pages, prompt_tokens, llm_cost_usd |
 | `document_profiles` | Perfil editorial (MVP2) | doc_id (FK unique), preset_name, source, genre, audience, register, tone, intervention_level, protected_terms, style_priorities |
 | `pages` | Páginas individuales | doc_id (FK), page_no, page_type, layout_uri, text_uri, preview_uri, status |
-| `blocks` | Bloques de texto/imagen | page_id (FK), block_no, block_type, bbox (x0,y0,x1,y1), original_text, font_info |
-| `patches` | Correcciones aplicadas | block_id (FK), version, source, original_text, corrected_text, operations_json, review_status, applied |
+| `blocks` | Bloques de texto/imagen | page_id (FK), block_no, block_type, bbox, original_text, font_info, paragraph_type, requires_llm, section_id |
+| `patches` | Correcciones aplicadas | block_id (FK), version, source, original_text, corrected_text, operations_json, category, severity, explanation, confidence, route_taken, gate_results, review_reason |
 | `jobs` | Tracking de tareas Celery | doc_id (FK), task_type, celery_task_id, status, error |
+| `llm_usage` | Costos LLM por párrafo | doc_id (FK), paragraph_index, call_type, model_used, prompt_tokens, completion_tokens, cost_usd |
+| `section_summaries` | Secciones detectadas (Lote 3) | doc_id (FK), section_index, section_title, start/end_paragraph, summary_text, topic, active_terms |
+| `term_registry` | Glosario de términos (Lote 3) | doc_id (FK), term, normalized_form, frequency, is_protected, decision |
 
 **Nota**: En MVP las tablas se crean con `Base.metadata.create_all` en startup. No hay Alembic aún.
 
@@ -206,6 +213,7 @@ Base: `/api/v1`
 | GET | `/documents/{id}/download/pdf` | Stream PDF corregido |
 | GET | `/documents/{id}/download/docx` | Stream DOCX corregido |
 | DELETE | `/documents/{id}` | Elimina documento |
+| GET | `/documents/{id}/analysis` | Resultado del análisis editorial (secciones, glosario, perfil inferido) |
 | GET | `/documents/{id}/correction-flow` | Flujo de correcciones (debug/visualización) |
 | GET | `/health` | Health check |
 
@@ -351,9 +359,9 @@ Documentación:
 Lotes de implementación:
 - **Lote 1 (COMPLETADO)**: Perfiles editoriales + flujo upload/process separado + selector UI
 - **Lote 2 (COMPLETADO)**: Prompt parametrizado + patches enriquecidos (category/severity/explanation)
-- Lote 3 (pendiente): Etapa C análisis editorial + modelos section/terms
-- Lote 4 (pendiente): Contexto jerárquico + router de complejidad
-- Lote 5 (pendiente): Quality gates + métricas INFLESZ
+- **Lote 3 (COMPLETADO)**: Etapa C análisis editorial + modelos section_summaries/term_registry
+- **Lote 4 (COMPLETADO)**: Contexto jerárquico + router de complejidad
+- **Lote 5 (COMPLETADO)**: Quality gates + métricas INFLESZ
 
 Cambios del Lote 1:
 - Tabla `document_profiles` con perfil editorial por documento
@@ -374,6 +382,40 @@ Cambios del Lote 2:
 - API: list_corrections retorna campos enriquecidos
 - Frontend: CorrectionHistory con filtros categoría/severidad, badges coloreados, explicación, confianza %
 
+Cambios del Lote 3:
+- Tablas `section_summaries` (resúmenes por sección) y `term_registry` (glosario de términos)
+- Block extendido: paragraph_type (11 tipos), requires_llm, section_id (FK)
+- Nuevo status "analyzing" entre "extracting" y "correcting"
+- Servicio analysis.py: C.1 inferencia perfil, C.3 secciones, C.4 glosario, C.5 clasificación heurística
+- Etapa C insertada en pipeline Celery entre B y D
+- Términos protegidos del análisis se agregan al perfil antes de corrección
+- Endpoint GET /documents/{id}/analysis
+- Frontend: AnalysisView (secciones, glosario, distribución tipos, perfil inferido)
+- Frontend: tab "Análisis" en detalle de documento + etapa "Analizando" en PipelineFlow
+
+Cambios del Lote 4:
+- Nuevo servicio `complexity_router.py`: Router con 3 rutas (SKIP, CHEAP, EDITORIAL) basado en tipo de párrafo, longitud, complejidad sintáctica, posición en sección, nivel de intervención
+- Config: `openai_cheap_model` y `openai_editorial_model` (ambos default gpt-4o-mini, configurables via .env)
+- `openai_client.py`: `correct_with_profile()` acepta `model_override` para modelo distinto por ruta
+- `prompt_builder.py`: User prompt ahora incluye section_summary, active_terms, paragraph_type con hints contextuales
+- `correction.py`: `correct_docx_sync()` acepta `analysis_data`, usa router para decidir ruta, pasa contexto jerárquico, selecciona modelo, logging de distribución
+- `tasks_pipeline.py`: Pasa `analysis_result` a corrección, almacena `route_taken` en patches
+- Modelo Patch: nueva columna `route_taken` (skip|cheap|editorial)
+- Frontend: badges de ruta (Skip/Cheap/Editorial) en CorrectionCard + contadores en stats bar
+
+Cambios del Lote 5:
+- Nuevo servicio `quality_gates.py`: 5 gates de validación post-corrección + INFLESZ (sin dependencias externas)
+  - `gate_not_empty` (crítico): texto corregido no vacío
+  - `gate_expansion_ratio` (crítico): ratio expansión <= max_expansion_ratio del perfil
+  - `gate_rewrite_ratio` (no-crítico): distancia edición normalizada con SequenceMatcher (stdlib)
+  - `gate_protected_terms` (crítico): términos protegidos presentes en original deben mantenerse en corregido
+  - `gate_language_preserved` (no-crítico): heurístico proporción caracteres españoles
+  - `gate_readability_inflesz` (no-crítico): INFLESZ Fernández Huerta en rango target_inflesz_min/max del perfil
+- `correction.py`: Quality gates ejecutados post-LLM; gates críticos descartan corrección (→ gate_rejected), no-críticos marcan manual_review
+- Modelo Patch: 2 columnas nuevas `gate_results` (JSONB) y `review_reason` (Text)
+- `tasks_pipeline.py`: Pasa review_status, review_reason, gate_results a Patch constructor
+- Frontend: barras progreso rewrite_ratio/confidence, badges review_status (Validado/Revisión/Rechazado), detalle de gates expandido, stats bar con contadores de calidad
+
 **Fases futuras (post MVP 2)**:
 - Fase 3: Soporte PDF born-digital
 - Fase 4: OCR para PDFs escaneados
@@ -387,7 +429,7 @@ Cambios del Lote 2:
 2. **Celery monolítico**: Una sola tarea para todo el pipeline en MVP; se dividirá en tareas encadenadas en fases posteriores
 3. **MinIO local**: S3-compatible sin lock-in cloud, funciona idéntico con AWS S3
 4. **Polling REST**: Sin WebSocket en MVP; polling simple cada 4-5 segundos
-5. **Context accumulation**: Ventana deslizante de 3 párrafos corregidos para coherencia del LLM
+5. **Context accumulation**: Ventana deslizante de último párrafo corregido + contexto jerárquico de sección (resumen, términos activos, tipo de párrafo) para coherencia del LLM
 6. **Formato JSON forzado**: `response_format={"type": "json_object"}` para evitar respuestas malformadas del LLM
 7. **Verificación pre-apply**: Antes de aplicar un patch, se verifica que el texto original del párrafo coincida con el esperado
 8. **Auto-create tables**: En MVP se crean tablas en startup (sin Alembic), no apto para producción

@@ -39,6 +39,13 @@ class PatchListItem(BaseModel):
     rewrite_ratio: float | None = None
     pass_number: int | None = None
     model_used: str | None = None
+    # Costo de la llamada LLM asociada
+    cost_usd: float | None = None
+    # Lote 4: ruta del complexity router
+    route_taken: str | None = None
+    # Lote 5: quality gates
+    gate_results: list[dict] | None = None
+    review_reason: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -67,5 +74,8 @@ class PatchDetail(BaseModel):
     rewrite_ratio: float | None = None
     pass_number: int | None = None
     model_used: str | None = None
+    route_taken: str | None = None
+    gate_results: list[dict] | None = None
+    review_reason: str | None = None
 
     model_config = {"from_attributes": True}

@@ -71,6 +71,23 @@ class Patch(Base):
         String(50), nullable=True,
         comment="gpt-4o-mini, claude-sonnet-4-5, languagetool"
     )
+    paragraph_index: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+        comment="Índice del párrafo en el DOCX, para vincular con llm_usage"
+    )
+    route_taken: Mapped[str | None] = mapped_column(
+        String(15), nullable=True,
+        comment="skip|cheap|editorial — ruta del complexity router (Lote 4)"
+    )
+    # Lote 5: Quality Gates
+    gate_results: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment="Lista de resultados de quality gates [{gate_name, passed, value, threshold, message}]"
+    )
+    review_reason: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Razón del review_status (gates fallidos)"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

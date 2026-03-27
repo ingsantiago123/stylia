@@ -39,6 +39,11 @@ export interface DocumentDetail {
   updated_at: string;
   progress: number;
   pages_summary: Record<string, number>;
+  // Token usage & cost (MVP2)
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  llm_cost_usd: number | null;
 }
 
 export interface PageListItem {
@@ -71,6 +76,19 @@ export interface PatchListItem {
   rewrite_ratio: number | null;
   pass_number: number | null;
   model_used: string | null;
+  cost_usd: number | null;
+  // Lote 4: ruta del complexity router
+  route_taken: string | null;
+  // Lote 5: quality gates
+  gate_results: Array<{
+    passed: boolean;
+    gate_name: string;
+    value: number;
+    threshold: number;
+    message: string;
+    critical: boolean;
+  }> | null;
+  review_reason: string | null;
 }
 
 // =============================================
@@ -268,6 +286,76 @@ export async function updateProfile(docId: string, data: StyleProfileCreate): Pr
   return res.json();
 }
 
+// =============================================
+// Costos (LlmUsage)
+// =============================================
+
+export interface CostSummary {
+  total_cost_usd: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  total_documents: number;
+  total_calls: number;
+  avg_cost_per_document: number;
+  avg_cost_per_call: number;
+  model_breakdown: Array<{
+    model: string;
+    calls: number;
+    tokens: number;
+    cost: number;
+  }>;
+  pricing: {
+    model: string;
+    input_per_1m: number;
+    output_per_1m: number;
+  };
+}
+
+export interface DocumentCostItem {
+  doc_id: string;
+  filename: string;
+  status: string;
+  total_pages: number | null;
+  total_calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  created_at: string;
+}
+
+export interface ParagraphCostItem {
+  id: string;
+  paragraph_index: number;
+  location: string;
+  call_type: string;
+  model_used: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+  created_at: string;
+}
+
+export async function getCostSummary(): Promise<CostSummary> {
+  const res = await fetch(`${API_BASE}/costs/summary`);
+  if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}
+
+export async function getCostDocuments(skip = 0, limit = 50): Promise<DocumentCostItem[]> {
+  const res = await fetch(`${API_BASE}/costs/documents?skip=${skip}&limit=${limit}`);
+  if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}
+
+export async function getDocumentCosts(docId: string): Promise<ParagraphCostItem[]> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/costs`);
+  if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}
+
 export async function processDocument(docId: string): Promise<{ message: string; task_id: string }> {
   const res = await fetch(`${API_BASE}/documents/${docId}/process`, {
     method: "POST",
@@ -276,5 +364,62 @@ export async function processDocument(docId: string): Promise<{ message: string;
     const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
     throw new Error(err.detail || `Error ${res.status}`);
   }
+  return res.json();
+}
+
+// =============================================
+// Análisis editorial (MVP2 Lote 3)
+// =============================================
+
+export interface SectionSummaryItem {
+  section_index: number;
+  section_title: string | null;
+  start_paragraph: number;
+  end_paragraph: number;
+  summary_text: string | null;
+  topic: string | null;
+  local_tone: string | null;
+  active_terms: string[];
+  transition_from_previous: string | null;
+}
+
+export interface TermRegistryItem {
+  term: string;
+  normalized_form: string;
+  frequency: number;
+  first_occurrence_paragraph: number;
+  is_protected: boolean;
+  decision: string;
+}
+
+export interface InferredProfile {
+  genre: string | null;
+  audience_type: string | null;
+  register: string | null;
+  tone: string | null;
+  spanish_variant: string | null;
+  key_terms: string[];
+  suggested_intervention: string | null;
+}
+
+export interface AnalysisResult {
+  doc_id: string;
+  status: string;
+  inferred_profile: InferredProfile | null;
+  sections: SectionSummaryItem[];
+  terms: TermRegistryItem[];
+  paragraph_classifications: Array<{
+    paragraph_index: number;
+    location: string;
+    paragraph_type: string;
+    requires_llm: boolean;
+    text_preview: string;
+  }>;
+  stats: Record<string, unknown>;
+}
+
+export async function getDocumentAnalysis(docId: string): Promise<AnalysisResult> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/analysis`);
+  if (!res.ok) throw new Error(`Error ${res.status}`);
   return res.json();
 }

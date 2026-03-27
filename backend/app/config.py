@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # --- Celery ---
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
+    celery_task_time_limit: int = 7200
+    celery_task_soft_time_limit: int = 6900
+    celery_worker_prefetch_multiplier: int = 1
+    celery_result_expires: int = 86400
 
     # --- MinIO ---
     minio_endpoint: str = "localhost:9000"
@@ -45,8 +49,15 @@ class Settings(BaseSettings):
     # --- OpenAI API ---
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    openai_cheap_model: str = "gpt-4o-mini"
+    openai_editorial_model: str = "gpt-4o-mini"
     openai_max_tokens: int = 500
     openai_temperature: float = 0.3
+
+    # --- Precios OpenAI (USD por 1M tokens) ---
+    # Actualizar cuando cambien: https://openai.com/api/pricing/
+    openai_pricing_input: float = 0.15     # gpt-4o-mini input
+    openai_pricing_output: float = 0.60    # gpt-4o-mini output
 
     # --- LLM (llama.cpp) - Fase 2 ---
     llama_url: str = "http://localhost:8080"

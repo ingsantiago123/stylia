@@ -13,6 +13,17 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _extract_usage(response) -> dict:
+    """Extrae tokens de uso de una respuesta de OpenAI."""
+    if response and hasattr(response, "usage") and response.usage:
+        return {
+            "prompt_tokens": response.usage.prompt_tokens or 0,
+            "completion_tokens": response.usage.completion_tokens or 0,
+            "total_tokens": response.usage.total_tokens or 0,
+        }
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
 class OpenAIClient:
     """Cliente para interactuar con la API de OpenAI."""
     
@@ -34,21 +45,19 @@ class OpenAIClient:
         original_text: str,
         context_blocks: list[str],
         max_length_ratio: float = 1.1
-    ) -> Optional[str]:
+    ) -> tuple[Optional[str], dict]:
         """
         Corrige el estilo del texto usando ChatGPT con contexto acumulado.
-        
-        Args:
-            original_text: Texto a corregir (ya pasó por LanguageTool)
-            context_blocks: Párrafos anteriores ya corregidos para contexto
-            max_length_ratio: Máxima expansión permitida (1.1 = 110%)
-        
+
         Returns:
-            Texto corregido o None si hay error
+            Tupla (texto_corregido, usage_dict) donde usage_dict tiene
+            prompt_tokens, completion_tokens, total_tokens.
         """
+        empty_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
         if not self.client:
             logger.warning("OpenAI cliente no disponible, usando simulación")
-            return self._simulate_correction(original_text)
+            return self._simulate_correction(original_text), empty_usage
             
         # Construir contexto
         context_text = ""
@@ -102,41 +111,49 @@ Formato de respuesta JSON requerido:
             )
             
             content = response.choices[0].message.content
-            
+            usage = _extract_usage(response)
+
             # Parsear JSON response
             correction_data = json.loads(content)
             corrected_text = correction_data.get("corrected_text", original_text)
-            
+
             # Validar longitud
             if len(corrected_text) > max_length:
                 logger.warning(f"Texto corregido excede longitud máxima ({len(corrected_text)} > {max_length})")
-                return original_text  # Retornar original si excede
-                
+                return original_text, usage
+
             logger.info(f"OpenAI: {len(correction_data.get('changes_made', []))} cambios aplicados")
-            logger.info(f"OpenAI response: {correction_data.get('changes_made', [])}")
-            return corrected_text
-            
+            return corrected_text, usage
+
         except Exception as e:
             logger.error(f"Error al llamar OpenAI API: {e}")
-            return None
+            return None, empty_usage
     
     def correct_with_profile(
         self,
         system_prompt: str,
         user_prompt: str,
         max_length: int | None = None,
-    ) -> dict | None:
+        model_override: str | None = None,
+    ) -> tuple[dict | None, dict]:
         """
         MVP2: Corrección con prompts parametrizados.
-        Retorna dict con la respuesta estructurada del LLM, o None si falla.
+        Retorna tupla (data_dict, usage_dict).
+
+        Args:
+            model_override: Modelo alternativo (ej. editorial). Si None usa self.model.
         """
+        empty_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
         if not self.client:
             logger.warning("OpenAI cliente no disponible")
-            return None
+            return None, empty_usage
+
+        model = model_override or self.model
 
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -147,6 +164,7 @@ Formato de respuesta JSON requerido:
             )
 
             content = response.choices[0].message.content
+            usage = _extract_usage(response)
             data = json.loads(content)
 
             # Validar longitud si se especifica
@@ -159,11 +177,11 @@ Formato de respuesta JSON requerido:
                 data["corrected_text"] = ""
                 data["changes"] = []
 
-            return data
+            return data, usage
 
         except Exception as e:
             logger.error(f"Error en correct_with_profile: {e}")
-            return None
+            return None, empty_usage
 
     def _simulate_correction(self, text: str) -> str:
         """Simulación de corrección cuando no hay API key."""

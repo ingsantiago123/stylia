@@ -30,6 +30,7 @@ interface TooltipData {
   source: string;
   original_snippet: string;
   corrected_snippet: string;
+  cost_usd: number | null;
 }
 
 // =============================================
@@ -110,6 +111,10 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
 
   const handleAnnotationHover = useCallback((e: React.MouseEvent, ann: PageAnnotation) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    // Match annotation to correction to get cost
+    const match = corrections.find(
+      (c) => c.original_snippet === ann.original_snippet && c.corrected_snippet === ann.corrected_snippet
+    );
     setTooltip({
       x: rect.left + rect.width / 2,
       y: rect.top - 8,
@@ -120,8 +125,9 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
       source: ann.source,
       original_snippet: ann.original_snippet,
       corrected_snippet: ann.corrected_snippet,
+      cost_usd: match?.cost_usd ?? null,
     });
-  }, []);
+  }, [corrections]);
 
   const handleAnnotationLeave = useCallback(() => {
     setTooltip(null);
@@ -212,6 +218,14 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
                 <span className="text-krypton font-semibold">{correctionStats.total}</span> correcciones
               </span>
             )}
+            {(() => {
+              const totalCost = corrections.reduce((sum, c) => sum + (c.cost_usd || 0), 0);
+              return totalCost > 0 ? (
+                <span className="text-emerald-400 font-mono">
+                  ${totalCost < 0.01 ? totalCost.toFixed(6) : totalCost.toFixed(4)}
+                </span>
+              ) : null;
+            })()}
             {Object.entries(correctionStats.categories).length > 0 && (
               <div className="flex items-center gap-1">
                 {Object.entries(correctionStats.categories)
@@ -429,6 +443,15 @@ function AnnotationTooltip({ data }: { data: TooltipData }) {
             <p className="text-[11px] text-krypton/80 leading-snug">{data.corrected_snippet}</p>
           </div>
         </div>
+
+        {/* Cost */}
+        {data.cost_usd != null && data.cost_usd > 0 && (
+          <div className="border-t border-carbon-300/50 pt-1.5 mt-1.5 flex items-center justify-end">
+            <span className="text-[10px] text-emerald-400 font-mono">
+              Costo: ${data.cost_usd < 0.001 ? data.cost_usd.toFixed(6) : data.cost_usd.toFixed(4)}
+            </span>
+          </div>
+        )}
 
         {/* Arrow */}
         <div className="absolute left-1/2 -translate-x-1/2 -bottom-1 w-2 h-2 bg-carbon-100 border-r border-b border-carbon-300 rotate-45" />

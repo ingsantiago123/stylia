@@ -19,6 +19,10 @@ from app.config import settings
 from app.utils import minio_client
 from app.utils.openai_client import openai_client
 from app.services.prompt_builder import build_system_prompt, build_user_prompt
+from app.services.complexity_router import (
+    route_paragraph, compute_section_position, CorrectionRoute,
+)
+from app.services.quality_gates import validate_correction as run_quality_gates
 
 logger = logging.getLogger(__name__)
 
@@ -193,15 +197,16 @@ def correct_docx_sync(
     docx_uri: str,
     config: dict,
     profile: dict | None = None,
-) -> list[dict]:
+    analysis_data: dict | None = None,
+) -> tuple[list[dict], list[dict]]:
     """
     Corrige un DOCX directamente, párrafo por párrafo.
-    Pipeline: LanguageTool → ChatGPT (con contexto acumulado).
+    Pipeline: Router → LanguageTool → ChatGPT (con contexto jerárquico).
 
-    MVP2: Si profile viene, usa PromptBuilder para prompt parametrizado
-    y parsea respuesta estructurada con categorías y explicaciones.
+    Args:
+        analysis_data: Resultado de Etapa C con sections, paragraph_classifications.
 
-    Retorna lista de parches con campos enriquecidos.
+    Retorna tupla (patches, usage_records).
     """
     language = config.get("language", "es")
     disabled_rules = config.get("lt_disabled_rules", [])
@@ -221,6 +226,7 @@ def correct_docx_sync(
 
     patches = []
     corrected_context: list[str] = []
+    usage_records: list[dict] = []
 
     all_paragraphs = _collect_all_paragraphs(doc)
     logger.info(f"Documento {doc_id}: {len(all_paragraphs)} párrafos a corregir")
@@ -228,6 +234,18 @@ def correct_docx_sync(
     # MVP2: Construir system prompt UNA VEZ (cacheable)
     system_prompt = build_system_prompt() if profile else None
     max_expansion = profile.get("max_expansion_ratio", 1.15) if profile else 1.15
+
+    # Lote 4: Preparar datos del análisis para contexto jerárquico
+    sections = (analysis_data or {}).get("sections", [])
+    para_classifications = {}
+    for pc in (analysis_data or {}).get("paragraph_classifications", []):
+        para_classifications[pc["paragraph_index"]] = pc
+
+    # Lote 4: Contadores de rutas para logging
+    route_counts = {"skip": 0, "cheap": 0, "editorial": 0}
+
+    # Lote 5: Contadores de quality gates
+    gate_stats = {"passed": 0, "discarded": 0, "flagged": 0}
 
     for idx, (para_text, location) in enumerate(all_paragraphs):
         text = para_text.strip()
@@ -250,25 +268,78 @@ def correct_docx_sync(
                 f"Párrafo {idx}: LanguageTool → {len(lt_operations)} correcciones"
             )
 
-        # === PASO 2: LLM (estilo) ===
+        # === Lote 4: Contexto jerárquico y routing ===
+        classification = para_classifications.get(idx, {})
+        paragraph_type = classification.get("paragraph_type")
+
+        section_position, is_section_transition, current_section = \
+            compute_section_position(idx, sections)
+
+        section_summary = None
+        active_terms = None
+        if current_section:
+            section_summary = current_section.get("summary_text") or current_section.get("topic")
+            active_terms = current_section.get("active_terms", [])
+
+        # Decidir ruta de corrección
+        route_decision = route_paragraph(
+            text=post_lt_text,
+            paragraph_type=paragraph_type,
+            lt_matches_count=len(lt_operations),
+            profile=profile,
+            is_section_transition=is_section_transition,
+            section_position=section_position,
+        )
+        route_counts[route_decision.route.value] += 1
+
+        # === PASO 2: LLM (estilo) — según ruta ===
         max_length = int(len(post_lt_text) * max_expansion)
         llm_changes = []
         llm_confidence = None
         llm_rewrite_ratio = None
+        route_taken = route_decision.route.value
+        model_used_actual = "languagetool"
 
-        if profile and system_prompt:
-            # MVP2: Prompt parametrizado con perfil
+        if route_decision.route == CorrectionRoute.SKIP:
+            # Solo LanguageTool, no enviar al LLM
+            final_text = post_lt_text
+
+        elif profile and system_prompt:
+            # MVP2: Prompt parametrizado con perfil + contexto jerárquico
             user_prompt = build_user_prompt(
                 text=post_lt_text,
                 profile=profile,
                 context_prev=corrected_context[-1] if corrected_context else None,
                 paragraph_index=idx,
+                section_summary=section_summary,
+                active_terms=active_terms,
+                paragraph_type=paragraph_type,
             )
-            llm_response = openai_client.correct_with_profile(
+
+            # Seleccionar modelo según ruta
+            if route_decision.route == CorrectionRoute.EDITORIAL:
+                model_override = settings.openai_editorial_model
+            else:
+                model_override = settings.openai_cheap_model
+            model_used_actual = model_override
+
+            llm_response, llm_usage = openai_client.correct_with_profile(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 max_length=max_length,
+                model_override=model_override,
             )
+            if llm_usage["total_tokens"] > 0:
+                _cost = (llm_usage["prompt_tokens"] / 1e6 * settings.openai_pricing_input) + \
+                        (llm_usage["completion_tokens"] / 1e6 * settings.openai_pricing_output)
+                usage_records.append({
+                    "paragraph_index": idx,
+                    "location": location,
+                    "call_type": f"correction_{route_taken}",
+                    "model_used": model_override,
+                    **llm_usage,
+                    "cost_usd": round(_cost, 8),
+                })
 
             if llm_response and llm_response.get("action") == "correct":
                 corrected = llm_response.get("corrected_text", "")
@@ -278,24 +349,79 @@ def correct_docx_sync(
                     llm_changes = llm_response.get("changes", [])
                     llm_confidence = llm_response.get("confidence")
                     llm_rewrite_ratio = llm_response.get("rewrite_ratio")
-                    logger.info(f"Párrafo {idx}: LLM → {len(llm_changes)} cambios (perfil)")
+                    logger.info(
+                        f"Párrafo {idx}: LLM ({route_taken}) → "
+                        f"{len(llm_changes)} cambios [{route_decision.reason}]"
+                    )
                 else:
                     final_text = post_lt_text
             else:
                 final_text = post_lt_text
         else:
             # MVP1 fallback: prompt genérico
-            chatgpt_text = openai_client.correct_text_style(
+            chatgpt_text, mvp1_usage = openai_client.correct_text_style(
                 original_text=post_lt_text,
                 context_blocks=corrected_context[-3:],
                 max_length_ratio=max_expansion,
             )
+            if mvp1_usage["total_tokens"] > 0:
+                _cost = (mvp1_usage["prompt_tokens"] / 1e6 * settings.openai_pricing_input) + \
+                        (mvp1_usage["completion_tokens"] / 1e6 * settings.openai_pricing_output)
+                usage_records.append({
+                    "paragraph_index": idx,
+                    "location": location,
+                    "call_type": "correction_mvp1",
+                    "model_used": settings.openai_model,
+                    **mvp1_usage,
+                    "cost_usd": round(_cost, 8),
+                })
+            model_used_actual = settings.openai_model
             if chatgpt_text is not None and chatgpt_text != post_lt_text:
                 final_text = chatgpt_text
                 source = "languagetool+chatgpt"
                 logger.info(f"Párrafo {idx}: ChatGPT → estilo mejorado")
             else:
                 final_text = post_lt_text
+
+        # === Lote 5: Quality Gates ===
+        review_status = "auto_accepted"
+        review_reason = None
+        gate_results_data = []
+
+        if final_text != text and route_decision.route != CorrectionRoute.SKIP:
+            gates = run_quality_gates(
+                original=text,
+                corrected=final_text,
+                profile=profile,
+                protected_terms=profile.get("protected_terms", []) if profile else [],
+            )
+            gate_results_data = [g.to_dict() for g in gates]
+            failed_critical = [g for g in gates if not g.passed and g.critical]
+            failed_non_critical = [g for g in gates if not g.passed and not g.critical]
+
+            if failed_critical:
+                # Gate crítico falló → descartar corrección LLM, mantener solo LT
+                reasons = "; ".join(g.message for g in failed_critical)
+                logger.warning(
+                    f"Párrafo {idx}: gates críticos fallaron → descartando corrección LLM: {reasons}"
+                )
+                final_text = post_lt_text
+                source = "languagetool" if lt_operations else source
+                llm_changes = []
+                review_status = "gate_rejected"
+                review_reason = reasons
+                gate_stats["discarded"] += 1
+            elif failed_non_critical:
+                # Gate no-crítico falló → marcar para revisión
+                reasons = "; ".join(g.message for g in failed_non_critical)
+                review_status = "manual_review"
+                review_reason = reasons
+                gate_stats["flagged"] += 1
+                logger.info(
+                    f"Párrafo {idx}: gates no-críticos fallaron → manual_review: {reasons}"
+                )
+            else:
+                gate_stats["passed"] += 1
 
         corrected_context.append(final_text)
 
@@ -312,7 +438,13 @@ def correct_docx_sync(
                 "changes": llm_changes,
                 "confidence": llm_confidence,
                 "rewrite_ratio": llm_rewrite_ratio,
-                "model_used": settings.openai_model if "chatgpt" in source else "languagetool",
+                "model_used": model_used_actual if "chatgpt" in source else "languagetool",
+                # Lote 4: ruta de corrección
+                "route_taken": route_taken,
+                # Lote 5: quality gates
+                "review_status": review_status,
+                "review_reason": review_reason,
+                "gate_results": gate_results_data,
             }
             patches.append(patch_data)
 
@@ -322,11 +454,17 @@ def correct_docx_sync(
         patch_bytes = json.dumps(patches, ensure_ascii=False, indent=2).encode("utf-8")
         minio_client.upload_file(patch_key, patch_bytes, content_type="application/json")
 
+    total_tokens = sum(r["total_tokens"] for r in usage_records)
+    total_cost = sum(r["cost_usd"] for r in usage_records)
     logger.info(
         f"Documento {doc_id}: {len(patches)} párrafos corregidos "
-        f"({sum(1 for p in patches if 'chatgpt' in p['source'])} con GPT)"
+        f"({sum(1 for p in patches if 'chatgpt' in p['source'])} con GPT), "
+        f"tokens: {total_tokens}, costo: ${total_cost:.6f}, "
+        f"llamadas: {len(usage_records)}, "
+        f"rutas: skip={route_counts['skip']} cheap={route_counts['cheap']} editorial={route_counts['editorial']}, "
+        f"gates: ok={gate_stats['passed']} descartados={gate_stats['discarded']} revisión={gate_stats['flagged']}"
     )
-    return patches
+    return patches, usage_records
 
 
 def _collect_all_paragraphs(doc: DocxDocument) -> list[tuple[str, str]]:

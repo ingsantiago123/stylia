@@ -21,9 +21,16 @@ from app.models.page import Page
 from app.models.block import Block
 from app.models.patch import Patch
 from app.models.style_profile import DocumentProfile
-from app.schemas.document import DocumentUploadResponse, DocumentDetail, DocumentListItem
+from app.models.llm_usage import LlmUsage
+from app.schemas.document import (
+    DocumentUploadResponse, DocumentDetail, DocumentListItem,
+    CostSummary, DocumentCostItem, ParagraphCostItem,
+)
 from app.schemas.page import PageListItem
 from app.schemas.patch import PatchDetail, PatchListItem
+from app.schemas.analysis import AnalysisResult, SectionSummaryItem, TermRegistryItem, InferredProfile
+from app.models.section_summary import SectionSummary
+from app.models.term_registry import TermRegistry
 from app.schemas.style_profile import (
     StyleProfileCreate, StyleProfileUpdate, StyleProfileResponse, PresetListItem
 )
@@ -310,6 +317,23 @@ async def get_document(
     progress = await _calculate_progress(db, doc)
     pages_summary = await _get_pages_summary(db, doc_id)
 
+    # Agregar costos desde llm_usage (con fallback a columnas viejas)
+    cost_row = await db.execute(
+        select(
+            func.coalesce(func.sum(LlmUsage.prompt_tokens), 0),
+            func.coalesce(func.sum(LlmUsage.completion_tokens), 0),
+            func.coalesce(func.sum(LlmUsage.total_tokens), 0),
+            func.coalesce(func.sum(LlmUsage.cost_usd), 0.0),
+        ).where(LlmUsage.doc_id == doc_id)
+    )
+    prompt_t, completion_t, total_t, cost_usd = cost_row.one()
+    # Fallback: docs procesados antes del cambio tienen datos en columnas viejas
+    if int(total_t) == 0 and doc.total_tokens and doc.total_tokens > 0:
+        prompt_t = doc.prompt_tokens or 0
+        completion_t = doc.completion_tokens or 0
+        total_t = doc.total_tokens or 0
+        cost_usd = doc.llm_cost_usd or 0.0
+
     return DocumentDetail(
         id=doc.id,
         filename=doc.filename,
@@ -325,6 +349,10 @@ async def get_document(
         updated_at=doc.updated_at,
         progress=progress,
         pages_summary=pages_summary,
+        prompt_tokens=int(prompt_t),
+        completion_tokens=int(completion_t),
+        total_tokens=int(total_t),
+        llm_cost_usd=float(cost_usd),
     )
 
 
@@ -384,8 +412,18 @@ async def list_corrections(
     )
     rows = result.all()
 
+    # Obtener costos por paragraph_index para vincular a cada patch
+    usage_result = await db.execute(
+        select(LlmUsage.paragraph_index, LlmUsage.cost_usd)
+        .where(LlmUsage.doc_id == doc_id)
+    )
+    cost_by_paragraph: dict[int, float] = {
+        row.paragraph_index: row.cost_usd for row in usage_result.all()
+    }
+
     items = []
     for patch, block_no in rows:
+        patch_cost = cost_by_paragraph.get(patch.paragraph_index) if patch.paragraph_index is not None else None
         items.append(PatchListItem(
             id=patch.id,
             block_id=patch.block_id,
@@ -405,6 +443,10 @@ async def list_corrections(
             rewrite_ratio=patch.rewrite_ratio,
             pass_number=patch.pass_number,
             model_used=patch.model_used,
+            cost_usd=patch_cost,
+            route_taken=patch.route_taken,
+            gate_results=patch.gate_results,
+            review_reason=patch.review_reason,
         ))
 
     return items
@@ -554,6 +596,131 @@ async def delete_document(
 
 
 # =============================================
+# COSTOS (LlmUsage)
+# =============================================
+
+@router.get("/costs/summary")
+async def get_cost_summary(db: AsyncSession = Depends(get_db)):
+    """Resumen global de costos de todos los documentos."""
+    result = await db.execute(
+        select(
+            func.count(LlmUsage.id),
+            func.coalesce(func.sum(LlmUsage.prompt_tokens), 0),
+            func.coalesce(func.sum(LlmUsage.completion_tokens), 0),
+            func.coalesce(func.sum(LlmUsage.total_tokens), 0),
+            func.coalesce(func.sum(LlmUsage.cost_usd), 0.0),
+            func.count(func.distinct(LlmUsage.doc_id)),
+        )
+    )
+    total_calls, prompt_t, completion_t, total_t, total_cost, total_docs = result.one()
+
+    # Breakdown por modelo
+    model_result = await db.execute(
+        select(
+            LlmUsage.model_used,
+            func.count(LlmUsage.id),
+            func.coalesce(func.sum(LlmUsage.total_tokens), 0),
+            func.coalesce(func.sum(LlmUsage.cost_usd), 0.0),
+        ).group_by(LlmUsage.model_used)
+    )
+    model_breakdown = [
+        {"model": m, "calls": c, "tokens": int(t), "cost": float(co)}
+        for m, c, t, co in model_result.all()
+    ]
+
+    return {
+        "total_cost_usd": float(total_cost),
+        "total_prompt_tokens": int(prompt_t),
+        "total_completion_tokens": int(completion_t),
+        "total_tokens": int(total_t),
+        "total_documents": int(total_docs),
+        "total_calls": int(total_calls),
+        "avg_cost_per_document": float(total_cost) / max(int(total_docs), 1),
+        "avg_cost_per_call": float(total_cost) / max(int(total_calls), 1),
+        "model_breakdown": model_breakdown,
+        "pricing": {
+            "model": settings.openai_model,
+            "input_per_1m": settings.openai_pricing_input,
+            "output_per_1m": settings.openai_pricing_output,
+        },
+    }
+
+
+@router.get("/costs/documents")
+async def get_cost_documents(
+    skip: int = 0,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+):
+    """Costo desglosado por documento."""
+    usage_sub = (
+        select(
+            LlmUsage.doc_id,
+            func.count(LlmUsage.id).label("total_calls"),
+            func.sum(LlmUsage.prompt_tokens).label("prompt_tokens"),
+            func.sum(LlmUsage.completion_tokens).label("completion_tokens"),
+            func.sum(LlmUsage.total_tokens).label("total_tokens"),
+            func.sum(LlmUsage.cost_usd).label("total_cost_usd"),
+        )
+        .group_by(LlmUsage.doc_id)
+        .subquery()
+    )
+
+    result = await db.execute(
+        select(
+            Document.id,
+            Document.filename,
+            Document.status,
+            Document.total_pages,
+            Document.created_at,
+            usage_sub.c.total_calls,
+            usage_sub.c.prompt_tokens,
+            usage_sub.c.completion_tokens,
+            usage_sub.c.total_tokens,
+            usage_sub.c.total_cost_usd,
+        )
+        .join(usage_sub, Document.id == usage_sub.c.doc_id)
+        .order_by(Document.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    rows = result.all()
+
+    return [
+        {
+            "doc_id": str(r.id),
+            "filename": r.filename,
+            "status": r.status,
+            "total_pages": r.total_pages,
+            "total_calls": r.total_calls,
+            "prompt_tokens": int(r.prompt_tokens),
+            "completion_tokens": int(r.completion_tokens),
+            "total_tokens": int(r.total_tokens),
+            "total_cost_usd": float(r.total_cost_usd),
+            "created_at": r.created_at.isoformat(),
+        }
+        for r in rows
+    ]
+
+
+@router.get("/documents/{doc_id}/costs")
+async def get_document_costs(
+    doc_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Desglose de costos por párrafo de un documento."""
+    await _get_doc_or_404(db, doc_id)
+
+    result = await db.execute(
+        select(LlmUsage)
+        .where(LlmUsage.doc_id == doc_id)
+        .order_by(LlmUsage.paragraph_index)
+    )
+    records = result.scalars().all()
+    return [ParagraphCostItem.model_validate(r) for r in records]
+
+
+# =============================================
 # HELPERS
 # =============================================
 
@@ -575,6 +742,7 @@ async def _calculate_progress(db: AsyncSession, doc: Document) -> float:
         status_progress = {
             "converting": 0.1,
             "extracting": 0.2,
+            "analyzing": 0.35,
             "correcting": 0.5,
             "rendering": 0.8,
         }
@@ -608,6 +776,78 @@ async def _get_pages_summary(db: AsyncSession, doc_id: UUID) -> dict:
         .group_by(Page.status)
     )
     return {status: count for status, count in result.all()}
+
+
+# =============================================
+# ANÁLISIS EDITORIAL (MVP2 Lote 3)
+# =============================================
+
+@router.get("/documents/{doc_id}/analysis", response_model=AnalysisResult)
+async def get_document_analysis(doc_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Retorna el resultado del análisis editorial (Etapa C) de un documento."""
+    await _get_doc_or_404(db, doc_id)  # Validates document exists
+
+    # Obtener secciones
+    sections_result = await db.execute(
+        select(SectionSummary)
+        .where(SectionSummary.doc_id == doc_id)
+        .order_by(SectionSummary.section_index)
+    )
+    sections = sections_result.scalars().all()
+
+    # Obtener términos
+    terms_result = await db.execute(
+        select(TermRegistry)
+        .where(TermRegistry.doc_id == doc_id)
+        .order_by(TermRegistry.frequency.desc())
+    )
+    terms = terms_result.scalars().all()
+
+    # Obtener perfil inferido (del DocumentProfile si existe)
+    profile_result = await db.execute(
+        select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+    )
+    profile_row = profile_result.scalar_one_or_none()
+
+    inferred = None
+    if profile_row:
+        inferred = InferredProfile(
+            genre=profile_row.genre,
+            audience_type=profile_row.audience_type,
+            register=profile_row.register,
+            tone=profile_row.tone,
+            key_terms=[t.term for t in terms if t.is_protected],
+        )
+
+    # Stats
+    has_analysis = len(sections) > 0 or len(terms) > 0
+    stats = {
+        "sections_detected": len(sections),
+        "terms_extracted": len(terms),
+        "terms_protected": sum(1 for t in terms if t.is_protected),
+        "has_analysis": has_analysis,
+    }
+
+    # Recuperar paragraph_classifications de MinIO (persistidas en Etapa C)
+    paragraph_classifications = []
+    cls_key = f"analysis/{doc_id}/classifications.json"
+    try:
+        if minio_client.file_exists(cls_key):
+            import json
+            cls_data = minio_client.download_file(cls_key)
+            paragraph_classifications = json.loads(cls_data.decode("utf-8"))
+    except Exception as e:
+        logger.warning(f"No se pudieron leer clasificaciones de MinIO: {e}")
+
+    return AnalysisResult(
+        doc_id=doc_id,
+        status="completed" if has_analysis else "pending",
+        inferred_profile=inferred,
+        sections=[SectionSummaryItem.model_validate(s) for s in sections],
+        terms=[TermRegistryItem.model_validate(t) for t in terms],
+        paragraph_classifications=paragraph_classifications,
+        stats=stats,
+    )
 
 
 @router.get("/documents/{doc_id}/correction-flow")
@@ -675,6 +915,7 @@ async def get_correction_flow(doc_id: str, db: AsyncSession = Depends(get_db)):
                 "total_requests": 0,
                 "languagetool_requests": 0,
                 "chatgpt_requests": 0,
+                "total_cost_usd": 0.0,
             },
             "requests": [],
         }
@@ -682,11 +923,22 @@ async def get_correction_flow(doc_id: str, db: AsyncSession = Depends(get_db)):
     lt_count = sum(1 for p in patches if p.source == "languagetool")
     gpt_count = sum(1 for p in patches if "chatgpt" in p.source)
 
+    # Obtener costos por paragraph_index
+    cost_result = await db.execute(
+        select(LlmUsage)
+        .where(LlmUsage.doc_id == doc_uuid)
+        .order_by(LlmUsage.paragraph_index)
+    )
+    cost_records = cost_result.scalars().all()
+    cost_by_para: dict[int, LlmUsage] = {r.paragraph_index: r for r in cost_records}
+
     # Reconstruir el flujo con contexto acumulado
     corrected_context: list[str] = []
     requests_list = []
 
     for i, patch in enumerate(patches):
+        para_cost = cost_by_para.get(patch.paragraph_index) if patch.paragraph_index is not None else None
+
         # Paso LanguageTool
         if patch.operations_json:
             requests_list.append({
@@ -705,7 +957,7 @@ async def get_correction_flow(doc_id: str, db: AsyncSession = Depends(get_db)):
                 {"block_no": j, "corrected_text": t[:100] + "..." if len(t) > 100 else t}
                 for j, t in enumerate(corrected_context[-3:])
             ]
-            requests_list.append({
+            step_data = {
                 "step": len(requests_list) + 1,
                 "type": "chatgpt_style",
                 "block_no": i,
@@ -715,9 +967,17 @@ async def get_correction_flow(doc_id: str, db: AsyncSession = Depends(get_db)):
                 "context_preview": ctx_preview,
                 "prompt": f"Mejora de estilo con contexto de {len(corrected_context)} párrafos previos",
                 "timestamp": patch.created_at.isoformat(),
-            })
+            }
+            if para_cost:
+                step_data["prompt_tokens"] = para_cost.prompt_tokens
+                step_data["completion_tokens"] = para_cost.completion_tokens
+                step_data["total_tokens"] = para_cost.total_tokens
+                step_data["cost_usd"] = para_cost.cost_usd
+            requests_list.append(step_data)
 
         corrected_context.append(patch.corrected_text)
+
+    total_cost = sum(r.cost_usd for r in cost_records)
 
     return {
         "document_id": doc_id,
@@ -727,6 +987,7 @@ async def get_correction_flow(doc_id: str, db: AsyncSession = Depends(get_db)):
             "total_requests": len(requests_list),
             "languagetool_requests": lt_count,
             "chatgpt_requests": gpt_count,
+            "total_cost_usd": round(total_cost, 6),
         },
         "requests": requests_list,
     }

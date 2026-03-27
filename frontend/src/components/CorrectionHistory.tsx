@@ -29,6 +29,12 @@ const SEVERITY_COLORS: Record<string, { bg: string; text: string }> = {
   sugerencia: { bg: "bg-emerald-900/30", text: "text-emerald-400" },
 };
 
+const ROUTE_COLORS: Record<string, { bg: string; text: string; label: string }> = {
+  skip: { bg: "bg-gray-900/30", text: "text-gray-400", label: "Skip" },
+  cheap: { bg: "bg-blue-900/30", text: "text-blue-400", label: "Cheap" },
+  editorial: { bg: "bg-purple-900/30", text: "text-purple-400", label: "Editorial" },
+};
+
 export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
   const [filterSource, setFilterSource] = useState<FilterSource>("all");
   const [filterCategory, setFilterCategory] = useState<FilterCategory>("all");
@@ -71,7 +77,13 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
   const stats = useMemo(() => {
     const lt = corrections.filter((c) => c.source === "languagetool").length;
     const llm = corrections.filter((c) => c.source.includes("chatgpt") || c.source === "llm").length;
-    return { total: corrections.length, languagetool: lt, llm };
+    const routeSkip = corrections.filter((c) => c.route_taken === "skip").length;
+    const routeCheap = corrections.filter((c) => c.route_taken === "cheap").length;
+    const routeEditorial = corrections.filter((c) => c.route_taken === "editorial").length;
+    const validated = corrections.filter((c) => c.review_status === "auto_accepted").length;
+    const flagged = corrections.filter((c) => c.review_status === "manual_review").length;
+    const rejected = corrections.filter((c) => c.review_status === "gate_rejected").length;
+    return { total: corrections.length, languagetool: lt, llm, routeSkip, routeCheap, routeEditorial, validated, flagged, rejected };
   }, [corrections]);
 
   if (corrections.length === 0) {
@@ -108,6 +120,48 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
               <div className="text-lg font-semibold text-bruma">{stats.llm}</div>
               <div className="text-[10px] uppercase tracking-wider text-plomo">LLM</div>
             </div>
+            {(stats.routeSkip > 0 || stats.routeCheap > 0 || stats.routeEditorial > 0) && (
+              <>
+                <div className="h-8 w-px bg-carbon-300" />
+                {stats.routeSkip > 0 && (
+                  <div className="text-center">
+                    <div className="text-lg font-semibold text-gray-400">{stats.routeSkip}</div>
+                    <div className="text-[10px] uppercase tracking-wider text-plomo">Skip</div>
+                  </div>
+                )}
+                <div className="text-center">
+                  <div className="text-lg font-semibold text-blue-400">{stats.routeCheap}</div>
+                  <div className="text-[10px] uppercase tracking-wider text-plomo">Cheap</div>
+                </div>
+                {stats.routeEditorial > 0 && (
+                  <div className="text-center">
+                    <div className="text-lg font-semibold text-purple-400">{stats.routeEditorial}</div>
+                    <div className="text-[10px] uppercase tracking-wider text-plomo">Editorial</div>
+                  </div>
+                )}
+              </>
+            )}
+            {(stats.flagged > 0 || stats.rejected > 0) && (
+              <>
+                <div className="h-8 w-px bg-carbon-300" />
+                <div className="text-center">
+                  <div className="text-lg font-semibold text-krypton">{stats.validated}</div>
+                  <div className="text-[10px] uppercase tracking-wider text-plomo">Validados</div>
+                </div>
+                {stats.flagged > 0 && (
+                  <div className="text-center">
+                    <div className="text-lg font-semibold text-orange-400">{stats.flagged}</div>
+                    <div className="text-[10px] uppercase tracking-wider text-plomo">Revisión</div>
+                  </div>
+                )}
+                {stats.rejected > 0 && (
+                  <div className="text-center">
+                    <div className="text-lg font-semibold text-red-400">{stats.rejected}</div>
+                    <div className="text-[10px] uppercase tracking-wider text-plomo">Rechazados</div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
 
           {/* Filters */}
@@ -264,20 +318,36 @@ function CorrectionCard({
               {patch.severity}
             </span>
           )}
+          {patch.route_taken && ROUTE_COLORS[patch.route_taken] && (
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${ROUTE_COLORS[patch.route_taken].bg} ${ROUTE_COLORS[patch.route_taken].text}`}>
+              {ROUTE_COLORS[patch.route_taken].label}
+            </span>
+          )}
           {patch.overflow_flag && (
             <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-yellow-900/30 text-yellow-500 text-[10px] font-medium flex-shrink-0">
               OVERFLOW
+            </span>
+          )}
+          {patch.cost_usd != null && patch.cost_usd > 0 && (
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-900/20 text-emerald-400 text-[10px] font-medium flex-shrink-0">
+              ${patch.cost_usd < 0.001 ? patch.cost_usd.toFixed(6) : patch.cost_usd.toFixed(4)}
             </span>
           )}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <span className={`
             inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium
+            ${patch.review_status === "auto_accepted" ? "bg-krypton/15 text-krypton" : ""}
             ${patch.review_status === "accepted" ? "bg-krypton/15 text-krypton" : ""}
+            ${patch.review_status === "manual_review" ? "bg-orange-900/20 text-orange-400" : ""}
+            ${patch.review_status === "gate_rejected" ? "bg-red-900/20 text-red-400" : ""}
             ${patch.review_status === "rejected" ? "bg-red-900/20 text-red-400" : ""}
             ${patch.review_status === "pending" ? "bg-carbon-200 text-plomo" : ""}
           `}>
+            {patch.review_status === "auto_accepted" && "✓ Validado"}
             {patch.review_status === "accepted" && "✓ Aceptada"}
+            {patch.review_status === "manual_review" && "⚠ Revisión"}
+            {patch.review_status === "gate_rejected" && "✕ Rechazado"}
             {patch.review_status === "rejected" && "✕ Rechazada"}
             {patch.review_status === "pending" && "● Pendiente"}
           </span>
@@ -345,6 +415,75 @@ function CorrectionCard({
             </div>
           )}
 
+          {/* Quality indicators (Lote 5) */}
+          {(patch.rewrite_ratio != null || patch.confidence != null) && (
+            <div className="bg-carbon-200/50 border border-carbon-300 rounded-lg px-3 py-2 space-y-2">
+              <div className="text-[10px] uppercase tracking-wider font-semibold text-plomo">Control de calidad</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {patch.rewrite_ratio != null && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[11px] text-plomo">Reescritura</span>
+                      <span className={`text-[11px] font-mono ${patch.rewrite_ratio > 0.35 ? "text-red-400" : patch.rewrite_ratio > 0.2 ? "text-yellow-400" : "text-krypton/70"}`}>
+                        {Math.round(patch.rewrite_ratio * 100)}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-carbon-300 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${patch.rewrite_ratio > 0.35 ? "bg-red-400" : patch.rewrite_ratio > 0.2 ? "bg-yellow-400" : "bg-krypton/60"}`}
+                        style={{ width: `${Math.min(patch.rewrite_ratio * 100, 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+                {patch.confidence != null && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[11px] text-plomo">Confianza</span>
+                      <span className={`text-[11px] font-mono ${patch.confidence >= 0.8 ? "text-krypton/70" : patch.confidence >= 0.5 ? "text-yellow-400" : "text-red-400"}`}>
+                        {Math.round(patch.confidence * 100)}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-carbon-300 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${patch.confidence >= 0.8 ? "bg-krypton/60" : patch.confidence >= 0.5 ? "bg-yellow-400" : "bg-red-400"}`}
+                        style={{ width: `${Math.min(patch.confidence * 100, 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Review reason (Lote 5) */}
+          {patch.review_reason && (
+            <div className={`border rounded-lg px-3 py-2 ${patch.review_status === "gate_rejected" ? "bg-red-900/10 border-red-900/30" : "bg-orange-900/10 border-orange-900/30"}`}>
+              <div className={`text-[10px] uppercase tracking-wider font-semibold mb-1 ${patch.review_status === "gate_rejected" ? "text-red-400" : "text-orange-400"}`}>
+                {patch.review_status === "gate_rejected" ? "Gate rechazó corrección" : "Requiere revisión manual"}
+              </div>
+              <p className="text-sm text-bruma/70">{patch.review_reason}</p>
+            </div>
+          )}
+
+          {/* Gate details (Lote 5) */}
+          {patch.gate_results && patch.gate_results.length > 0 && (
+            <div className="bg-carbon-200/30 border border-carbon-300 rounded-lg px-3 py-2">
+              <div className="text-[10px] uppercase tracking-wider font-semibold text-plomo mb-1.5">Gates de calidad</div>
+              <div className="flex flex-wrap gap-1.5">
+                {patch.gate_results.map((g, i) => (
+                  <span
+                    key={i}
+                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${g.passed ? "bg-emerald-900/20 text-emerald-400" : g.critical ? "bg-red-900/20 text-red-400" : "bg-orange-900/20 text-orange-400"}`}
+                    title={g.message || `${g.gate_name}: ${g.value} / ${g.threshold}`}
+                  >
+                    {g.passed ? "✓" : "✕"} {g.gate_name.replace(/_/g, " ")}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Metadata */}
           <div className="flex items-center gap-4 text-[11px] text-plomo pt-1 flex-wrap">
             <span>Versión {patch.version}</span>
@@ -369,6 +508,14 @@ function CorrectionCard({
               <>
                 <span>·</span>
                 <span>{patch.model_used}</span>
+              </>
+            )}
+            {patch.cost_usd != null && patch.cost_usd > 0 && (
+              <>
+                <span>·</span>
+                <span className="text-emerald-400/70">
+                  Costo: ${patch.cost_usd < 0.001 ? patch.cost_usd.toFixed(6) : patch.cost_usd.toFixed(4)}
+                </span>
               </>
             )}
           </div>

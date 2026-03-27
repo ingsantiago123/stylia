@@ -5,7 +5,7 @@ Modelo Block — Bloque de contenido dentro de una página.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import String, Integer, Float, Boolean, Text, DateTime, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,6 +36,22 @@ class Block(Base):
         JSONB, nullable=True,
         comment='[{"font": "Arial-BoldMT", "size": 12, "color": "#000000", "flags": 20}]'
     )
+
+    # MVP2 Lote 3: Análisis editorial
+    paragraph_type: Mapped[str | None] = mapped_column(
+        String(30), nullable=True,
+        comment="titulo|subtitulo|narrativo|explicacion_tecnica|dialogo|cita|lista|celda_tabla|encabezado|footer"
+    )
+    requires_llm: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True,
+        comment="Si este bloque necesita corrección LLM"
+    )
+    section_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("section_summaries.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

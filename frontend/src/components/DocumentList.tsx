@@ -9,12 +9,13 @@ interface Props {
   onRefresh: () => void;
 }
 
-const PIPELINE_STAGES = ["uploaded", "converting", "extracting", "correcting", "rendering", "completed"];
+const PIPELINE_STAGES = ["uploaded", "converting", "extracting", "analyzing", "correcting", "rendering", "completed"];
 
 const STATUS_CONFIG: Record<string, { label: string; icon: string; color: string }> = {
   uploaded:    { label: "Subido",        icon: "↑", color: "bg-carbon-200 text-plomo" },
   converting:  { label: "Convirtiendo",  icon: "⟳", color: "bg-krypton/15 text-krypton" },
   extracting:  { label: "Extrayendo",    icon: "◎", color: "bg-krypton/15 text-krypton" },
+  analyzing:   { label: "Analizando",    icon: "◈", color: "bg-krypton/15 text-krypton" },
   correcting:  { label: "Corrigiendo",   icon: "✎", color: "bg-krypton/15 text-krypton" },
   rendering:   { label: "Renderizando",  icon: "▣", color: "bg-krypton/15 text-krypton" },
   completed:   { label: "Completado",    icon: "✓", color: "bg-krypton/20 text-krypton" },

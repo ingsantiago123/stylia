@@ -35,10 +35,53 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE patches ADD COLUMN IF NOT EXISTS rewrite_ratio FLOAT",
             "ALTER TABLE patches ADD COLUMN IF NOT EXISTS pass_number INTEGER",
             "ALTER TABLE patches ADD COLUMN IF NOT EXISTS model_used VARCHAR(50)",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS paragraph_index INTEGER",
         ]
         for sql in migrations:
             await conn.execute(text(sql))
         logger.info("MVP2: columnas de patches verificadas/creadas")
+
+    # MVP2: columnas de tokens/costos en documents
+    async with engine.begin() as conn:
+        cost_migrations = [
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS completion_tokens INTEGER",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS total_tokens INTEGER",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS llm_cost_usd FLOAT",
+        ]
+        for sql in cost_migrations:
+            await conn.execute(text(sql))
+        logger.info("MVP2: columnas de costos verificadas/creadas")
+
+    # MVP2 Lote 3: columnas de análisis editorial en blocks
+    async with engine.begin() as conn:
+        analysis_migrations = [
+            "ALTER TABLE blocks ADD COLUMN IF NOT EXISTS paragraph_type VARCHAR(30)",
+            "ALTER TABLE blocks ADD COLUMN IF NOT EXISTS requires_llm BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE blocks ADD COLUMN IF NOT EXISTS section_id UUID REFERENCES section_summaries(id) ON DELETE SET NULL",
+        ]
+        for sql in analysis_migrations:
+            await conn.execute(text(sql))
+        logger.info("MVP2 Lote 3: columnas de análisis en blocks verificadas/creadas")
+
+    # MVP2 Lote 4: columna route_taken en patches
+    async with engine.begin() as conn:
+        lote4_migrations = [
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS route_taken VARCHAR(15)",
+        ]
+        for sql in lote4_migrations:
+            await conn.execute(text(sql))
+        logger.info("MVP2 Lote 4: columna route_taken en patches verificada/creada")
+
+    # MVP2 Lote 5: quality gates en patches
+    async with engine.begin() as conn:
+        lote5_migrations = [
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS gate_results JSONB",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS review_reason TEXT",
+        ]
+        for sql in lote5_migrations:
+            await conn.execute(text(sql))
+        logger.info("MVP2 Lote 5: columnas quality gates en patches verificadas/creadas")
 
     # Inicializar bucket de MinIO
     from app.utils.minio_client import ensure_bucket

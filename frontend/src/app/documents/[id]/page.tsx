@@ -7,19 +7,22 @@ import {
   getDocumentCorrections,
   listPages,
   getProfile,
+  getDocumentAnalysis,
   downloadPdf,
   downloadDocx,
   DocumentDetail,
   PatchListItem,
   PageListItem,
   StyleProfile,
+  AnalysisResult,
 } from "@/lib/api";
 import { PipelineFlow } from "@/components/PipelineFlow";
 import { CorrectionHistory } from "@/components/CorrectionHistory";
 import { CorrectionFlowViewer } from "@/components/CorrectionFlowViewer";
 import { DiffCompareView } from "@/components/DiffCompareView";
+import { AnalysisView } from "@/components/AnalysisView";
 
-type Tab = "pipeline" | "corrections" | "pages" | "api-flow";
+type Tab = "pipeline" | "analysis" | "corrections" | "pages" | "api-flow";
 
 export default function DocumentDetailPage() {
   const params = useParams();
@@ -30,22 +33,25 @@ export default function DocumentDetailPage() {
   const [corrections, setCorrections] = useState<PatchListItem[]>([]);
   const [pages, setPages] = useState<PageListItem[]>([]);
   const [profile, setProfile] = useState<StyleProfile | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("pipeline");
 
   const fetchData = useCallback(async () => {
     try {
-      const [docData, correctionsData, pagesData, profileData] = await Promise.all([
+      const [docData, correctionsData, pagesData, profileData, analysisData] = await Promise.all([
         getDocument(docId),
         getDocumentCorrections(docId).catch(() => []),
         listPages(docId).catch(() => []),
         getProfile(docId).catch(() => null),
+        getDocumentAnalysis(docId).catch(() => null),
       ]);
       setDoc(docData);
       setCorrections(correctionsData);
       setPages(pagesData);
       setProfile(profileData);
+      setAnalysis(analysisData);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error");
@@ -172,6 +178,7 @@ export default function DocumentDetailPage() {
       <div className="flex items-center gap-1 bg-carbon-100 border border-carbon-300 rounded-xl p-1">
         {([
           { key: "pipeline" as Tab, label: "Resumen", icon: "◎" },
+          { key: "analysis" as Tab, label: `Análisis${analysis?.sections?.length ? ` (${analysis.sections.length})` : ""}`, icon: "⚗" },
           { key: "corrections" as Tab, label: `Correcciones (${corrections.length})`, icon: "✎" },
           { key: "api-flow" as Tab, label: "Flujo API", icon: "⚡" },
           { key: "pages" as Tab, label: `Comparar (${corrections.length})`, icon: "▣" },
@@ -196,6 +203,10 @@ export default function DocumentDetailPage() {
       {/* Tab content */}
       {activeTab === "pipeline" && (
         <SummaryTab doc={doc} corrections={corrections} pages={pages} isProcessing={isProcessing} profile={profile} />
+      )}
+
+      {activeTab === "analysis" && (
+        <AnalysisView analysis={analysis} />
       )}
 
       {activeTab === "corrections" && (
@@ -288,6 +299,7 @@ function StatCard({ label, value, isStatus, highlight }: {
     uploaded: "text-plomo",
     converting: "text-krypton",
     extracting: "text-krypton",
+    analyzing: "text-krypton",
     correcting: "text-krypton",
     rendering: "text-krypton",
     completed: "text-krypton",
@@ -577,6 +589,59 @@ function SummaryTab({ doc, corrections, pages, isProcessing, profile }: {
                   <div className="text-[10px] text-plomo uppercase tracking-wider">{CATEGORY_LABELS[cat] || cat}</div>
                 </div>
               ))}
+          </div>
+        </div>
+      )}
+
+      {/* Cost tracking */}
+      {doc.total_tokens != null && doc.total_tokens > 0 && (
+        <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5 md:col-span-2">
+          <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-4">Costos de procesamiento</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="bg-carbon-200 rounded-lg p-4 text-center">
+              <div className="text-[10px] text-plomo uppercase tracking-wider mb-1">Tokens entrada</div>
+              <div className="text-lg font-bold text-bruma">{(doc.prompt_tokens ?? 0).toLocaleString("es")}</div>
+            </div>
+            <div className="bg-carbon-200 rounded-lg p-4 text-center">
+              <div className="text-[10px] text-plomo uppercase tracking-wider mb-1">Tokens salida</div>
+              <div className="text-lg font-bold text-bruma">{(doc.completion_tokens ?? 0).toLocaleString("es")}</div>
+            </div>
+            <div className="bg-carbon-200 rounded-lg p-4 text-center">
+              <div className="text-[10px] text-plomo uppercase tracking-wider mb-1">Tokens total</div>
+              <div className="text-lg font-bold text-krypton">{(doc.total_tokens ?? 0).toLocaleString("es")}</div>
+            </div>
+            <div className="bg-carbon-200 rounded-lg p-4 text-center">
+              <div className="text-[10px] text-plomo uppercase tracking-wider mb-1">Costo total</div>
+              <div className="text-lg font-bold text-krypton">
+                ${doc.llm_cost_usd != null ? doc.llm_cost_usd < 0.01 ? doc.llm_cost_usd.toFixed(6) : doc.llm_cost_usd.toFixed(4) : "0.00"}
+              </div>
+              <div className="text-[10px] text-plomo mt-0.5">USD</div>
+            </div>
+          </div>
+          {/* Cost per page */}
+          {doc.total_pages != null && doc.total_pages > 0 && (
+            <div className="mt-4 pt-3 border-t border-carbon-300 flex items-center justify-between text-sm">
+              <span className="text-plomo">Costo promedio por página</span>
+              <span className="text-bruma font-mono">
+                ${doc.llm_cost_usd != null ? (doc.llm_cost_usd / doc.total_pages).toFixed(6) : "0.000000"} USD
+              </span>
+            </div>
+          )}
+          {corrections.length > 0 && (
+            <div className="flex items-center justify-between text-sm mt-1">
+              <span className="text-plomo">Costo promedio por corrección</span>
+              <span className="text-bruma font-mono">
+                ${doc.llm_cost_usd != null ? (doc.llm_cost_usd / corrections.length).toFixed(6) : "0.000000"} USD
+              </span>
+            </div>
+          )}
+          <div className="mt-3 pt-3 border-t border-carbon-300">
+            <a
+              href={`/costs`}
+              className="text-xs text-krypton hover:text-krypton/80 transition-colors"
+            >
+              Ver detalle por párrafo en el panel de costos →
+            </a>
           </div>
         </div>
       )}

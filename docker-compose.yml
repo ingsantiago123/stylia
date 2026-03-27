@@ -145,7 +145,8 @@ services:
     command: >
       celery -A app.workers.celery_app worker
       --loglevel=info
-      --concurrency=2
+      --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
+      --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-20}
     volumes:
       - ./backend:/app
     restart: unless-stopped

@@ -15,6 +15,11 @@ interface CorrectionRequest {
   }>;
   prompt: string;
   timestamp: string;
+  // Costos (solo para chatgpt_style)
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  cost_usd?: number | null;
 }
 
 interface FlowData {
@@ -25,6 +30,7 @@ interface FlowData {
     total_requests: number;
     languagetool_requests: number;
     chatgpt_requests: number;
+    total_cost_usd?: number;
   };
   requests: CorrectionRequest[];
 }
@@ -103,11 +109,18 @@ export function CorrectionFlowViewer({ docId }: CorrectionFlowViewerProps) {
           </span>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <StatCard label="Bloques" value={flowData.summary.total_blocks.toString()} />
           <StatCard label="LanguageTool" value={flowData.summary.languagetool_requests.toString()} />
           <StatCard label="ChatGPT" value={flowData.summary.chatgpt_requests.toString()} highlight />
           <StatCard label="Total calls" value={flowData.summary.total_requests.toString()} />
+          {flowData.summary.total_cost_usd != null && flowData.summary.total_cost_usd > 0 && (
+            <StatCard
+              label="Costo total"
+              value={`$${flowData.summary.total_cost_usd < 0.01 ? flowData.summary.total_cost_usd.toFixed(6) : flowData.summary.total_cost_usd.toFixed(4)}`}
+              highlight
+            />
+          )}
         </div>
 
         {flowData.flow_type === "simulation" && (
@@ -192,6 +205,16 @@ function RequestCard({
               {isChatGPT && (
                 <span className="text-xs text-krypton bg-krypton/10 px-2 py-0.5 rounded-full">
                   +{request.context_blocks_count} contexto
+                </span>
+              )}
+              {request.total_tokens != null && request.total_tokens > 0 && (
+                <span className="text-xs text-plomo">
+                  {request.total_tokens.toLocaleString("es")} tok
+                </span>
+              )}
+              {request.cost_usd != null && request.cost_usd > 0 && (
+                <span className="text-xs text-emerald-400 font-mono">
+                  ${request.cost_usd < 0.001 ? request.cost_usd.toFixed(6) : request.cost_usd.toFixed(4)}
                 </span>
               )}
             </div>

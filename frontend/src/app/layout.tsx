@@ -30,6 +30,9 @@ export default function RootLayout({
               </span>
             </a>
             <div className="flex items-center gap-4">
+              <a href="/costs" className="text-xs text-plomo hover:text-krypton transition-colors">
+                Costos
+              </a>
               <span className="text-xs text-plomo font-light tracking-widest uppercase">
                 La precisión del estilo
               </span>

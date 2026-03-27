@@ -73,6 +73,9 @@ def build_user_prompt(
     profile: dict | None = None,
     context_prev: str | None = None,
     paragraph_index: int | None = None,
+    section_summary: str | None = None,
+    active_terms: list[str] | None = None,
+    paragraph_type: str | None = None,
 ) -> str:
     """
     User prompt dinámico por párrafo.
@@ -82,6 +85,9 @@ def build_user_prompt(
         profile: Dict con campos del perfil editorial (o None para genérico)
         context_prev: Último párrafo corregido para continuidad
         paragraph_index: Índice del párrafo en el documento
+        section_summary: Resumen de la sección actual (Lote 4)
+        active_terms: Términos activos en la sección actual (Lote 4)
+        paragraph_type: Tipo de párrafo: narrativo, dialogo, lista, etc. (Lote 4)
     """
     parts = []
 
@@ -110,6 +116,22 @@ def build_user_prompt(
             parts.append(f"PROTEGER TÉRMINOS: {', '.join(protected)}")
     else:
         parts.append("PERFIL: neutro | Intervención: moderada | Sin perfil específico")
+
+    # Contexto jerárquico de sección (Lote 4)
+    if section_summary:
+        parts.append(f"\nSECCIÓN ACTUAL: {section_summary}")
+    if active_terms:
+        parts.append(f"TÉRMINOS ACTIVOS EN SECCIÓN: {', '.join(active_terms[:15])}")
+    if paragraph_type:
+        type_hints = {
+            "narrativo": "Párrafo narrativo — priorizar fluidez y cohesión",
+            "dialogo": "Diálogo — preservar voz del personaje, solo corregir errores claros",
+            "explicacion_tecnica": "Texto técnico — preservar terminología, priorizar precisión",
+            "lista": "Elemento de lista — mantener brevedad y paralelismo",
+            "celda_tabla": "Celda de tabla — mantener concisión",
+        }
+        hint = type_hints.get(paragraph_type, f"Tipo: {paragraph_type}")
+        parts.append(f"TIPO DE PÁRRAFO: {hint}")
 
     # Contexto previo
     if context_prev:
