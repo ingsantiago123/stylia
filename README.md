@@ -1,242 +1,348 @@
-# Stylia — Corrector de Estilo con Preservación de Formato
+# STYLIA — Estado Actual del Repositorio (Abril 2026)
 
-Sistema de corrección ortográfica, gramatical y de estilo para documentos largos (DOCX/PDF de 200–600 páginas) que **preserva la maquetación visual** y funciona completamente en local.
+Sistema de corrección editorial para documentos en español con preservación de formato.
 
-## ¿Qué hace?
+Estado real hoy:
 
-1. **Recibe** un documento DOCX o PDF
-2. **Corrige** ortografía y gramática con LanguageTool (local, sin coste)
-3. **Mejora** el estilo y la redacción con un LLM (ChatGPT o modelo local)
-4. **Genera** el documento corregido preservando fuentes, tablas, imágenes y diseño
-5. **Permite** revisión humana con vista diff antes de la salida final
+- Entrada soportada en producción del pipeline: DOCX
+- Corrección activa: LanguageTool + OpenAI (gpt-4o-mini por defecto)
+- Renderizado activo: Ruta 1 (DOCX-first)
+- Frontend operativo con flujo completo de carga, perfil, procesamiento, revisión y descarga
 
-## Stack tecnológico
+## 1) Qué hace hoy (funcionamiento real)
 
-| Capa | Tecnología |
-|---|---|
-| Backend API | FastAPI + Python 3.11 |
-| Corrector determinista | LanguageTool (servidor local Java) |
-| LLM de estilo | OpenAI gpt-4o-mini (o llama.cpp local) |
-| Extracción PDF | PyMuPDF (`get_text("dict")`) |
-| Edición DOCX | python-docx |
-| Conversión DOCX→PDF | LibreOffice headless |
-| Cola de tareas | Celery + Redis |
-| Base de datos | PostgreSQL 16 |
-| Almacenamiento | MinIO (S3-compatible) |
-| Frontend | Next.js 14 + React |
-| Contenedores | Docker + Docker Compose |
+1. Subes un DOCX.
+2. Opcionalmente seleccionas/ajustas un perfil editorial.
+3. Lanzas el procesamiento con una llamada explícita al endpoint de process.
+4. El pipeline ejecuta 6 etapas: A Ingesta, B Extracción, C Análisis, D Corrección, E Renderizado, cierre.
+5. Revisas resultados en UI (pipeline, análisis, correcciones, diff por páginas, flujo API).
+6. Descargas DOCX y PDF corregidos.
 
-## Inicio rápido
+Nota:
+
+- El endpoint de upload ya no dispara procesamiento automáticamente.
+- PDF born-digital y OCR de escaneados siguen como fases futuras (Ruta 2 y Ruta 3).
+
+## 2) Arquitectura actual
+
+### Backend
+
+- FastAPI + SQLAlchemy async
+- Celery con 2 workers dedicados (pipeline y batch)
+- PostgreSQL + Redis + MinIO
+- LanguageTool balanceado con 2 instancias detrás de Nginx
+
+### Frontend
+
+- Next.js 14 (App Router) + React + Tailwind
+- Dashboard principal en / con carga de documentos, selector de perfil y lista de procesamiento
+- Detalle en /documents/[id] con pestañas de resumen, análisis, correcciones, comparar y flujo API
+- Vista de costos en /costs
+
+### Landing separada
+
+- Proyecto independiente en carpeta landing
+- Next.js en puerto 3001 (dev)
+
+## 3) Pipeline actual (A-B-C-D-E)
+
+```text
+DOCX
+  -> A) Ingesta (upload MinIO + DOCX->PDF LibreOffice)
+  -> B) Extraccion (PyMuPDF: layout/text/previews)
+  -> C) Analisis editorial (secciones, glosario, clasificacion)
+  -> D) Correccion (LanguageTool + LLM + quality gates)
+  -> E) Renderizado (aplicar patches al DOCX + generar PDF)
+  -> completed | failed
+```
+
+Estados de documento usados en backend:
+
+- uploaded
+- converting
+- extracting
+- analyzing
+- correcting
+- rendering
+- completed
+- failed
+
+## 4) Corrección: rutas y validaciones
+
+### Ruta activa
+
+- Ruta 1 (DOCX-first): se corrige sobre párrafos DOCX y se regenera PDF.
+
+### Rutas no activas aún
+
+- Ruta 2 (PDF digital)
+- Ruta 3 (OCR escaneados)
+
+### Etapa D (corrección)
+
+- Pass 1: LanguageTool
+- Pass 2: OpenAI con respuesta JSON estructurada
+- Router de complejidad por párrafo: skip | cheap | editorial
+- Corrección paralela por lotes existe, pero está desactivada por defecto
+
+### Quality gates implementados
+
+- not_empty (crítico)
+- expansion_ratio (crítico)
+- protected_terms (crítico)
+- rewrite_ratio (no crítico)
+- language_preserved (no crítico)
+- readability_inflesz (no crítico, aplica si hay rango configurado)
+
+## 5) API REST actual
+
+Base: /api/v1
+
+### Flujo principal
+
+- POST /upload
+- POST /documents/{doc_id}/process
+
+### Perfiles editoriales
+
+- GET /presets
+- POST /documents/{doc_id}/profile
+- GET /documents/{doc_id}/profile
+- PUT /documents/{doc_id}/profile
+
+### Documentos y resultados
+
+- GET /documents
+- GET /documents/{doc_id}
+- GET /documents/{doc_id}/pages
+- GET /documents/{doc_id}/corrections
+- DELETE /documents/{doc_id}
+
+### Previews y descargas
+
+- GET /documents/{doc_id}/pages/{page_no}/preview
+- GET /documents/{doc_id}/pages/{page_no}/preview-corrected
+- GET /documents/{doc_id}/pages/{page_no}/annotations
+- GET /documents/{doc_id}/download/pdf
+- GET /documents/{doc_id}/download/docx
+
+### Análisis, flujo y costos
+
+- GET /documents/{doc_id}/analysis
+- GET /documents/{doc_id}/correction-flow
+- GET /documents/{doc_id}/correction-batches
+- GET /costs/summary
+- GET /costs/documents
+- GET /documents/{doc_id}/costs
+
+### Salud del servicio
+
+- GET /health
+
+## 6) Stack y versiones (vigentes en código)
+
+| Capa | Tecnología | Versión |
+|---|---|---|
+| Backend API | FastAPI | 0.115.6 |
+| Python runtime | Python | 3.11 |
+| ORM | SQLAlchemy | 2.0.36 |
+| Base de datos | PostgreSQL | 16-alpine |
+| Broker/cola | Redis + Celery | 7-alpine + 5.4.0 |
+| Almacenamiento | MinIO | latest |
+| Corrector | LanguageTool (2 instancias) | latest |
+| LLM | OpenAI SDK | 1.51.0 |
+| Conversión DOCX->PDF | LibreOffice headless | sistema |
+| Extracción PDF | PyMuPDF | 1.25.1 |
+| Frontend | Next.js + React | 14.2.21 + 18.3.1 |
+| UI styles | Tailwind CSS | 3.4.17 |
+
+## 7) Servicios Docker Compose actuales
+
+Servicios levantados por docker-compose.yml:
+
+- postgres
+- pgadmin
+- redis
+- minio
+- languagetool-1
+- languagetool-2
+- languagetool (nginx balanceador)
+- backend
+- worker-pipeline
+- worker-batch
+- frontend
+
+Puertos principales:
+
+- Frontend: 3000
+- Backend API: 8000
+- LanguageTool LB: 8010
+- PostgreSQL: 5432
+- Redis: 6379
+- MinIO API/Console: 9000/9001
+- pgAdmin: 5050
+
+## 8) Inicio rápido actualizado
 
 ### Requisitos
 
-- Docker Desktop 4.x+
+- Docker Desktop
 - Git
 
-### 1. Clonar y configurar
+### Arranque
 
 ```bash
 git clone https://github.com/ingsantiago123/stylia.git
 cd stylia
 cp .env.example .env
+docker compose up -d --build
 ```
 
-Edita `.env` y añade tu API key de OpenAI (opcional — sin ella usará solo LanguageTool):
+### URLs
 
-```env
-OPENAI_API_KEY=sk-proj-...
-```
+- App: http://localhost:3000
+- API docs: http://localhost:8000/docs
+- Health: http://localhost:8000/health
+- MinIO Console: http://localhost:9001
+- pgAdmin: http://localhost:5050
 
-### 2. Levantar servicios
+## 9) Flujo recomendado de uso vía API
 
-```bash
-docker compose up -d
-```
+1. Subir DOCX.
 
-Esto levanta: PostgreSQL, Redis, MinIO, LanguageTool, backend FastAPI y worker Celery.
-
-### 3. Usar la API
-
-**Subir un documento:**
 ```bash
 curl -X POST http://localhost:8000/api/v1/upload \
   -F "file=@mi_documento.docx"
 ```
 
-Respuesta:
-```json
-{
-  "id": "uuid-del-documento",
-  "filename": "mi_documento.docx",
-  "status": "uploaded",
-  "message": "Documento recibido. Procesamiento iniciado."
-}
-```
-
-**Consultar estado:**
-```bash
-curl http://localhost:8000/api/v1/documents/{id}
-```
-
-**Descargar el resultado:**
-```bash
-curl http://localhost:8000/api/v1/documents/{id}/download
-```
-
-**Documentación interactiva:** http://localhost:8000/docs
-
-## Pipeline de procesamiento
-
-```
-DOCX/PDF → [Etapa A] Ingesta
-         → [Etapa B] Extracción de layout (PyMuPDF)
-         → [Etapa D] Corrección por párrafo
-                       ├── LanguageTool (ortografía + gramática)
-                       └── ChatGPT/LLM (estilo + claridad + fluidez)
-         → [Etapa E] Renderizado (DOCX preservando formato)
-         → DOCX + PDF corregidos
-```
-
-### Rutas de renderizado
-
-| Ruta | Documento | Cómo |
-|---|---|---|
-| **Ruta 1** (implementada) | DOCX original | python-docx modifica párrafos → LibreOffice genera PDF |
-| **Ruta 2** (próxima) | PDF born-digital | PyMuPDF redact + insert_htmlbox |
-| **Ruta 3** (próxima) | PDF escaneado | OCR (docTR) + capa de texto |
-
-## Estructura del proyecto
-
-```
-stylia/
-├── backend/                # API FastAPI + lógica de negocio
-│   ├── app/
-│   │   ├── main.py         # Punto de entrada
-│   │   ├── api/v1/         # Endpoints REST
-│   │   ├── services/       # Corrección, extracción, renderizado
-│   │   ├── workers/        # Tareas Celery
-│   │   ├── models/         # Modelos SQLAlchemy
-│   │   └── utils/          # MinIO, OpenAI, PyMuPDF helpers
-│   ├── requirements.txt
-│   └── Dockerfile
-├── frontend/               # UI Next.js (en desarrollo)
-├── infra/                  # docker-compose, nginx, Kubernetes
-├── scripts/                # Setup y descarga de modelos
-├── fonts/                  # Repositorio de fuentes
-├── models/                 # Modelos LLM locales (no versionados)
-├── docker-compose.yml
-└── .env.example
-```
-
-## Configuración
-
-Todas las variables están en `.env` (copia de `.env.example`):
-
-```env
-# Base de datos
-DATABASE_URL=postgresql+asyncpg://stylia:stylia@postgres:5432/stylia
-
-# Redis
-CELERY_BROKER_URL=redis://redis:6379/0
-
-# MinIO
-MINIO_ENDPOINT=minio:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin123
-
-# LanguageTool
-LANGUAGETOOL_URL=http://languagetool:8010
-
-# OpenAI (opcional)
-OPENAI_API_KEY=your_api_key_here
-OPENAI_MODEL=gpt-4o-mini
-OPENAI_MAX_TOKENS=1000
-OPENAI_TEMPERATURE=0.3
-```
-
-## Compartir con amigos (ngrok)
-
-Puedes exponer la aplicación temporalmente a internet para que alguien externo la pruebe sin necesidad de despliegue en servidor.
-
-### Requisitos previos
-
-1. Crear cuenta gratuita en [ngrok.com](https://ngrok.com) y obtener el auth token en el [dashboard](https://dashboard.ngrok.com/get-started/your-authtoken).
-2. Descargar ngrok desde [ngrok.com/download](https://ngrok.com/download) (versión ≥ 3.20).
-
-### Pasos
-
-**1. Instala ngrok (solo la primera vez):**
-```powershell
-# Windows — descarga el ZIP y extrae ngrok.exe a una carpeta de tu elección
-# O usa winget (puede instalar versión antigua; si falla, descarga manualmente):
-winget install ngrok.ngrok
-```
-
-**2. Configura tu auth token (solo la primera vez):**
-```powershell
-ngrok config add-authtoken TU_TOKEN_DE_NGROK
-```
-
-**3. Levanta los servicios:**
-```powershell
-docker compose up -d
-```
-
-**4. Arranca el túnel:**
-```powershell
-ngrok http 3000
-```
-
-Ngrok mostrará en la terminal una línea como:
-```
-Forwarding  https://xxxx-xxxx.ngrok-free.app -> http://localhost:3000
-```
-
-**5. Comparte esa URL** con tus amigos. Al entrar verán una pantalla de ngrok con un botón "Visit Site" (es normal en el plan gratuito, solo hay que hacer clic una vez).
-
-### Notas importantes
-
-- La URL cambia cada vez que reinicias ngrok (plan gratuito). Si la quieres fija, necesitas plan de pago.
-- El túnel solo funciona mientras ngrok esté corriendo en tu máquina. Al cerrar la terminal, la URL deja de funcionar.
-- Si `ngrok` no se reconoce tras la instalación, abre una **nueva terminal** (el PATH se actualiza solo al reiniciar la sesión).
-- La app enruta todas las llamadas API internamente (`/api/v1/*` → backend), por lo que solo necesitas exponer el puerto 3000.
-
-### Fix del worker tras cada reinicio
-
-Hasta que se reconstruya la imagen Docker por completo, el worker pierde el paquete `openai` al reiniciar. Ejecuta esto cada vez que levantes los servicios:
-
-```powershell
-docker exec correctordeestilos-worker-1 pip install openai==1.51.0 httpx==0.27.2 -q
-docker restart correctordeestilos-worker-1
-```
-
----
-
-## Fases de implementación
-
-- [x] **Fase 1** — Pipeline mínimo: DOCX entra, se corrige, sale DOCX+PDF corregido
-- [x] **Fase 1** — Integración LanguageTool + ChatGPT (gpt-4o-mini)
-- [x] **Fase 1** — Sin bug de mayúsculas aleatorias (corrección párrafo a párrafo)
-- [ ] **Fase 2** — Vista diff lado a lado + revisión humana
-- [ ] **Fase 2** — LLM local con llama.cpp (Qwen2.5-7B)
-- [ ] **Fase 3** — Soporte PDF born-digital (Ruta 2)
-- [ ] **Fase 4** — OCR para PDFs escaneados (docTR)
-- [ ] **Fase 5** — Autenticación, métricas, Kubernetes
-
-## Desarrollo local
+2. (Opcional) Crear perfil editorial (preset o custom).
 
 ```bash
-# Solo backend (sin Docker para desarrollo rápido)
-docker compose up -d postgres redis minio languagetool
-cd backend && uvicorn app.main:app --reload
-
-# Worker Celery
-cd backend && celery -A app.workers.celery_app worker --loglevel=info
-
-# Tests
-cd backend && pytest tests/ -v
+curl -X POST http://localhost:8000/api/v1/documents/{DOC_ID}/profile \
+  -H "Content-Type: application/json" \
+  -d '{"preset_name":"novela_contemporanea"}'
 ```
 
-## Licencia
+3. Iniciar procesamiento.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/documents/{DOC_ID}/process
+```
+
+4. Consultar estado.
+
+```bash
+curl http://localhost:8000/api/v1/documents/{DOC_ID}
+```
+
+5. Descargar resultados.
+
+```bash
+curl -L http://localhost:8000/api/v1/documents/{DOC_ID}/download/pdf -o salida.pdf
+curl -L http://localhost:8000/api/v1/documents/{DOC_ID}/download/docx -o salida.docx
+```
+
+## 10) Variables de entorno importantes
+
+Archivo base: .env.example
+
+Variables clave del backend:
+
+- DATABASE_URL
+- DATABASE_URL_SYNC
+- REDIS_URL
+- CELERY_BROKER_URL
+- CELERY_RESULT_BACKEND
+- MINIO_ENDPOINT
+- MINIO_ACCESS_KEY
+- MINIO_SECRET_KEY
+- MINIO_BUCKET
+- LANGUAGETOOL_URL
+- OPENAI_API_KEY
+- OPENAI_MODEL
+- OPENAI_CHEAP_MODEL
+- OPENAI_EDITORIAL_MODEL
+- OPENAI_MAX_TOKENS
+- OPENAI_TEMPERATURE
+- MAX_UPLOAD_SIZE_MB
+- MAX_DOCUMENT_PAGES
+- PARALLEL_CORRECTION_ENABLED
+
+Nota:
+
+- OPENAI_* no está completo en .env.example actual; si usarás LLM, agrega esas variables en tu .env.
+
+## 11) Estructura del repositorio
+
+```text
+backend/         API FastAPI, modelos, servicios, workers
+frontend/        Aplicacion web principal (operacion)
+landing/         Sitio landing separado (marketing, puerto 3001)
+fonts/           Fuentes locales
+infra/           Infraestructura adicional
+models/          Carpeta para modelos locales futuros
+scripts/         Scripts de arranque
+```
+
+Documentación interna relevante:
+
+- agents.md
+- CLAUDE.md
+- CLAUDE-LOGIC.md
+- mvp2.md
+- IMPLEMENTACION-MVP2.md
+- REGISTRO-MVP2.md
+- planificacion-tecnica.md
+- PIPELINE-REFACTOR.md
+
+## 12) Limitaciones actuales
+
+- Entrada operativa del pipeline centrada en DOCX (PDF directo pendiente).
+- Ruta 2 y Ruta 3 no están habilitadas en producción.
+- LLM local (llama.cpp) no está integrado en flujo activo.
+- Eliminación de documento no limpia todos los artefactos en MinIO de forma integral.
+- El directorio backend/tests está vacío (sin suite automatizada formal aún).
+
+## 13) Comandos de desarrollo
+
+### Solo backend local
+
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### Solo frontend local
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### Workers local
+
+```bash
+cd backend
+celery -A app.workers.celery_app worker --loglevel=info --queues=pipeline --concurrency=4
+celery -A app.workers.celery_app worker --loglevel=info --queues=batch --concurrency=6
+```
+
+### Landing local
+
+```bash
+cd landing
+npm install
+npm run dev
+```
+
+## 14) Estado de roadmap
+
+- MVP1: completado
+- MVP2 (Lotes 1-5): implementado en código (perfiles, prompts parametrizados, análisis, router, quality gates)
+- Fase 3+: pendientes (PDF digital, OCR escaneados, escalado productivo)
+
+## 15) Licencia
 
 MIT
