@@ -10,6 +10,7 @@ services:
       POSTGRES_USER: stylecorrector
       POSTGRES_PASSWORD: changeme
       POSTGRES_DB: stylecorrector
+    command: postgres -c max_connections=200 -c shared_buffers=256MB
     ports:
       - "5432:5432"
     volumes:
@@ -78,21 +79,45 @@ services:
     restart: unless-stopped
 
   # =============================================
-  # LanguageTool (corrector ortográfico/gramatical)
+  # LanguageTool (corrector ortográfico/gramatical) — 2 instancias + nginx LB
   # =============================================
-  languagetool:
+  languagetool-1:
     image: erikvl87/languagetool:latest
     environment:
       Java_Xms: 512m
       Java_Xmx: 2g
-    ports:
-      - "8010:8010"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8010/v2/languages"]
       interval: 20s
       timeout: 10s
       retries: 10
       start_period: 60s
+    restart: unless-stopped
+
+  languagetool-2:
+    image: erikvl87/languagetool:latest
+    environment:
+      Java_Xms: 512m
+      Java_Xmx: 2g
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/v2/languages"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  languagetool:
+    image: nginx:alpine
+    volumes:
+      - ./nginx-lt.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8010:8010"
+    depends_on:
+      languagetool-1:
+        condition: service_healthy
+      languagetool-2:
+        condition: service_healthy
     restart: unless-stopped
 
   # =============================================
@@ -113,7 +138,7 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      languagetool:
+      languagetool-1:
         condition: service_healthy
     command: >
       uvicorn app.main:app
@@ -125,9 +150,9 @@ services:
     restart: unless-stopped
 
   # =============================================
-  # Celery Worker
+  # Worker para tareas de pipeline (pesadas: LibreOffice, PyMuPDF, análisis, corrección secuencial)
   # =============================================
-  worker:
+  worker-pipeline:
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -140,15 +165,61 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      languagetool:
+      languagetool-1:
         condition: service_healthy
     command: >
       celery -A app.workers.celery_app worker
       --loglevel=info
-      --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
-      --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-20}
+      --concurrency=${CELERY_PIPELINE_CONCURRENCY:-4}
+      --max-tasks-per-child=10
+      --queues=pipeline
+      --hostname=pipeline@%h
     volumes:
       - ./backend:/app
+      - stylia_tmp:/tmp/stylia
+    mem_limit: 4g
+    memswap_limit: 4g
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping -d pipeline@$$HOSTNAME 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # =============================================
+  # Worker para tareas batch (LLM correction, I/O-bound)
+  # =============================================
+  worker-batch:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=info
+      --concurrency=${CELERY_BATCH_CONCURRENCY:-6}
+      --max-tasks-per-child=50
+      --queues=batch
+      --hostname=batch@%h
+    volumes:
+      - ./backend:/app
+    mem_limit: 2g
+    memswap_limit: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping -d batch@$$HOSTNAME 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   # =============================================
@@ -175,3 +246,4 @@ volumes:
   pgdata:
   miniodata:
   pgadmin_data:
+  stylia_tmp:

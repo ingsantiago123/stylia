@@ -33,8 +33,8 @@ interface AnalysisViewProps {
 export function AnalysisView({ analysis }: AnalysisViewProps) {
   if (!analysis || analysis.status === "pending") {
     return (
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-8 text-center">
-        <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-carbon-200 flex items-center justify-center">
+      <div className="glass-card rounded-xl p-8 text-center">
+        <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-surface flex items-center justify-center">
           <svg className="w-7 h-7 text-plomo" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5" />
           </svg>
@@ -68,7 +68,7 @@ export function AnalysisView({ analysis }: AnalysisViewProps) {
 
       {/* Inferred profile */}
       {inferred_profile && (
-        <div className="bg-carbon-100 border border-krypton/20 rounded-xl p-5">
+        <div className="bg-surface-elevated border border-krypton/20 rounded-xl p-5">
           <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-4">
             Perfil detectado por análisis
           </h3>
@@ -90,7 +90,7 @@ export function AnalysisView({ analysis }: AnalysisViewProps) {
             )}
           </div>
           {inferred_profile.key_terms && inferred_profile.key_terms.length > 0 && (
-            <div className="mt-3 pt-3 border-t border-carbon-300 flex items-center gap-2 flex-wrap">
+            <div className="mt-3 pt-3 border-t border-border flex items-center gap-2 flex-wrap">
               <span className="text-plomo text-[10px] uppercase tracking-wider">Términos clave:</span>
               {inferred_profile.key_terms.map((t) => (
                 <span key={t} className="text-[10px] bg-krypton/10 text-krypton px-2 py-0.5 rounded">{t}</span>
@@ -102,7 +102,7 @@ export function AnalysisView({ analysis }: AnalysisViewProps) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Sections */}
-        <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5">
+        <div className="glass-card rounded-xl p-5">
           <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-4">
             Secciones detectadas ({sections.length})
           </h3>
@@ -113,7 +113,7 @@ export function AnalysisView({ analysis }: AnalysisViewProps) {
               {sections.map((sec) => (
                 <div
                   key={sec.section_index}
-                  className="bg-carbon-200 border border-carbon-300 rounded-lg p-3"
+                  className="bg-surface border border-border rounded-lg p-3"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
@@ -162,7 +162,7 @@ export function AnalysisView({ analysis }: AnalysisViewProps) {
         </div>
 
         {/* Terms */}
-        <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5">
+        <div className="glass-card rounded-xl p-5">
           <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-4">
             Glosario de términos ({terms.length})
           </h3>
@@ -173,7 +173,7 @@ export function AnalysisView({ analysis }: AnalysisViewProps) {
               {terms.map((t, i) => (
                 <div
                   key={i}
-                  className="flex items-center justify-between gap-2 py-1.5 px-2.5 rounded-lg hover:bg-carbon-200 transition-colors"
+                  className="flex items-center justify-between gap-2 py-1.5 px-2.5 rounded-lg hover:bg-surface transition-colors"
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     {t.is_protected && (
@@ -202,7 +202,7 @@ export function AnalysisView({ analysis }: AnalysisViewProps) {
 
       {/* Paragraph type distribution */}
       {totalClassified > 0 && (
-        <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5">
+        <div className="glass-card rounded-xl p-5">
           <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-4">
             Distribución de tipos de párrafo
           </h3>
@@ -213,7 +213,7 @@ export function AnalysisView({ analysis }: AnalysisViewProps) {
                 const config = PARAGRAPH_TYPE_CONFIG[type] || { label: type, color: "bg-gray-500" };
                 const pct = Math.round((count / totalClassified) * 100);
                 return (
-                  <div key={type} className="bg-carbon-200 rounded-lg p-3">
+                  <div key={type} className="bg-surface rounded-lg p-3">
                     <div className="flex items-center gap-2 mb-2">
                       <div className={`w-2.5 h-2.5 rounded-full ${config.color}`} />
                       <span className="text-xs text-bruma font-medium">{config.label}</span>
@@ -251,7 +251,7 @@ export function AnalysisView({ analysis }: AnalysisViewProps) {
 
 function MiniStat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
-    <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-4 text-center">
+    <div className="glass-card rounded-xl p-4 text-center">
       <div className="text-[10px] uppercase tracking-wider text-plomo mb-1">{label}</div>
       <div className={`text-xl font-semibold ${accent ? "text-purple-400" : "text-bruma"}`}>{value}</div>
     </div>

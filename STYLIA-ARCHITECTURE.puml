@@ -1,0 +1,853 @@
+﻿@startuml STYLIA_Complete_Architecture
+allowmixing
+!theme plain
+skinparam backgroundColor #1a1a2e
+skinparam defaultFontColor #e0e0e0
+skinparam defaultFontSize 11
+skinparam defaultFontName Inter
+skinparam classFontColor #e0e0e0
+skinparam classBackgroundColor #16213e
+skinparam classBorderColor #0f3460
+skinparam classHeaderBackgroundColor #0f3460
+skinparam packageBackgroundColor #1a1a2e
+skinparam packageBorderColor #533483
+skinparam componentBackgroundColor #16213e
+skinparam componentBorderColor #0f3460
+skinparam databaseBackgroundColor #1a1a2e
+skinparam databaseBorderColor #e94560
+skinparam queueBackgroundColor #1a1a2e
+skinparam queueBorderColor #533483
+skinparam storageBackgroundColor #1a1a2e
+skinparam storageBorderColor #0f3460
+skinparam arrowColor #e94560
+skinparam noteFontColor #e0e0e0
+skinparam noteBackgroundColor #16213e
+skinparam noteBorderColor #533483
+skinparam legendBackgroundColor #16213e
+skinparam legendBorderColor #0f3460
+skinparam titleFontColor #D4FF00
+skinparam titleFontSize 28
+
+title **STYLIA** â€” Diagrama de Arquitectura Completo\nSistema de CorrecciÃ³n de Estilo Editorial para Documentos DOCX en EspaÃ±ol\nMVP2 (Lotes 1-5 completados)
+
+' ============================================================
+' SECCIÃ“N 1: INFRAESTRUCTURA DOCKER
+' ============================================================
+
+package "Docker Compose â€” 8 Servicios" as INFRA #1a1a2e {
+
+  node "frontend\n:3000" as FE <<Next.js 14>> #16213e {
+    component "Next.js App Router" as NEXTJS
+    component "Rewrites\n/api/v1/* â†’ backend:8000" as REWRITES
+  }
+
+  node "backend\n:8000" as BE <<FastAPI>> #16213e {
+    component "Uvicorn ASGI" as UVICORN
+    component "FastAPI App" as FASTAPI
+  }
+
+  node "worker" as WK <<Celery>> #16213e {
+    component "Celery Worker\nconcurrency=2" as CELERY_WK
+  }
+
+  database "postgres\n:5432" as PG <<PostgreSQL 16>> #1a1a2e
+  queue "redis\n:6379" as REDIS <<Redis 7>> #1a1a2e
+  storage "minio\n:9000/:9001" as MINIO <<MinIO S3>> #1a1a2e
+  node "languagetool\n:8010" as LT <<Java>> #16213e
+  node "pgadmin\n:5050" as PGADMIN <<Admin>> #16213e
+
+  FE -[#0f3460]-> BE : HTTP proxy\n/api/v1/*
+  BE -[#0f3460]-> PG : asyncpg
+  BE -[#0f3460]-> REDIS : aioredis
+  BE -[#0f3460]-> MINIO : S3 API
+  WK -[#0f3460]-> PG : psycopg2 (sync)
+  WK -[#0f3460]-> REDIS : Celery broker/backend
+  WK -[#0f3460]-> MINIO : upload/download
+  WK -[#0f3460]-> LT : HTTP /v2/check
+  PGADMIN .[#533483].> PG
+}
+
+' ============================================================
+' SECCIÃ“N 2: BASE DE DATOS â€” ESQUEMA COMPLETO
+' ============================================================
+
+package "PostgreSQL â€” 9 Tablas" as DB_SCHEMA #1a1a2e {
+
+  class documents <<table>> {
+    **id** : UUID <<PK>>
+    --
+    filename : VARCHAR(512) NOT NULL
+    original_format : VARCHAR(10) NOT NULL
+    source_uri : VARCHAR(1024) NOT NULL
+    pdf_uri : VARCHAR(1024)
+    docx_uri : VARCHAR(1024)
+    total_pages : INTEGER
+    status : VARCHAR(20) NOT NULL = "uploaded"
+    config_json : JSONB NOT NULL = {}
+    error_message : TEXT
+    ..MVP2 Token tracking..
+    prompt_tokens : INTEGER
+    completion_tokens : INTEGER
+    total_tokens : INTEGER
+    llm_cost_usd : FLOAT
+    --
+    created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+    ====
+    idx_documents_status(status)
+  }
+
+  note right of documents
+    **Status flow:**
+    uploaded â†’ converting â†’ extracting
+    â†’ analyzing â†’ correcting â†’ rendering
+    â†’ completed | failed
+  end note
+
+  class pages <<table>> {
+    **id** : UUID <<PK>>
+    **doc_id** : UUID <<FKâ†’documents>> CASCADE
+    --
+    page_no : INTEGER NOT NULL
+    page_type : VARCHAR(20) = "digital"
+    render_route : VARCHAR(20)
+    layout_uri : VARCHAR(1024)
+    text_uri : VARCHAR(1024)
+    preview_uri : VARCHAR(1024)
+    output_uri : VARCHAR(1024)
+    status : VARCHAR(20) = "pending"
+    --
+    created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+    ====
+    UQ(doc_id, page_no)
+    idx_pages_doc_status(doc_id, status)
+  }
+
+  class blocks <<table>> {
+    **id** : UUID <<PK>>
+    **page_id** : UUID <<FKâ†’pages>> CASCADE
+    --
+    block_no : INTEGER NOT NULL
+    block_type : VARCHAR(20) NOT NULL
+    bbox_x0 : FLOAT NOT NULL
+    bbox_y0 : FLOAT NOT NULL
+    bbox_x1 : FLOAT NOT NULL
+    bbox_y1 : FLOAT NOT NULL
+    original_text : TEXT
+    font_info : JSONB
+    ..MVP2 Lote 3..
+    paragraph_type : VARCHAR(30)
+    requires_llm : BOOLEAN = TRUE
+    **section_id** : UUID <<FKâ†’sections>> SET NULL
+    --
+    created_at : TIMESTAMPTZ
+    ====
+    UQ(page_id, block_no)
+    idx_blocks_page(page_id)
+  }
+
+  class patches <<table>> {
+    **id** : UUID <<PK>>
+    **block_id** : UUID <<FKâ†’blocks>> CASCADE
+    --
+    version : INTEGER NOT NULL = 1
+    source : VARCHAR(20) NOT NULL
+    original_text : TEXT NOT NULL
+    corrected_text : TEXT NOT NULL
+    operations_json : JSONB NOT NULL = []
+    qa_score : FLOAT
+    overflow_flag : BOOLEAN = FALSE
+    font_adjusted : BOOLEAN = FALSE
+    review_status : VARCHAR(20) = "auto_accepted"
+    applied : BOOLEAN = FALSE
+    ..MVP2 Lote 2 - Enriquecidos..
+    category : VARCHAR(30)
+    severity : VARCHAR(15)
+    explanation : TEXT
+    confidence : FLOAT
+    rewrite_ratio : FLOAT
+    pass_number : INTEGER
+    model_used : VARCHAR(50)
+    paragraph_index : INTEGER
+    ..MVP2 Lote 4 - Router..
+    route_taken : VARCHAR(15)
+    ..MVP2 Lote 5 - Quality Gates..
+    gate_results : JSONB
+    review_reason : TEXT
+    --
+    created_at : TIMESTAMPTZ
+    ====
+    UQ(block_id, version)
+    idx_patches_review(review_status)
+  }
+
+  class document_profiles <<table>> {
+    **id** : UUID <<PK>>
+    **doc_id** : UUID <<FKâ†’documents>> CASCADE UNIQUE
+    --
+    preset_name : VARCHAR(50)
+    source : VARCHAR(20) = "preset"
+    genre : VARCHAR(50)
+    subgenre : VARCHAR(50)
+    audience_type : VARCHAR(50)
+    audience_age_range : VARCHAR(20)
+    audience_expertise : VARCHAR(20) = "medio"
+    register : VARCHAR(30) = "neutro"
+    tone : VARCHAR(30)
+    intervention_level : VARCHAR(20) = "moderada"
+    preserve_author_voice : BOOLEAN = TRUE
+    max_rewrite_ratio : FLOAT = 0.30
+    max_expansion_ratio : FLOAT = 1.10
+    target_inflesz_min : INTEGER
+    target_inflesz_max : INTEGER
+    style_priorities : JSONB = []
+    protected_terms : JSONB = []
+    forbidden_changes : JSONB = []
+    lt_disabled_rules : JSONB = []
+    --
+    created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+    ====
+    idx_profiles_doc_id(doc_id)
+  }
+
+  class jobs <<table>> {
+    **id** : UUID <<PK>>
+    **doc_id** : UUID <<FKâ†’documents>> CASCADE
+    **page_id** : UUID <<FKâ†’pages>> SET NULL
+    --
+    task_type : VARCHAR(30) NOT NULL
+    celery_task_id : VARCHAR(256)
+    status : VARCHAR(20) = "queued"
+    attempt : INTEGER = 1
+    started_at : TIMESTAMPTZ
+    finished_at : TIMESTAMPTZ
+    error : TEXT
+    --
+    created_at : TIMESTAMPTZ
+    ====
+    idx_jobs_doc_type(doc_id, task_type)
+    idx_jobs_status(status)
+  }
+
+  class llm_usage <<table>> {
+    **id** : UUID <<PK>>
+    **doc_id** : UUID <<FKâ†’documents>> CASCADE
+    --
+    paragraph_index : INTEGER NOT NULL
+    location : VARCHAR(100) NOT NULL
+    call_type : VARCHAR(30) NOT NULL
+    model_used : VARCHAR(50) NOT NULL
+    prompt_tokens : INTEGER = 0
+    completion_tokens : INTEGER = 0
+    total_tokens : INTEGER = 0
+    cost_usd : FLOAT = 0.0
+    --
+    created_at : TIMESTAMPTZ
+    ====
+    idx_llm_usage_doc_id(doc_id)
+    idx_llm_usage_created(created_at)
+  }
+
+  note right of llm_usage
+    **call_type values:**
+    correction_skip
+    correction_cheap
+    correction_editorial
+    correction_mvp1
+    analysis_inference
+    analysis_summary
+  end note
+
+  class section_summaries <<table>> {
+    **id** : UUID <<PK>>
+    **doc_id** : UUID <<FKâ†’documents>> CASCADE
+    --
+    section_index : INTEGER NOT NULL
+    section_title : VARCHAR(500)
+    start_paragraph : INTEGER NOT NULL
+    end_paragraph : INTEGER NOT NULL
+    summary_text : TEXT
+    topic : VARCHAR(200)
+    local_tone : VARCHAR(30)
+    active_terms : JSONB = []
+    transition_from_previous : TEXT
+    --
+    created_at : TIMESTAMPTZ
+    ====
+    idx_sections_doc_id(doc_id)
+    idx_sections_doc_order(doc_id, section_index)
+  }
+
+  class term_registry <<table>> {
+    **id** : UUID <<PK>>
+    **doc_id** : UUID <<FKâ†’documents>> CASCADE
+    --
+    term : VARCHAR(200) NOT NULL
+    normalized_form : VARCHAR(200) NOT NULL
+    frequency : INTEGER = 1
+    first_occurrence_paragraph : INTEGER = 0
+    is_protected : BOOLEAN = FALSE
+    decision : VARCHAR(20) = "use_as_is"
+    --
+    created_at : TIMESTAMPTZ
+    ====
+    idx_terms_doc_id(doc_id)
+    idx_terms_doc_term(doc_id, term)
+  }
+
+  ' Relaciones
+  documents "1" -- "*" pages : doc_id
+  documents "1" -- "0..1" document_profiles : doc_id
+  documents "1" -- "*" jobs : doc_id
+  documents "1" -- "*" llm_usage : doc_id
+  documents "1" -- "*" section_summaries : doc_id
+  documents "1" -- "*" term_registry : doc_id
+  pages "1" -- "*" blocks : page_id
+  blocks "1" -- "*" patches : block_id
+  section_summaries "1" -- "*" blocks : section_id
+}
+
+' ============================================================
+' SECCIÃ“N 3: BACKEND â€” CAPAS DE SERVICIO
+' ============================================================
+
+package "Backend FastAPI â€” app/" as BACKEND_LAYER #1a1a2e {
+
+  package "API Layer â€” api/v1/documents.py" as API_LAYER #16213e {
+
+    interface "Document Management" as API_DOCS {
+      POST /upload
+      GET /documents
+      GET /documents/{id}
+      DELETE /documents/{id}
+      POST /documents/{id}/process
+    }
+
+    interface "Editorial Profiles" as API_PROFILES {
+      GET /presets
+      POST /documents/{id}/profile
+      GET /documents/{id}/profile
+      PUT /documents/{id}/profile
+    }
+
+    interface "Pages & Previews" as API_PAGES {
+      GET /documents/{id}/pages
+      GET /documents/{id}/pages/{no}/preview
+      GET /documents/{id}/pages/{no}/preview-corrected
+      GET /documents/{id}/pages/{no}/annotations
+    }
+
+    interface "Corrections & Downloads" as API_CORRECTIONS {
+      GET /documents/{id}/corrections
+      GET /documents/{id}/download/pdf
+      GET /documents/{id}/download/docx
+    }
+
+    interface "Analytics" as API_ANALYTICS {
+      GET /documents/{id}/analysis
+      GET /documents/{id}/correction-flow
+      GET /costs/summary
+      GET /costs/documents
+      GET /documents/{id}/costs
+    }
+  }
+
+  package "Service Layer â€” services/" as SVC_LAYER #16213e {
+
+    class "ingestion.py\n(Etapa A)" as SVC_INGEST {
+      ingest_document()
+      process_ingestion_sync()
+    }
+
+    class "extraction.py\n(Etapa B)" as SVC_EXTRACT {
+      extract_page_layout_sync()
+    }
+
+    class "analysis.py\n(Etapa C)" as SVC_ANALYSIS {
+      analyze_document_sync()
+      classify_paragraph()
+      _detect_sections()
+      _extract_terms()
+      _infer_profile_with_llm()
+      _summarize_sections_with_llm()
+    }
+
+    class "correction.py\n(Etapa D)" as SVC_CORRECT {
+      correct_docx_sync()
+      correct_text_with_languagetool()
+      correct_page_blocks_sync()
+    }
+
+    class "rendering.py\n(Etapa E)" as SVC_RENDER {
+      render_docx_first_sync()
+      _apply_docx_patches()
+      _generate_annotated_previews()
+    }
+
+    class "prompt_builder.py" as SVC_PROMPT {
+      build_system_prompt()
+      build_user_prompt()
+    }
+
+    class "complexity_router.py\n(Lote 4)" as SVC_ROUTER {
+      route_paragraph()
+      --
+      SKIP: tÃ­tulos, headers,
+      citas, texto corto limpio
+      --
+      CHEAP: celdas, listas,
+      intervenciÃ³n mÃ­nima
+      --
+      EDITORIAL: transiciones,
+      sintaxis compleja, diÃ¡logos
+    }
+
+    class "quality_gates.py\n(Lote 5)" as SVC_GATES {
+      validate_correction()
+      --
+      **CrÃ­ticos** (descartan):
+      gate_not_empty
+      gate_expansion_ratio
+      gate_protected_terms
+      --
+      **No-crÃ­ticos** (marcan):
+      gate_rewrite_ratio
+      gate_language_preserved
+      gate_readability_inflesz
+      --
+      compute_inflesz()
+    }
+
+    class "context_accumulator.py" as SVC_CONTEXT {
+      ContextualCorrectionService
+      get_recent_context(3)
+    }
+  }
+
+  package "Utils â€” utils/" as UTILS_LAYER #16213e {
+
+    class "openai_client.py" as UTIL_OPENAI {
+      correct_text_style()  ..MVP1
+      correct_with_profile()  ..MVP2
+      --
+      model: gpt-4o-mini
+      temp: 0.3
+      max_tokens: 500
+      format: JSON forced
+    }
+
+    class "minio_client.py" as UTIL_MINIO {
+      upload_file()
+      download_file()
+      file_exists()
+      delete_file()
+      get_presigned_url()
+    }
+
+    class "pdf_utils.py" as UTIL_PDF {
+      LibreOffice convert
+      PyMuPDF extract
+    }
+  }
+
+  package "Workers â€” workers/" as WORKER_LAYER #16213e {
+
+    class "celery_app.py" as WK_APP {
+      broker: Redis db/0
+      backend: Redis db/1
+      time_limit: 7200s
+      acks_late: true
+      retries: 3
+    }
+
+    class "tasks_pipeline.py" as WK_PIPELINE {
+      process_document_pipeline()
+      --
+      **Etapa A**: IngestiÃ³n
+      **Etapa B**: ExtracciÃ³n
+      **Etapa C**: AnÃ¡lisis
+      **Etapa D**: CorrecciÃ³n
+      **Etapa E**: Renderizado
+    }
+  }
+
+  package "Data â€” data/" as DATA_LAYER #16213e {
+    class "profiles.py" as DATA_PROFILES {
+      **10 perfiles editoriales:**
+      infantil_6_8
+      infantil_9_12
+      juvenil
+      novela_literaria
+      ensayo
+      psicologia_academica
+      psicologia_divulgativa
+      manual_tecnico
+      texto_marketing
+      no_ficcion_general
+    }
+  }
+
+  ' Relaciones internas backend
+  API_LAYER -[#533483]-> SVC_LAYER
+  SVC_CORRECT --> SVC_PROMPT
+  SVC_CORRECT --> SVC_ROUTER
+  SVC_CORRECT --> SVC_GATES
+  SVC_CORRECT --> SVC_CONTEXT
+  SVC_CORRECT --> UTIL_OPENAI
+  SVC_ANALYSIS --> UTIL_OPENAI
+  SVC_INGEST --> UTIL_MINIO
+  SVC_EXTRACT --> UTIL_MINIO
+  SVC_RENDER --> UTIL_MINIO
+  SVC_CORRECT --> UTIL_MINIO
+  SVC_INGEST --> UTIL_PDF
+  SVC_EXTRACT --> UTIL_PDF
+  SVC_RENDER --> UTIL_PDF
+  WK_PIPELINE --> SVC_INGEST
+  WK_PIPELINE --> SVC_EXTRACT
+  WK_PIPELINE --> SVC_ANALYSIS
+  WK_PIPELINE --> SVC_CORRECT
+  WK_PIPELINE --> SVC_RENDER
+  API_LAYER --> DATA_PROFILES
+}
+
+' ============================================================
+' SECCIÃ“N 4: FRONTEND â€” PÃGINAS Y COMPONENTES
+' ============================================================
+
+package "Frontend Next.js 14 â€” src/" as FRONTEND_LAYER #1a1a2e {
+
+  package "Pages â€” app/" as FE_PAGES #16213e {
+
+    class "layout.tsx" as PG_LAYOUT {
+      Header: STYLIA + nav /costs
+      Dark theme (html.dark)
+      Inter font, max-w-7xl
+    }
+
+    class "page.tsx â€” Dashboard\nRuta: /" as PG_HOME {
+      **State:** documents[], pendingDoc
+      **Polling:** 5s (listDocuments)
+      **Flow:**
+      Upload â†’ Profile â†’ Process
+    }
+
+    class "documents/[id]/page.tsx\nRuta: /documents/:id" as PG_DETAIL {
+      **State:** doc, corrections[],
+      pages[], profile, analysis
+      **Polling:** 4s (all endpoints)
+      **Tabs:** Pipeline, Analysis,
+      Corrections, API Flow, Compare
+    }
+
+    class "costs/page.tsx\nRuta: /costs" as PG_COSTS {
+      **State:** summary, documents[],
+      paragraphCosts{}
+      **Sections:** Hero stats,
+      charts, document cards
+    }
+  }
+
+  package "Components â€” components/" as FE_COMPONENTS #16213e {
+
+    class "DocumentUploader" as CMP_UPLOAD {
+      react-dropzone
+      Solo .docx
+      Drag & drop
+    }
+
+    class "ProfileSelector" as CMP_PROFILE_SEL {
+      Grid 10 preset cards
+      Selectable + customize
+    }
+
+    class "ProfileEditor" as CMP_PROFILE_ED {
+      Register, tone, level
+      Limits, protected terms
+      Style priorities
+    }
+
+    class "DocumentList" as CMP_DOCLIST {
+      Grid de documentos
+      Mini-pipeline progress
+      Download/delete actions
+    }
+
+    class "PipelineFlow" as CMP_PIPELINE {
+      7 etapas horizontales
+      Estado actual animado
+      Barra progreso global
+    }
+
+    class "CorrectionHistory" as CMP_CORRECTIONS {
+      Filtros: source, category,
+      severity, search
+      CorrectionCard expandible:
+      diff word-level, gates,
+      rewrite/confidence bars
+    }
+
+    class "CorrectionFlowViewer" as CMP_FLOW {
+      Timeline peticiones LT/GPT
+      RequestCard: prompt,
+      context, tokens, cost
+    }
+
+    class "AnalysisView" as CMP_ANALYSIS {
+      Perfil inferido
+      Secciones + glosario
+      DistribuciÃ³n tipos pÃ¡rrafo
+    }
+
+    class "DiffCompareView" as CMP_DIFF {
+      Side-by-side pages
+      Annotation overlays
+      Tooltip: category, severity,
+      originalâ†’corrected
+    }
+  }
+
+  package "API Client â€” lib/api.ts" as FE_API #16213e {
+    class "fetch wrapper" as API_CLIENT {
+      Base: /api/v1
+      uploadDocument()
+      listDocuments()
+      getDocument()
+      listPages()
+      getDocumentCorrections()
+      deleteDocument()
+      downloadPdf/Docx()
+      getPageAnnotations()
+      getCorrectionFlow()
+      listPresets()
+      createProfile()
+      getProfile()
+      updateProfile()
+      processDocument()
+      getCostSummary()
+      getCostDocuments()
+      getDocumentCosts()
+      getDocumentAnalysis()
+    }
+  }
+
+  ' Relaciones frontend
+  PG_HOME --> CMP_UPLOAD
+  PG_HOME --> CMP_PROFILE_SEL
+  CMP_PROFILE_SEL --> CMP_PROFILE_ED
+  PG_HOME --> CMP_DOCLIST
+  PG_DETAIL --> CMP_PIPELINE
+  PG_DETAIL --> CMP_CORRECTIONS
+  PG_DETAIL --> CMP_FLOW
+  PG_DETAIL --> CMP_ANALYSIS
+  PG_DETAIL --> CMP_DIFF
+  FE_COMPONENTS --> API_CLIENT
+  FE_PAGES --> API_CLIENT
+}
+
+' ============================================================
+' SECCIÃ“N 5: ALMACENAMIENTO MinIO
+' ============================================================
+
+package "MinIO â€” bucket: stylecorrector" as MINIO_STORAGE #1a1a2e {
+
+  storage "source/{doc_id}/\n{filename}" as MIO_SOURCE <<DOCX original>>
+  storage "pdf/{doc_id}/\n{stem}.pdf" as MIO_PDF <<PDF convertido>>
+  storage "pages/{doc_id}/\nlayout/{page}.json\ntext/{page}.txt\npreview/{page}.png" as MIO_PAGES <<ExtracciÃ³n>>
+  storage "pages/{doc_id}/\npreview_corrected/{page}.png\nannotations/{page}.json" as MIO_ANNOTATED <<Anotaciones>>
+  storage "docx/{doc_id}/\npatches_docx.json\n{stem}_corrected.docx" as MIO_DOCX <<Patches + DOCX>>
+  storage "final/{doc_id}/\n{stem}_corrected.pdf" as MIO_FINAL <<PDF final>>
+  storage "analysis/{doc_id}/\nclassifications.json" as MIO_ANALYSIS <<Clasificaciones>>
+}
+
+' ============================================================
+' SECCIÃ“N 6: PIPELINE DE PROCESAMIENTO (Flujo principal)
+' ============================================================
+
+package "Pipeline de Procesamiento â€” Celery Task" as PIPELINE_FLOW #1a1a2e {
+
+  rectangle "**Etapa A: INGESTA**\nuploaded â†’ converting" as STAGE_A #16213e {
+    card "Recibir DOCX" as A1
+    card "LibreOffice â†’ PDF" as A2
+    card "Contar pÃ¡ginas" as A3
+    card "Upload a MinIO" as A4
+    A1 -right-> A2
+    A2 -right-> A3
+    A3 -right-> A4
+  }
+
+  rectangle "**Etapa B: EXTRACCIÃ“N**\nconverting â†’ extracting" as STAGE_B #16213e {
+    card "PyMuPDF: bloques+bbox" as B1
+    card "Generar preview PNG" as B2
+    card "Crear Block records" as B3
+    B1 -right-> B2
+    B2 -right-> B3
+  }
+
+  rectangle "**Etapa C: ANÃLISIS EDITORIAL**\nextracting â†’ analyzing" as STAGE_C #16213e {
+    card "C.1 Inferir perfil\n(LLM)" as C1
+    card "C.3 Detectar secciones\n+ resumir (LLM)" as C3
+    card "C.4 Extraer glosario\n(heurÃ­stico)" as C4
+    card "C.5 Clasificar pÃ¡rrafos\n(heurÃ­stico)" as C5
+    C1 -right-> C3
+    C3 -right-> C4
+    C4 -right-> C5
+  }
+
+  rectangle "**Etapa D: CORRECCIÃ“N**\nanalyzing â†’ correcting" as STAGE_D #16213e {
+    card "Por cada pÃ¡rrafo DOCX:" as D0
+    card "1. LanguageTool\n(ortografÃ­a/gramÃ¡tica)" as D1
+    card "2. Router:\nSKIP|CHEAP|EDITORIAL" as D2
+    card "3. LLM + perfil\n+ contexto jerÃ¡rquico" as D3
+    card "4. Quality Gates\n(5 gates + INFLESZ)" as D4
+    card "5. Persistir Patch" as D5
+    D0 -right-> D1
+    D1 -right-> D2
+    D2 -right-> D3
+    D3 -right-> D4
+    D4 -right-> D5
+  }
+
+  rectangle "**Etapa E: RENDERIZADO**\ncorrecting â†’ rendering" as STAGE_E #16213e {
+    card "Aplicar patches\nal DOCX original" as E1
+    card "DOCX â†’ PDF\n(LibreOffice)" as E2
+    card "Previews anotadas\n+ annotations JSON" as E3
+    card "Upload finales\na MinIO" as E4
+    E1 -right-> E2
+    E2 -right-> E3
+    E3 -right-> E4
+  }
+
+  STAGE_A -[#D4FF00]-> STAGE_B
+  STAGE_B -[#D4FF00]-> STAGE_C
+  STAGE_C -[#D4FF00]-> STAGE_D
+  STAGE_D -[#D4FF00]-> STAGE_E
+}
+
+' ============================================================
+' SECCIÃ“N 7: FLUJO DE CORRECCIÃ“N POR PÃRRAFO (Detalle Etapa D)
+' ============================================================
+
+package "Detalle: CorrecciÃ³n por PÃ¡rrafo" as CORRECTION_DETAIL #1a1a2e {
+
+  rectangle "PÃ¡rrafo DOCX\n(texto + location)" as PAR_INPUT #16213e
+
+  rectangle "LanguageTool\nPOST /v2/check\nOrtografÃ­a + GramÃ¡tica" as LT_CHECK #16213e
+
+  diamond "Â¿Cambios LT?" as LT_DECISION #0f3460
+
+  rectangle "texto post-LT" as POST_LT #16213e
+
+  rectangle "**Complexity Router**" as ROUTER_BOX #16213e {
+    card "SKIP\ntÃ­tulos, citas,\nheaders, cortos" as ROUTE_SKIP #533483
+    card "CHEAP\ngpt-4o-mini\nceldas, listas" as ROUTE_CHEAP #0f3460
+    card "EDITORIAL\nmodelo configurable\ntransiciones, diÃ¡logos" as ROUTE_EDITORIAL #e94560
+  }
+
+  rectangle "**PromptBuilder**\nsystem_prompt (estÃ¡tico)\n+ user_prompt (dinÃ¡mico)\n+ perfil + secciÃ³n\n+ contexto previo" as PROMPT_BUILD #16213e
+
+  rectangle "**OpenAI API**\nJSON response:\n{action, corrected_text,\nchanges[], confidence,\nrewrite_ratio}" as LLM_CALL #16213e
+
+  rectangle "**Quality Gates**" as GATES_BOX #16213e {
+    card "gate_not_empty âš " as G1
+    card "gate_expansion âš " as G2
+    card "gate_protected âš " as G3
+    card "gate_rewrite â„¹" as G4
+    card "gate_language â„¹" as G5
+    card "gate_inflesz â„¹" as G6
+  }
+
+  diamond "Â¿Gates?" as GATE_DECISION #0f3460
+
+  rectangle "auto_accepted âœ“\nPatch con correcciÃ³n" as ACCEPTED #16213e
+  rectangle "gate_rejected âœ•\nRevertir a post-LT" as REJECTED #e94560
+  rectangle "manual_review âš \nPatch + flag revisiÃ³n" as REVIEW #533483
+  rectangle "SKIP: sin cambio\nno genera Patch" as SKIPPED #16213e
+
+  PAR_INPUT --> LT_CHECK
+  LT_CHECK --> LT_DECISION
+  LT_DECISION --> POST_LT : sÃ­/no
+  POST_LT --> ROUTER_BOX
+  ROUTE_SKIP --> SKIPPED
+  ROUTE_CHEAP --> PROMPT_BUILD
+  ROUTE_EDITORIAL --> PROMPT_BUILD
+  PROMPT_BUILD --> LLM_CALL
+  LLM_CALL --> GATES_BOX
+  GATES_BOX --> GATE_DECISION
+  GATE_DECISION --> ACCEPTED : todos pasan
+  GATE_DECISION --> REJECTED : crÃ­tico falla
+  GATE_DECISION --> REVIEW : no-crÃ­tico falla
+}
+
+' ============================================================
+' SECCIÃ“N 8: FLUJO DE USUARIO (Frontend)
+' ============================================================
+
+package "Flujo de Usuario" as USER_FLOW #1a1a2e {
+
+  rectangle "1. **Upload DOCX**\nDrag & drop en Dashboard\nDocumentUploader" as UF1 #16213e
+
+  rectangle "2. **Seleccionar Perfil**\nProfileSelector:\n10 presets o personalizar\n(o genÃ©rico sin perfil)" as UF2 #16213e
+
+  rectangle "3. **Procesar**\nPOST /process\nCelery task iniciado\nPolling 4s en detalle" as UF3 #16213e
+
+  rectangle "4. **Observar Pipeline**\nPipelineFlow: 7 etapas\nBarra de progreso\nEstado en tiempo real" as UF4 #16213e
+
+  rectangle "5. **Revisar Correcciones**\nCorrectionHistory:\nDiff word-level\nFiltros categorÃ­a/severidad\nGates + confidence" as UF5 #16213e
+
+  rectangle "6. **Comparar PÃ¡ginas**\nDiffCompareView:\nOriginal vs Corregido\nTooltips anotaciones" as UF6 #16213e
+
+  rectangle "7. **AnÃ¡lisis Editorial**\nAnalysisView:\nSecciones, glosario,\nperfil inferido,\ntipos de pÃ¡rrafo" as UF7 #16213e
+
+  rectangle "8. **Descargar**\nPDF corregido\nDOCX corregido" as UF8 #16213e
+
+  rectangle "9. **Costos**\n/costs: resumen global\nPor documento\nPor pÃ¡rrafo" as UF9 #16213e
+
+  UF1 -[#D4FF00]-> UF2
+  UF2 -[#D4FF00]-> UF3
+  UF3 -[#D4FF00]-> UF4
+  UF4 -[#D4FF00]-> UF5
+  UF5 -[#D4FF00]-> UF6
+  UF5 -[#D4FF00]-> UF7
+  UF4 -[#D4FF00]-> UF8
+  UF8 -[#D4FF00]-> UF9
+}
+
+' ============================================================
+' SECCIÃ“N 9: SERVICIOS EXTERNOS
+' ============================================================
+
+cloud "OpenAI API\ngpt-4o-mini\n(cheap + editorial)" as EXT_OPENAI #0f3460
+cloud "LanguageTool\nHTTP /v2/check\n(espaÃ±ol)" as EXT_LT #0f3460
+
+UTIL_OPENAI --> EXT_OPENAI : HTTPS
+SVC_CORRECT --> EXT_LT : HTTP
+
+' ============================================================
+' LEYENDA
+' ============================================================
+
+legend right
+  **STYLIA v0.2.0 â€” MVP2**
+  Corrector de Estilo Editorial
+  --
+  **Stack:**
+  FastAPI + Celery + PostgreSQL
+  Redis + MinIO + LanguageTool
+  OpenAI GPT-4o-mini
+  Next.js 14 + React 18 + Tailwind
+  --
+  **Pipeline:** 5 etapas (A-E)
+  **Perfiles:** 10 presets editoriales
+  **Router:** SKIP / CHEAP / EDITORIAL
+  **Gates:** 5 + INFLESZ
+  **Polling:** 5s home, 4s detalle
+  --
+  âš  = Gate crÃ­tico
+  â„¹ = Gate no-crÃ­tico
+end legend
+
+@enduml
+
+

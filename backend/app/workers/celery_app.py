@@ -1,5 +1,7 @@
 """
-Configuración de Celery.
+Configuración de Celery con routing de colas.
+Pipeline tasks → cola 'pipeline' (procesamiento pesado: LibreOffice, PyMuPDF, análisis).
+Batch tasks → cola 'batch' (corrección LLM, I/O-bound).
 """
 
 from celery import Celery
@@ -22,6 +24,13 @@ celery_app.conf.update(
     task_time_limit=settings.celery_task_time_limit,
     task_soft_time_limit=settings.celery_task_soft_time_limit,
     result_expires=settings.celery_result_expires,
+    # Routing: separar pipeline (pesado) de batch (LLM I/O)
+    task_routes={
+        "tasks_pipeline.process_document_pipeline": {"queue": "pipeline"},
+        "tasks_pipeline.correct_batch_llm": {"queue": "batch"},
+        "tasks_pipeline.assemble_correction_results": {"queue": "batch"},
+    },
+    task_default_queue="pipeline",
 )
 
 # Auto-descubrir tareas en los módulos de workers

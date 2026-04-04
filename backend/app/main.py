@@ -83,6 +83,63 @@ async def lifespan(app: FastAPI):
             await conn.execute(text(sql))
         logger.info("MVP2 Lote 5: columnas quality gates en patches verificadas/creadas")
 
+    # Progreso granular en documents
+    async with engine.begin() as conn:
+        progress_migrations = [
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS progress_stage VARCHAR(30)",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS progress_stage_current INTEGER",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS progress_stage_total INTEGER",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS progress_message VARCHAR(200)",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS stage_started_at TIMESTAMPTZ",
+        ]
+        for sql in progress_migrations:
+            await conn.execute(text(sql))
+        logger.info("Progreso granular: columnas en documents verificadas/creadas")
+
+    # Corrección paralela por lotes: tabla correction_batches + columna batch_index en patches
+    async with engine.begin() as conn:
+        parallel_migrations = [
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS batch_index INTEGER",
+            """CREATE TABLE IF NOT EXISTS correction_batches (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                doc_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                batch_index INTEGER NOT NULL,
+                start_paragraph INTEGER NOT NULL,
+                end_paragraph INTEGER NOT NULL,
+                paragraphs_total INTEGER NOT NULL DEFAULT 0,
+                paragraphs_corrected INTEGER NOT NULL DEFAULT 0,
+                patches_count INTEGER NOT NULL DEFAULT 0,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                celery_task_id VARCHAR(200),
+                context_seed TEXT,
+                last_corrected_text TEXT,
+                lt_pass_completed BOOLEAN NOT NULL DEFAULT FALSE,
+                llm_pass_completed BOOLEAN NOT NULL DEFAULT FALSE,
+                boundary_checked BOOLEAN NOT NULL DEFAULT FALSE,
+                error_message TEXT,
+                started_at TIMESTAMPTZ,
+                completed_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT uq_correction_batches_doc_batch UNIQUE (doc_id, batch_index)
+            )""",
+        ]
+        for sql in parallel_migrations:
+            await conn.execute(text(sql))
+        logger.info("Corrección paralela: correction_batches y batch_index verificadas/creadas")
+
+    # Processing time tracking en documents
+    async with engine.begin() as conn:
+        timing_migrations = [
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMPTZ",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_completed_at TIMESTAMPTZ",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS stage_timings JSONB",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS worker_hostname VARCHAR(200)",
+        ]
+        for sql in timing_migrations:
+            await conn.execute(text(sql))
+        logger.info("Timing tracking: columnas en documents verificadas/creadas")
+
     # Inicializar bucket de MinIO
     from app.utils.minio_client import ensure_bucket
     await ensure_bucket()

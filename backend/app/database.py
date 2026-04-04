@@ -13,6 +13,8 @@ engine = create_async_engine(
     echo=settings.debug,
     pool_size=10,
     max_overflow=20,
+    pool_pre_ping=True,
+    pool_recycle=1800,
 )
 
 # Session factory

@@ -515,6 +515,7 @@ def analyze_document_sync(
     doc_id: str,
     docx_uri: str,
     profile: dict | None = None,
+    docx_bytes_cached: bytes | None = None,
 ) -> dict:
     """
     Etapa C: Análisis editorial del documento.
@@ -533,8 +534,11 @@ def analyze_document_sync(
 
     usage_records = []
 
-    # Descargar DOCX
-    docx_bytes = minio_client.download_file(docx_uri)
+    # Descargar DOCX (con cache si disponible)
+    if docx_bytes_cached is not None:
+        docx_bytes = docx_bytes_cached
+    else:
+        docx_bytes = minio_client.download_file(docx_uri)
     tmpfile = tempfile.mktemp(suffix=".docx")
     with open(tmpfile, "wb") as f:
         f.write(docx_bytes)

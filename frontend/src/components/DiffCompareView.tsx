@@ -113,7 +113,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     // Match annotation to correction to get cost
     const match = corrections.find(
-      (c) => c.original_snippet === ann.original_snippet && c.corrected_snippet === ann.corrected_snippet
+      (c) => c.original_text === ann.original_snippet && c.corrected_text === ann.corrected_snippet
     );
     setTooltip({
       x: rect.left + rect.width / 2,
@@ -145,8 +145,8 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
   // No pages
   if (!totalPages || totalPages === 0) {
     return (
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-12 text-center">
-        <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-carbon-200 flex items-center justify-center">
+      <div className="glass-card rounded-xl p-12 text-center">
+        <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-surface flex items-center justify-center">
           <svg className="w-7 h-7 text-plomo" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
           </svg>
@@ -162,14 +162,14 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
       {/* ============================================= */}
       {/* PAGE NAVIGATOR                                */}
       {/* ============================================= */}
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-4">
+      <div className="glass-card rounded-xl p-4">
         <div className="flex items-center justify-between flex-wrap gap-3">
           {/* Prev / page buttons / Next */}
           <div className="flex items-center gap-2">
             <button
               onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
               disabled={currentPage === 1}
-              className="w-8 h-8 flex items-center justify-center rounded-lg bg-carbon-200 text-plomo hover:text-bruma hover:bg-carbon-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+              className="w-8 h-8 flex items-center justify-center rounded-lg bg-surface text-plomo hover:text-bruma hover:bg-carbon-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
@@ -187,7 +187,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
                     className={`w-8 h-8 flex items-center justify-center rounded-lg text-xs font-semibold transition-all ${
                       currentPage === p
                         ? "bg-krypton text-carbon shadow-[0_0_10px_rgba(212,255,0,0.2)]"
-                        : "bg-carbon-200 text-plomo hover:text-bruma hover:bg-carbon-300"
+                        : "bg-surface text-plomo hover:text-bruma hover:bg-carbon-300"
                     }`}
                   >
                     {p}
@@ -199,7 +199,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
             <button
               onClick={() => setCurrentPage((p) => Math.min(maxPage, p + 1))}
               disabled={currentPage === maxPage}
-              className="w-8 h-8 flex items-center justify-center rounded-lg bg-carbon-200 text-plomo hover:text-bruma hover:bg-carbon-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+              className="w-8 h-8 flex items-center justify-center rounded-lg bg-surface text-plomo hover:text-bruma hover:bg-carbon-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
@@ -236,7 +236,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
                     return (
                       <span
                         key={cat}
-                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${cc?.bg || "bg-carbon-200"} ${cc?.text || "text-plomo"}`}
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${cc?.bg || "bg-surface"} ${cc?.text || "text-plomo"}`}
                       >
                         {cat} {count}
                       </span>
@@ -259,7 +259,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
         </div>
 
         {/* Column headers */}
-        <div className="grid grid-cols-2 gap-4 mt-4 pt-3 border-t border-carbon-300">
+        <div className="grid grid-cols-2 gap-4 mt-4 pt-3 border-t border-border">
           <div className="flex items-center gap-2">
             <div className="w-2.5 h-2.5 rounded-full bg-plomo/50" />
             <span className="text-xs uppercase tracking-wider font-semibold text-plomo">Original</span>
@@ -279,7 +279,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
       {/* ============================================= */}
       <div className="grid grid-cols-2 gap-4">
         {/* LEFT: Original page */}
-        <div className="bg-carbon-100 border border-carbon-300 rounded-xl overflow-hidden">
+        <div className="glass-card rounded-xl overflow-hidden">
           <div className="max-h-[80vh] overflow-auto">
             {!leftLoaded && !leftError && <ImageSkeleton />}
             {leftError ? (
@@ -297,7 +297,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
         </div>
 
         {/* RIGHT: Corrected page with annotation overlays */}
-        <div className="bg-carbon-100 border border-carbon-300 rounded-xl overflow-hidden">
+        <div className="glass-card rounded-xl overflow-hidden">
           <div className="max-h-[80vh] overflow-auto">
             {isCompleted ? (
               <>
@@ -332,7 +332,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
                 )}
               </>
             ) : (
-              <div className="flex items-center justify-center h-96 bg-carbon-200/20">
+              <div className="flex items-center justify-center h-96 bg-surface/20">
                 <div className="text-center">
                   <svg className="w-12 h-12 mx-auto text-yellow-400/40 mb-3 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -358,7 +358,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
 
 function ImageSkeleton() {
   return (
-    <div className="flex items-center justify-center h-96 bg-carbon-200/30 animate-pulse">
+    <div className="flex items-center justify-center h-96 bg-surface/30 animate-pulse">
       <div className="text-center">
         <svg className="w-10 h-10 mx-auto text-plomo/40 mb-2 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181 3.182" />
@@ -371,7 +371,7 @@ function ImageSkeleton() {
 
 function ImagePlaceholder({ text, sub }: { text: string; sub?: string }) {
   return (
-    <div className="flex items-center justify-center h-96 bg-carbon-200/20">
+    <div className="flex items-center justify-center h-96 bg-surface/20">
       <div className="text-center">
         <svg className="w-10 h-10 mx-auto text-plomo/40 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.41a2.25 2.25 0 013.182 0l2.909 2.91M3.75 21h16.5a1.5 1.5 0 001.5-1.5V5.25a1.5 1.5 0 00-1.5-1.5H3.75a1.5 1.5 0 00-1.5 1.5v14.25a1.5 1.5 0 001.5 1.5z" />
@@ -396,11 +396,11 @@ function AnnotationTooltip({ data }: { data: TooltipData }) {
         transform: "translate(-50%, -100%)",
       }}
     >
-      <div className="bg-carbon-100 border border-carbon-300 rounded-lg shadow-2xl shadow-black/50 px-3 py-2.5 max-w-sm">
+      <div className="glass-card rounded-lg shadow-2xl shadow-black/50 px-3 py-2.5 max-w-sm">
         {/* Category + Severity + Confidence */}
         <div className="flex items-center gap-1.5 mb-2">
           {data.category && (
-            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${catColor?.bg || "bg-carbon-200"} ${catColor?.text || "text-plomo"}`}>
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${catColor?.bg || "bg-surface"} ${catColor?.text || "text-plomo"}`}>
               {data.category}
             </span>
           )}
@@ -433,7 +433,7 @@ function AnnotationTooltip({ data }: { data: TooltipData }) {
         )}
 
         {/* Original → Corrected snippet */}
-        <div className="border-t border-carbon-300/50 pt-2 space-y-1">
+        <div className="border-t border-border/50 pt-2 space-y-1">
           <div className="flex items-start gap-2">
             <span className="text-[10px] text-red-400 font-semibold shrink-0 mt-0.5">ANT</span>
             <p className="text-[11px] text-red-300/70 line-through leading-snug">{data.original_snippet}</p>
@@ -446,7 +446,7 @@ function AnnotationTooltip({ data }: { data: TooltipData }) {
 
         {/* Cost */}
         {data.cost_usd != null && data.cost_usd > 0 && (
-          <div className="border-t border-carbon-300/50 pt-1.5 mt-1.5 flex items-center justify-end">
+          <div className="border-t border-border/50 pt-1.5 mt-1.5 flex items-center justify-end">
             <span className="text-[10px] text-emerald-400 font-mono">
               Costo: ${data.cost_usd < 0.001 ? data.cost_usd.toFixed(6) : data.cost_usd.toFixed(4)}
             </span>
@@ -454,7 +454,7 @@ function AnnotationTooltip({ data }: { data: TooltipData }) {
         )}
 
         {/* Arrow */}
-        <div className="absolute left-1/2 -translate-x-1/2 -bottom-1 w-2 h-2 bg-carbon-100 border-r border-b border-carbon-300 rotate-45" />
+        <div className="absolute left-1/2 -translate-x-1/2 -bottom-1 w-2 h-2 bg-surface-elevated border-r border-b border-border rotate-45" />
       </div>
     </div>
   );

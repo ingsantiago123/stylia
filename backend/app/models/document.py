@@ -42,11 +42,43 @@ class Document(Base):
         JSONB, nullable=False, default=dict, server_default="{}"
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Granular progress tracking
+    progress_stage: Mapped[str | None] = mapped_column(
+        String(30), nullable=True, comment="Etapa actual: converting, extracting, etc."
+    )
+    progress_stage_current: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="Ítems procesados en la etapa actual"
+    )
+    progress_stage_total: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="Total de ítems en la etapa actual"
+    )
+    progress_message: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, comment="Mensaje legible del progreso actual"
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="Último heartbeat del worker"
+    )
+    stage_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="Inicio de la etapa actual"
+    )
     # Token usage & cost tracking (MVP2)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     llm_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Processing time tracking
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="Inicio real del pipeline (Stage A)"
+    )
+    processing_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="Fin del pipeline (completed o failed)"
+    )
+    stage_timings: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True, comment="Duración de cada etapa en segundos: {A, B, C, D, E}"
+    )
+    worker_hostname: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, comment="Hostname del worker Celery que procesó el doc"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

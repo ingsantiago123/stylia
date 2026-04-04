@@ -91,7 +91,7 @@ export default function CostsPage() {
       <div className="flex items-center justify-center py-32">
         <div className="flex flex-col items-center gap-4">
           <div className="relative">
-            <div className="w-12 h-12 rounded-full border-2 border-carbon-50 border-t-krypton animate-spin" />
+            <div className="w-12 h-12 rounded-full border-2 border-border border-t-krypton animate-spin" />
             <div className="absolute inset-0 w-12 h-12 rounded-full border-2 border-transparent border-t-krypton/30 animate-spin" style={{ animationDuration: "1.5s", animationDirection: "reverse" }} />
           </div>
           <span className="text-sm text-plomo">Cargando panel de costos...</span>
@@ -135,7 +135,7 @@ export default function CostsPage() {
         </div>
         <a
           href="/"
-          className="inline-flex items-center gap-2 text-plomo hover:text-krypton text-xs transition-colors bg-carbon-100 border border-carbon-300 rounded-lg px-3 py-2"
+          className="inline-flex items-center gap-2 text-plomo hover:text-krypton text-xs transition-colors glass-card rounded-lg px-3 py-2"
         >
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
@@ -194,7 +194,7 @@ export default function CostsPage() {
           {/* ============================================= */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {/* Token distribution donut */}
-            <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5">
+            <div className="glass-card rounded-xl p-5">
               <h3 className="text-[10px] font-semibold text-plomo uppercase tracking-wider mb-4">Distribución de tokens</h3>
               <div className="flex items-center gap-6">
                 <DonutChart
@@ -227,7 +227,7 @@ export default function CostsPage() {
             </div>
 
             {/* Cost efficiency */}
-            <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5">
+            <div className="glass-card rounded-xl p-5">
               <h3 className="text-[10px] font-semibold text-plomo uppercase tracking-wider mb-4">Eficiencia de costo</h3>
               <div className="space-y-4">
                 <MetricRow
@@ -248,7 +248,7 @@ export default function CostsPage() {
                   barPct={60}
                   barColor="bg-blue-500/40"
                 />
-                <div className="pt-2 border-t border-carbon-300/50">
+                <div className="pt-2 border-t border-border/50">
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] text-plomo uppercase tracking-wider">Ratio entrada/salida</span>
                     <span className="text-xs font-mono text-bruma">
@@ -262,11 +262,11 @@ export default function CostsPage() {
             </div>
 
             {/* Model & pricing */}
-            <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5">
+            <div className="glass-card rounded-xl p-5">
               <h3 className="text-[10px] font-semibold text-plomo uppercase tracking-wider mb-4">Modelo y tarifa</h3>
               <div className="space-y-3">
                 {/* Model badge */}
-                <div className="flex items-center gap-3 bg-carbon-200 rounded-lg px-3 py-2.5">
+                <div className="flex items-center gap-3 bg-surface rounded-lg px-3 py-2.5">
                   <div className="w-8 h-8 rounded-lg bg-purple-900/30 flex items-center justify-center flex-shrink-0">
                     <svg className="w-4 h-4 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
@@ -280,11 +280,11 @@ export default function CostsPage() {
 
                 {/* Pricing */}
                 <div className="grid grid-cols-2 gap-2">
-                  <div className="bg-carbon-200 rounded-lg px-3 py-2 text-center">
+                  <div className="bg-surface rounded-lg px-3 py-2 text-center">
                     <div className="text-[9px] text-plomo uppercase tracking-wider mb-0.5">Input / 1M tok</div>
                     <div className="text-sm font-bold text-blue-400 font-mono">${summary.pricing.input_per_1m}</div>
                   </div>
-                  <div className="bg-carbon-200 rounded-lg px-3 py-2 text-center">
+                  <div className="bg-surface rounded-lg px-3 py-2 text-center">
                     <div className="text-[9px] text-plomo uppercase tracking-wider mb-0.5">Output / 1M tok</div>
                     <div className="text-sm font-bold text-krypton font-mono">${summary.pricing.output_per_1m}</div>
                   </div>
@@ -301,7 +301,7 @@ export default function CostsPage() {
                             <span className="text-plomo font-mono">{m.model}</span>
                             <span className="text-bruma">{formatCost(m.cost)}</span>
                           </div>
-                          <div className="h-1.5 bg-carbon-200 rounded-full overflow-hidden">
+                          <div className="h-1.5 bg-surface rounded-full overflow-hidden">
                             <div
                               className="h-full bg-gradient-to-r from-purple-500 to-purple-400 rounded-full transition-all duration-700"
                               style={{ width: `${barW}%` }}
@@ -334,7 +334,7 @@ export default function CostsPage() {
           {/* COST PER DOCUMENT — BAR CHART                 */}
           {/* ============================================= */}
           {documents.length > 0 && (
-            <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5">
+            <div className="glass-card rounded-xl p-5">
               <h3 className="text-[10px] font-semibold text-plomo uppercase tracking-wider mb-4">Costo por documento</h3>
               <div className="space-y-2">
                 {documents.map((doc) => {
@@ -345,7 +345,7 @@ export default function CostsPage() {
                         <div className="w-28 lg:w-44 truncate text-xs text-plomo group-hover:text-bruma transition-colors" title={doc.filename}>
                           {doc.filename}
                         </div>
-                        <div className="flex-1 h-5 bg-carbon-200 rounded overflow-hidden relative">
+                        <div className="flex-1 h-5 bg-surface rounded overflow-hidden relative">
                           <div
                             className="h-full bg-gradient-to-r from-krypton/50 to-krypton/20 rounded transition-all duration-700"
                             style={{ width: `${Math.max(barW, 2)}%` }}
@@ -372,10 +372,10 @@ export default function CostsPage() {
       {/* ============================================= */}
       {/* DOCUMENT TABLE WITH EXPANDABLE DETAILS         */}
       {/* ============================================= */}
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl overflow-hidden">
-        <div className="px-5 py-4 border-b border-carbon-300 flex items-center justify-between">
+      <div className="glass-card rounded-xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-lg bg-carbon-200 flex items-center justify-center">
+            <div className="w-7 h-7 rounded-lg bg-surface flex items-center justify-center">
               <svg className="w-3.5 h-3.5 text-plomo" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 01-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0112 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25m-17.25 0h7.5c.621 0 1.125.504 1.125 1.125M3.375 8.25c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m17.25-3.75h-7.5c-.621 0-1.125.504-1.125 1.125m8.625-1.125c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125m-17.25 0h7.5m-7.5 0c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125M12 10.875v-1.5m0 1.5c0 .621-.504 1.125-1.125 1.125M12 10.875c0 .621.504 1.125 1.125 1.125m-2.25 0c.621 0 1.125.504 1.125 1.125M13.125 12h7.5m-7.5 0c-.621 0-1.125.504-1.125 1.125M20.625 12c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125m-17.25 0h7.5M12 14.625v-1.5m0 1.5c0 .621-.504 1.125-1.125 1.125M12 14.625c0 .621.504 1.125 1.125 1.125m-2.25 0c.621 0 1.125.504 1.125 1.125m0 0v.375" />
               </svg>
@@ -384,14 +384,14 @@ export default function CostsPage() {
               Desglose por documento
             </h3>
           </div>
-          <span className="text-[10px] text-plomo bg-carbon-200 px-2.5 py-1 rounded-full">
+          <span className="text-[10px] text-plomo bg-surface px-2.5 py-1 rounded-full">
             {documents.length} {documents.length === 1 ? "documento" : "documentos"}
           </span>
         </div>
 
         {documents.length === 0 ? (
           <div className="px-5 py-16 text-center">
-            <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-carbon-200 flex items-center justify-center">
+            <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-surface flex items-center justify-center">
               <svg className="w-6 h-6 text-plomo/50" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859M12 3v8.25m0 0l-3-3m3 3l3-3" />
               </svg>
@@ -538,7 +538,7 @@ function MetricRow({
         <span className="text-xs text-plomo">{label}</span>
         <span className="text-xs font-mono font-semibold text-bruma">{value}</span>
       </div>
-      <div className="h-1 bg-carbon-200 rounded-full overflow-hidden">
+      <div className="h-1 bg-surface rounded-full overflow-hidden">
         <div
           className={`h-full ${barColor} rounded-full transition-all duration-700`}
           style={{ width: `${Math.max(Math.min(barPct, 100), 3)}%` }}
@@ -574,11 +574,11 @@ function DocumentRow({
   }, [paragraphs]);
 
   return (
-    <div className={`border-b border-carbon-300/50 last:border-b-0 transition-colors ${isExpanded ? "bg-carbon-200/20" : ""}`}>
+    <div className={`border-b border-border/50 last:border-b-0 transition-colors ${isExpanded ? "bg-surface/20" : ""}`}>
       {/* Main row */}
       <button
         onClick={onToggle}
-        className="w-full px-5 py-3.5 flex items-center gap-4 hover:bg-carbon-200/30 transition-all group"
+        className="w-full px-5 py-3.5 flex items-center gap-4 hover:bg-surface/30 transition-all group"
       >
         {/* Expand icon */}
         <svg
@@ -616,7 +616,7 @@ function DocumentRow({
 
         {/* Cost bar + value */}
         <div className="w-48 flex items-center gap-3 flex-shrink-0">
-          <div className="flex-1 h-2 bg-carbon-200 rounded-full overflow-hidden">
+          <div className="flex-1 h-2 bg-surface rounded-full overflow-hidden">
             <div
               className="h-full bg-gradient-to-r from-krypton/60 to-krypton/30 rounded-full transition-all duration-500"
               style={{ width: `${Math.max(costBarW, 4)}%` }}
@@ -631,10 +631,10 @@ function DocumentRow({
       {/* Expanded: paragraph breakdown */}
       {isExpanded && (
         <div className="px-5 pb-4">
-          <div className="ml-9 bg-carbon-200/50 rounded-xl border border-carbon-300/50 overflow-hidden">
+          <div className="ml-9 bg-surface/50 rounded-xl border border-border/50 overflow-hidden">
             {!paragraphs ? (
               <div className="px-4 py-6 text-center">
-                <div className="w-5 h-5 mx-auto border-2 border-carbon-50 border-t-krypton rounded-full animate-spin" />
+                <div className="w-5 h-5 mx-auto border-2 border-border border-t-krypton rounded-full animate-spin" />
                 <p className="text-[10px] text-plomo mt-2">Cargando desglose...</p>
               </div>
             ) : paragraphs.length === 0 ? (
@@ -666,7 +666,7 @@ function DocumentRow({
                   {paragraphs.map((p) => {
                     const pBarW = maxParagraphCost > 0 ? (p.cost_usd / maxParagraphCost) * 100 : 0;
                     return (
-                      <div key={p.id} className="px-4 py-2.5 flex items-center gap-3 hover:bg-carbon-200/30 transition-colors">
+                      <div key={p.id} className="px-4 py-2.5 flex items-center gap-3 hover:bg-surface/30 transition-colors">
                         {/* Index */}
                         <span className="text-[10px] text-plomo font-mono w-6 flex-shrink-0 text-center">
                           {p.paragraph_index}
@@ -743,7 +743,7 @@ function DocumentRow({
 
 function MiniStat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
-    <div className="bg-carbon-200/50 px-3 py-2.5 text-center">
+    <div className="bg-surface/50 px-3 py-2.5 text-center">
       <div className="text-[8px] text-plomo uppercase tracking-wider mb-0.5">{label}</div>
       <div className={`text-xs font-bold font-mono ${highlight ? "text-krypton" : "text-bruma"}`}>{value}</div>
     </div>

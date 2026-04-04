@@ -35,5 +35,8 @@ httpx==0.27.2
 # --- OpenAI ---
 openai==1.51.0
 
+# --- Resilience ---
+tenacity==9.0.0
+
 # --- Utils ---
 Pillow==11.1.0

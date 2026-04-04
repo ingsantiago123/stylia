@@ -75,7 +75,9 @@ def _generate_annotated_previews(
     page_annotations: dict[int, list] = {p + 1: [] for p in range(total_pages)}
     annotations_found = 0
 
-    for patch in all_patches:
+    total_paragraphs = len(all_patches) or 1
+
+    for patch_idx, patch in enumerate(all_patches):
         orig = patch["original_text"].strip()
         corr = patch["corrected_text"].strip()
         if orig == corr or len(corr) < 3:
@@ -84,6 +86,16 @@ def _generate_annotated_previews(
         meta = _get_patch_metadata(patch)
         color = HIGHLIGHT_COLORS.get(meta["category"], DEFAULT_HIGHLIGHT)
 
+        # Estimate page from paragraph_index for page-scoped search
+        para_idx = patch.get("paragraph_index", patch_idx)
+        est_page = min(int(para_idx / total_paragraphs * total_pages), total_pages - 1)
+        search_window = 2
+
+        # Build page search order: estimated page ±window first, then rest
+        nearby = list(range(max(0, est_page - search_window),
+                            min(total_pages, est_page + search_window + 1)))
+        remaining = [p for p in range(total_pages) if p not in set(nearby)]
+
         # Buscar texto corregido en el PDF (prefijos progresivos)
         found = False
         for max_len in [150, 70, 35]:
@@ -91,19 +103,18 @@ def _generate_annotated_previews(
             if len(search_text) < 4:
                 break
 
-            for page_idx in range(total_pages):
+            # Phase 1: nearby pages
+            for page_idx in nearby:
                 page = pdf_doc[page_idx]
                 quads = page.search_for(search_text, quads=True)
 
                 if quads:
-                    # Añadir highlight
                     annot = page.add_highlight_annot(quads)
                     annot.set_colors(stroke=color)
                     annot.set_opacity(0.35)
                     annot.update()
                     annotations_found += 1
 
-                    # Registrar posiciones para overlay frontend
                     page_no = page_idx + 1
                     page_rect = page.rect
                     for quad in quads:
@@ -121,9 +132,41 @@ def _generate_annotated_previews(
                             "original_snippet": orig[:100],
                             "corrected_snippet": corr[:100],
                         })
-
                     found = True
-                    break  # Encontrado en esta página, no buscar más
+                    break
+
+            # Phase 2: full scan only if not found nearby
+            if not found:
+                for page_idx in remaining:
+                    page = pdf_doc[page_idx]
+                    quads = page.search_for(search_text, quads=True)
+
+                    if quads:
+                        annot = page.add_highlight_annot(quads)
+                        annot.set_colors(stroke=color)
+                        annot.set_opacity(0.35)
+                        annot.update()
+                        annotations_found += 1
+
+                        page_no = page_idx + 1
+                        page_rect = page.rect
+                        for quad in quads:
+                            r = quad.rect
+                            page_annotations[page_no].append({
+                                "x_pct": round(r.x0 / page_rect.width * 100, 2),
+                                "y_pct": round(r.y0 / page_rect.height * 100, 2),
+                                "w_pct": round((r.x1 - r.x0) / page_rect.width * 100, 2),
+                                "h_pct": round((r.y1 - r.y0) / page_rect.height * 100, 2),
+                                "category": meta["category"],
+                                "severity": meta["severity"],
+                                "explanation": meta["explanation"],
+                                "confidence": patch.get("confidence"),
+                                "source": patch.get("source", ""),
+                                "original_snippet": orig[:100],
+                                "corrected_snippet": corr[:100],
+                            })
+                        found = True
+                        break
 
             if found:
                 break  # Encontrado con este prefijo, no probar más cortos
@@ -274,6 +317,7 @@ def render_docx_first_sync(
     docx_uri: str,
     filename: str,
     all_patches: list[dict],
+    docx_bytes_cached: bytes | None = None,
 ) -> dict:
     """
     Renderizado Ruta 1: DOCX-first.
@@ -287,9 +331,13 @@ def render_docx_first_sync(
     Retorna dict con URIs de los archivos generados.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Descargar DOCX original
+        # Descargar DOCX original (con cache si disponible)
         local_docx = str(Path(tmpdir) / filename)
-        minio_client.download_file_to_path(docx_uri, local_docx)
+        if docx_bytes_cached is not None:
+            with open(local_docx, "wb") as _f:
+                _f.write(docx_bytes_cached)
+        else:
+            minio_client.download_file_to_path(docx_uri, local_docx)
 
         if not all_patches:
             logger.info(f"Documento {doc_id}: sin correcciones que aplicar")

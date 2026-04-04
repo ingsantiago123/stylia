@@ -5,9 +5,12 @@ Usa gpt-4o-mini para ser económico y eficiente.
 
 import json
 import logging
+import threading
 from typing import Optional
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -33,12 +36,29 @@ class OpenAIClient:
         self.max_tokens = settings.openai_max_tokens
         self.temperature = settings.openai_temperature
         
-        # Inicializar cliente OpenAI
+        # Inicializar cliente OpenAI con timeout configurable
         if self.api_key and self.api_key != "your_api_key_here":
-            self.client = OpenAI(api_key=self.api_key)
+            self.client = OpenAI(
+                api_key=self.api_key,
+                timeout=settings.openai_timeout,
+            )
         else:
             self.client = None
             logger.warning("OpenAI API key no configurada")
+
+        # Semáforo: max 3 llamadas concurrentes a OpenAI por proceso
+        self._semaphore = threading.Semaphore(3)
+
+        # Build tenacity retry decorator from config
+        self._retry = retry(
+            stop=stop_after_attempt(settings.openai_max_retries),
+            wait=wait_exponential(multiplier=2, min=2, max=8),
+            retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError)),
+            before_sleep=lambda rs: logger.warning(
+                f"OpenAI retry #{rs.attempt_number} after {type(rs.outcome.exception()).__name__}"
+            ),
+            reraise=True,
+        )
         
     def correct_text_style(
         self,
@@ -92,24 +112,25 @@ Formato de respuesta JSON requerido:
 {original_text}"""
 
         try:
-            # Llamar a OpenAI API con el cliente oficial
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Eres un corrector de estilo experto en español. Siempre respondes en formato JSON válido."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                response_format={"type": "json_object"}
-            )
-            
+            with self._semaphore:
+                # Llamar a OpenAI API con retry automático ante errores transitorios
+                response = self._retry(self.client.chat.completions.create)(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Eres un corrector de estilo experto en español. Siempre respondes en formato JSON válido."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    response_format={"type": "json_object"}
+                )
+
             content = response.choices[0].message.content
             usage = _extract_usage(response)
 
@@ -152,16 +173,17 @@ Formato de respuesta JSON requerido:
         model = model_override or self.model
 
         try:
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                response_format={"type": "json_object"},
-            )
+            with self._semaphore:
+                response = self._retry(self.client.chat.completions.create)(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    response_format={"type": "json_object"},
+                )
 
             content = response.choices[0].message.content
             usage = _extract_usage(response)

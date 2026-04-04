@@ -14,6 +14,18 @@ export interface DocumentUploadResponse {
   message: string;
 }
 
+export interface ProgressDetail {
+  stage: string | null;
+  stage_label: string | null;
+  stage_current: number | null;
+  stage_total: number | null;
+  message: string | null;
+  eta_seconds: number | null;
+  is_stalled: boolean;
+  heartbeat_at: string | null;
+  stage_started_at: string | null;
+}
+
 export interface DocumentListItem {
   id: string;
   filename: string;
@@ -22,6 +34,7 @@ export interface DocumentListItem {
   total_pages: number | null;
   created_at: string;
   progress: number;
+  progress_detail: ProgressDetail | null;
 }
 
 export interface DocumentDetail {
@@ -38,12 +51,18 @@ export interface DocumentDetail {
   created_at: string;
   updated_at: string;
   progress: number;
+  progress_detail: ProgressDetail | null;
   pages_summary: Record<string, number>;
   // Token usage & cost (MVP2)
   prompt_tokens: number | null;
   completion_tokens: number | null;
   total_tokens: number | null;
   llm_cost_usd: number | null;
+  // Processing time tracking
+  processing_started_at: string | null;
+  processing_completed_at: string | null;
+  stage_timings: Record<string, number> | null;
+  worker_hostname: string | null;
 }
 
 export interface PageListItem {
@@ -421,5 +440,31 @@ export interface AnalysisResult {
 export async function getDocumentAnalysis(docId: string): Promise<AnalysisResult> {
   const res = await fetch(`${API_BASE}/documents/${docId}/analysis`);
   if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}
+
+// =============================================
+// Corrección paralela por lotes
+// =============================================
+
+export interface CorrectionBatchStatus {
+  batch_index: number;
+  start_paragraph: number;
+  end_paragraph: number;
+  paragraphs_total: number;
+  paragraphs_corrected: number;
+  patches_count: number;
+  status: string; // pending|running|completed|failed
+  lt_pass_completed: boolean;
+  llm_pass_completed: boolean;
+  boundary_checked: boolean;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+}
+
+export async function getCorrectionBatches(docId: string): Promise<CorrectionBatchStatus[]> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/correction-batches`);
+  if (!res.ok) return [];
   return res.json();
 }

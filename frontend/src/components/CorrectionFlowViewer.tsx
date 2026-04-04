@@ -77,7 +77,7 @@ export function CorrectionFlowViewer({ docId }: CorrectionFlowViewerProps) {
 
   if (error) {
     return (
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-6 text-center">
+      <div className="glass-card rounded-xl p-6 text-center">
         <p className="text-red-400 mb-3">Error al cargar el flujo</p>
         <p className="text-plomo text-sm">{error}</p>
       </div>
@@ -86,7 +86,7 @@ export function CorrectionFlowViewer({ docId }: CorrectionFlowViewerProps) {
 
   if (!flowData) {
     return (
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-6 text-center">
+      <div className="glass-card rounded-xl p-6 text-center">
         <p className="text-plomo">Sin datos de flujo disponibles</p>
       </div>
     );
@@ -95,7 +95,7 @@ export function CorrectionFlowViewer({ docId }: CorrectionFlowViewerProps) {
   return (
     <div className="space-y-4">
       {/* Header con estadísticas */}
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-5">
+      <div className="glass-card rounded-xl p-5">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider">
             Flujo de peticiones a ChatGPT API
@@ -174,8 +174,8 @@ function RequestCard({
   return (
     <div
       className={`
-        bg-carbon-100 border rounded-xl transition-all duration-300 cursor-pointer
-        ${isExpanded ? "border-krypton/40" : "border-carbon-300 hover:border-carbon-200"}
+        bg-surface-elevated border rounded-xl transition-all duration-300 cursor-pointer
+        ${isExpanded ? "border-krypton/40" : "border-border hover:border-carbon-200"}
       `}
       onClick={onToggle}
     >
@@ -246,7 +246,7 @@ function RequestCard({
             <div className="text-xs text-plomo uppercase tracking-wider font-medium mb-2">
               Texto a corregir
             </div>
-            <div className="bg-carbon-200 border border-carbon-300 rounded-lg px-4 py-3 text-sm text-bruma">
+            <div className="bg-surface border border-border rounded-lg px-4 py-3 text-sm text-bruma">
               {request.original_text}
             </div>
           </div>
@@ -277,13 +277,13 @@ function RequestCard({
             <div className="text-xs text-plomo uppercase tracking-wider font-medium mb-2">
               {isLanguageTool ? "Llamada API LanguageTool" : "Prompt ChatGPT"}
             </div>
-            <div className="bg-carbon-200 border border-carbon-300 rounded-lg px-4 py-3 text-xs font-mono text-bruma whitespace-pre-wrap">
+            <div className="bg-surface border border-border rounded-lg px-4 py-3 text-xs font-mono text-bruma whitespace-pre-wrap">
               {request.prompt}
             </div>
           </div>
 
           {/* Metadata */}
-          <div className="flex items-center justify-between text-[11px] text-plomo pt-2 border-t border-carbon-300">
+          <div className="flex items-center justify-between text-[11px] text-plomo pt-2 border-t border-border">
             <span>{new Date(request.timestamp).toLocaleString("es")}</span>
             <span>{isLanguageTool ? "Corrección determinista" : "Corrección de estilo con IA"}</span>
           </div>

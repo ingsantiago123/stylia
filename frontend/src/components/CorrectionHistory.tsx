@@ -88,8 +88,8 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
 
   if (corrections.length === 0) {
     return (
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-8 text-center">
-        <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-carbon-200 flex items-center justify-center">
+      <div className="glass-card rounded-xl p-8 text-center">
+        <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-surface flex items-center justify-center">
           <svg className="w-6 h-6 text-plomo" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
@@ -103,7 +103,7 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
   return (
     <div className="space-y-4">
       {/* Stats bar */}
-      <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-4">
+      <div className="glass-card rounded-xl p-4">
         <div className="flex items-center justify-between flex-wrap gap-4">
           {/* Counters */}
           <div className="flex items-center gap-6">
@@ -174,7 +174,7 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
                   px-3 py-1.5 text-xs font-medium rounded-lg transition-all
                   ${filterSource === f
                     ? "bg-krypton text-carbon"
-                    : "bg-carbon-200 text-plomo hover:text-bruma hover:bg-carbon-300"
+                    : "bg-surface text-plomo hover:text-bruma hover:bg-carbon-300"
                   }
                 `}
               >
@@ -187,7 +187,7 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
               <select
                 value={filterCategory}
                 onChange={(e) => setFilterCategory(e.target.value)}
-                className="px-2 py-1.5 text-xs font-medium rounded-lg bg-carbon-200 text-plomo border border-carbon-300 focus:outline-none focus:border-krypton/50 cursor-pointer"
+                className="px-2 py-1.5 text-xs font-medium rounded-lg bg-surface text-plomo border border-border focus:outline-none focus:border-krypton/50 cursor-pointer"
               >
                 <option value="all">Categoría: todas</option>
                 {categories.map((cat) => (
@@ -201,7 +201,7 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
               <select
                 value={filterSeverity}
                 onChange={(e) => setFilterSeverity(e.target.value as FilterSeverity)}
-                className="px-2 py-1.5 text-xs font-medium rounded-lg bg-carbon-200 text-plomo border border-carbon-300 focus:outline-none focus:border-krypton/50 cursor-pointer"
+                className="px-2 py-1.5 text-xs font-medium rounded-lg bg-surface text-plomo border border-border focus:outline-none focus:border-krypton/50 cursor-pointer"
               >
                 <option value="all">Severidad: todas</option>
                 <option value="critico">Crítico</option>
@@ -222,7 +222,7 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
             placeholder="Buscar en correcciones..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full bg-carbon-200 border border-carbon-300 rounded-lg pl-10 pr-4 py-2 text-sm text-bruma placeholder:text-plomo focus:outline-none focus:border-krypton/50 focus:ring-1 focus:ring-krypton/20 transition-colors"
+            className="w-full bg-surface border border-border rounded-lg pl-10 pr-4 py-2 text-sm text-bruma placeholder:text-plomo focus:outline-none focus:border-krypton/50 focus:ring-1 focus:ring-krypton/20 transition-colors"
           />
         </div>
       </div>
@@ -283,8 +283,8 @@ function CorrectionCard({
   return (
     <div
       className={`
-        bg-carbon-100 border rounded-xl transition-all duration-300 overflow-hidden cursor-pointer
-        ${isExpanded ? "border-krypton/40 shadow-[0_0_20px_rgba(212,255,0,0.05)]" : "border-carbon-300 hover:border-carbon-200"}
+        bg-surface-elevated border rounded-xl transition-all duration-300 overflow-hidden cursor-pointer
+        ${isExpanded ? "border-krypton/40 shadow-[0_0_20px_rgba(212,255,0,0.05)]" : "border-border hover:border-carbon-200"}
       `}
       onClick={onToggle}
     >
@@ -309,12 +309,12 @@ function CorrectionCard({
             Bloque #{patch.block_no || "?"}
           </span>
           {patch.category && (
-            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${CATEGORY_COLORS[patch.category]?.bg || "bg-carbon-200"} ${CATEGORY_COLORS[patch.category]?.text || "text-plomo"}`}>
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${CATEGORY_COLORS[patch.category]?.bg || "bg-surface"} ${CATEGORY_COLORS[patch.category]?.text || "text-plomo"}`}>
               {patch.category}
             </span>
           )}
           {patch.severity && (
-            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${SEVERITY_COLORS[patch.severity]?.bg || "bg-carbon-200"} ${SEVERITY_COLORS[patch.severity]?.text || "text-plomo"}`}>
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${SEVERITY_COLORS[patch.severity]?.bg || "bg-surface"} ${SEVERITY_COLORS[patch.severity]?.text || "text-plomo"}`}>
               {patch.severity}
             </span>
           )}
@@ -342,7 +342,7 @@ function CorrectionCard({
             ${patch.review_status === "manual_review" ? "bg-orange-900/20 text-orange-400" : ""}
             ${patch.review_status === "gate_rejected" ? "bg-red-900/20 text-red-400" : ""}
             ${patch.review_status === "rejected" ? "bg-red-900/20 text-red-400" : ""}
-            ${patch.review_status === "pending" ? "bg-carbon-200 text-plomo" : ""}
+            ${patch.review_status === "pending" ? "bg-surface text-plomo" : ""}
           `}>
             {patch.review_status === "auto_accepted" && "✓ Validado"}
             {patch.review_status === "accepted" && "✓ Aceptada"}
@@ -376,7 +376,7 @@ function CorrectionCard({
                 <div className="w-2 h-2 rounded-full bg-red-500" />
                 <span className="text-[10px] uppercase tracking-wider font-semibold text-plomo">Original</span>
               </div>
-              <div className="bg-carbon-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words border border-carbon-300">
+              <div className="bg-surface rounded-lg px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words border border-border">
                 {diffWords.origDiff.map((w, i) => (
                   <span
                     key={i}
@@ -394,7 +394,7 @@ function CorrectionCard({
                 <div className="w-2 h-2 rounded-full bg-krypton" />
                 <span className="text-[10px] uppercase tracking-wider font-semibold text-plomo">Corregido</span>
               </div>
-              <div className="bg-carbon-200 rounded-lg px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words border border-krypton/20">
+              <div className="bg-surface rounded-lg px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words border border-krypton/20">
                 {diffWords.corrDiff.map((w, i) => (
                   <span
                     key={i}
@@ -409,7 +409,7 @@ function CorrectionCard({
 
           {/* Explanation (MVP2) */}
           {patch.explanation && (
-            <div className="bg-carbon-200/50 border border-carbon-300 rounded-lg px-3 py-2">
+            <div className="bg-surface/50 border border-border rounded-lg px-3 py-2">
               <div className="text-[10px] uppercase tracking-wider font-semibold text-plomo mb-1">Explicación</div>
               <p className="text-sm text-bruma/80">{patch.explanation}</p>
             </div>
@@ -417,7 +417,7 @@ function CorrectionCard({
 
           {/* Quality indicators (Lote 5) */}
           {(patch.rewrite_ratio != null || patch.confidence != null) && (
-            <div className="bg-carbon-200/50 border border-carbon-300 rounded-lg px-3 py-2 space-y-2">
+            <div className="bg-surface/50 border border-border rounded-lg px-3 py-2 space-y-2">
               <div className="text-[10px] uppercase tracking-wider font-semibold text-plomo">Control de calidad</div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {patch.rewrite_ratio != null && (
@@ -468,7 +468,7 @@ function CorrectionCard({
 
           {/* Gate details (Lote 5) */}
           {patch.gate_results && patch.gate_results.length > 0 && (
-            <div className="bg-carbon-200/30 border border-carbon-300 rounded-lg px-3 py-2">
+            <div className="bg-surface/30 border border-border rounded-lg px-3 py-2">
               <div className="text-[10px] uppercase tracking-wider font-semibold text-plomo mb-1.5">Gates de calidad</div>
               <div className="flex flex-wrap gap-1.5">
                 {patch.gate_results.map((g, i) => (

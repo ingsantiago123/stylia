@@ -2,45 +2,101 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
-:root {
-  --carbon: #121212;
-  --carbon-50: #2A2A2A;
-  --carbon-100: #1E1E1E;
-  --carbon-200: #1A1A1A;
-  --krypton: #D4FF00;
-  --krypton-dim: rgba(212, 255, 0, 0.15);
-  --krypton-glow: rgba(212, 255, 0, 0.3);
-  --bruma: #F5F5F7;
-  --plomo: #8E8E93;
+@layer base {
+  * {
+    border-color: theme('colors.border.DEFAULT');
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #0A0A0B;
+    color: #F5F5F7;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  ::selection {
+    background-color: rgba(212, 255, 0, 0.25);
+    color: #F5F5F7;
+  }
 }
 
-body {
-  background: var(--carbon);
-  color: var(--bruma);
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+@layer utilities {
+  .text-gradient-krypton {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-krypton-200 via-krypton to-krypton-100;
+  }
+
+  .text-gradient-bruma {
+    @apply bg-clip-text text-transparent bg-gradient-to-b from-bruma to-plomo;
+  }
+
+  .glass {
+    @apply bg-surface/60 backdrop-blur-xl border border-border;
+  }
+
+  .glass-elevated {
+    @apply bg-surface-elevated/70 backdrop-blur-2xl border border-border;
+  }
+
+  .glass-card {
+    background: linear-gradient(135deg, rgba(28,28,31,0.8) 0%, rgba(20,20,22,0.9) 100%);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(42,42,46,0.6);
+  }
+
+  .glass-card-hover:hover {
+    background: linear-gradient(135deg, rgba(34,34,37,0.85) 0%, rgba(28,28,31,0.95) 100%);
+    border-color: rgba(212, 255, 0, 0.15);
+  }
+
+  .glow-krypton {
+    box-shadow: 0 0 40px rgba(212, 255, 0, 0.12), 0 0 80px rgba(212, 255, 0, 0.04);
+  }
+
+  .glow-krypton-sm {
+    box-shadow: 0 0 15px rgba(212, 255, 0, 0.12);
+  }
+
+  .border-gradient-krypton {
+    border-image: linear-gradient(to right, transparent, rgba(212, 255, 0, 0.3), transparent) 1;
+  }
+
+  /* Circular progress ring */
+  .progress-ring-track {
+    stroke: rgba(42, 42, 46, 0.8);
+  }
+  .progress-ring-fill {
+    stroke: #D4FF00;
+    transition: stroke-dashoffset 0.6s ease;
+    transform: rotate(-90deg);
+    transform-origin: 50% 50%;
+  }
+  .progress-ring-fill-error {
+    stroke: #EF4444;
+  }
 }
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--carbon-200);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--carbon-50);
+  background: #2A2A2E;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--plomo);
-}
-
-/* Selection highlight */
-::selection {
-  background: var(--krypton-dim);
-  color: var(--krypton);
+  background: #3A3A3E;
 }
 
 /* Krypton glow effect for active elements */
@@ -54,4 +110,41 @@ body {
   text-decoration-color: rgba(212, 255, 0, 0.4);
   text-underline-offset: 3px;
   text-decoration-thickness: 2px;
+}
+
+/* Document preview thumbnail */
+.doc-preview-thumb {
+  background: linear-gradient(180deg, #1C1C1F 0%, #141416 100%);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.03);
+}
+
+/* Animated shimmer for loading states */
+.shimmer-bg {
+  background: linear-gradient(
+    90deg,
+    rgba(42,42,46,0.3) 25%,
+    rgba(42,42,46,0.6) 50%,
+    rgba(42,42,46,0.3) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Stat card hover effect */
+.stat-card {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+
+/* Tab indicator animation */
+.tab-indicator {
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }

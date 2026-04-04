@@ -17,6 +17,19 @@ class DocumentUploadResponse(BaseModel):
     message: str = "Documento recibido, procesamiento iniciado."
 
 
+class ProgressDetail(BaseModel):
+    """Detalle granular del progreso de procesamiento."""
+    stage: str | None = None
+    stage_label: str | None = None
+    stage_current: int | None = None
+    stage_total: int | None = None
+    message: str | None = None
+    eta_seconds: float | None = None
+    is_stalled: bool = False
+    heartbeat_at: datetime | None = None
+    stage_started_at: datetime | None = None
+
+
 class DocumentListItem(BaseModel):
     """Item de la lista de documentos (dashboard)."""
     id: UUID
@@ -26,6 +39,7 @@ class DocumentListItem(BaseModel):
     total_pages: int | None = None
     created_at: datetime
     progress: float = Field(default=0.0, ge=0.0, le=1.0, description="0.0 a 1.0")
+    progress_detail: ProgressDetail | None = None
 
     model_config = {"from_attributes": True}
 
@@ -45,12 +59,18 @@ class DocumentDetail(BaseModel):
     created_at: datetime
     updated_at: datetime
     progress: float = Field(default=0.0, ge=0.0, le=1.0)
+    progress_detail: ProgressDetail | None = None
     pages_summary: dict = Field(default_factory=dict, description="Resumen de estados de páginas")
     # Token usage & cost
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
     llm_cost_usd: float | None = None
+    # Processing time tracking
+    processing_started_at: datetime | None = None
+    processing_completed_at: datetime | None = None
+    stage_timings: dict | None = None
+    worker_hostname: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -108,5 +128,28 @@ class ParagraphCostItem(BaseModel):
     total_tokens: int
     cost_usd: float
     created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# =============================================
+# Schema de corrección paralela por lotes
+# =============================================
+
+class CorrectionBatchStatus(BaseModel):
+    """Estado de un lote de corrección paralela."""
+    batch_index: int
+    start_paragraph: int
+    end_paragraph: int
+    paragraphs_total: int
+    paragraphs_corrected: int
+    patches_count: int
+    status: str  # pending|running|completed|failed
+    lt_pass_completed: bool
+    llm_pass_completed: bool
+    boundary_checked: bool
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_message: str | None = None
 
     model_config = {"from_attributes": True}

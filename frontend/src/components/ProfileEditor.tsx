@@ -98,7 +98,7 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
   };
 
   return (
-    <div className="bg-carbon-100 border border-carbon-300 rounded-xl p-6 space-y-6">
+    <div className="glass-card rounded-xl p-6 space-y-6">
       {/* Header */}
       <div className="flex items-center gap-3">
         <button
@@ -128,7 +128,7 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
             <select
               value={register}
               onChange={(e) => setRegister(e.target.value)}
-              className="w-full bg-carbon-50 border border-carbon-300 rounded-lg px-3 py-2 text-sm text-bruma focus:border-krypton focus:outline-none"
+              className="w-full bg-surface-elevated border border-border rounded-lg px-3 py-2 text-sm text-bruma focus:border-krypton focus:outline-none"
             >
               {REGISTERS.map((r) => (
                 <option key={r.value} value={r.value}>{r.label}</option>
@@ -142,7 +142,7 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
             <select
               value={tone}
               onChange={(e) => setTone(e.target.value)}
-              className="w-full bg-carbon-50 border border-carbon-300 rounded-lg px-3 py-2 text-sm text-bruma focus:border-krypton focus:outline-none"
+              className="w-full bg-surface-elevated border border-border rounded-lg px-3 py-2 text-sm text-bruma focus:border-krypton focus:outline-none"
             >
               {TONES.map((t) => (
                 <option key={t.value} value={t.value}>{t.label}</option>
@@ -160,7 +160,7 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
                   className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
                     interventionLevel === level.value
                       ? "border-krypton bg-krypton/5"
-                      : "border-carbon-300 hover:border-carbon-200"
+                      : "border-border hover:border-carbon-200"
                   }`}
                 >
                   <input
@@ -191,7 +191,7 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
             <select
               value={audienceExpertise}
               onChange={(e) => setAudienceExpertise(e.target.value)}
-              className="w-full bg-carbon-50 border border-carbon-300 rounded-lg px-3 py-2 text-sm text-bruma focus:border-krypton focus:outline-none"
+              className="w-full bg-surface-elevated border border-border rounded-lg px-3 py-2 text-sm text-bruma focus:border-krypton focus:outline-none"
             >
               {EXPERTISE_LEVELS.map((e) => (
                 <option key={e.value} value={e.value}>{e.label}</option>
@@ -205,7 +205,7 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
           <h4 className="text-sm font-semibold text-krypton uppercase tracking-wider">Limites y protecciones</h4>
 
           {/* Preservar voz */}
-          <div className="flex items-center justify-between p-3 rounded-lg border border-carbon-300">
+          <div className="flex items-center justify-between p-3 rounded-lg border border-border">
             <div>
               <span className="text-sm text-bruma">Preservar voz del autor</span>
               <p className="text-xs text-plomo mt-0.5">Limita cambios que alteren el estilo personal</p>
@@ -272,11 +272,11 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
                 onChange={(e) => setProtectedTermsInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addProtectedTerm())}
                 placeholder="Agregar termino..."
-                className="flex-1 bg-carbon-50 border border-carbon-300 rounded-lg px-3 py-2 text-sm text-bruma placeholder:text-plomo focus:border-krypton focus:outline-none"
+                className="flex-1 bg-surface-elevated border border-border rounded-lg px-3 py-2 text-sm text-bruma placeholder:text-plomo focus:border-krypton focus:outline-none"
               />
               <button
                 onClick={addProtectedTerm}
-                className="px-3 py-2 bg-carbon-200 text-bruma rounded-lg text-sm hover:bg-carbon-300 transition-colors"
+                className="px-3 py-2 bg-surface text-bruma rounded-lg text-sm hover:bg-carbon-300 transition-colors"
               >
                 +
               </button>
@@ -312,7 +312,7 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
                   className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
                     priorities.includes(p)
                       ? "bg-krypton/20 text-krypton border border-krypton/30"
-                      : "bg-carbon-200 text-plomo border border-carbon-300 hover:border-carbon-200"
+                      : "bg-surface text-plomo border border-border hover:border-carbon-200"
                   }`}
                 >
                   {p.replace("_", " ")}
@@ -324,7 +324,7 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
       </div>
 
       {/* Actions */}
-      <div className="flex items-center gap-3 pt-2 border-t border-carbon-300">
+      <div className="flex items-center gap-3 pt-2 border-t border-border">
         <button
           onClick={handleSave}
           disabled={processing}
@@ -332,7 +332,7 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
             px-6 py-2.5 rounded-lg font-medium text-sm transition-all
             ${!processing
               ? "bg-krypton text-carbon hover:bg-krypton/90 shadow-lg shadow-krypton/20"
-              : "bg-carbon-200 text-plomo cursor-wait"
+              : "bg-surface text-plomo cursor-wait"
             }
           `}
         >

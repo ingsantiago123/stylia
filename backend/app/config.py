@@ -69,8 +69,30 @@ class Settings(BaseSettings):
     max_overflow_ratio: float = 1.10  # máx 110% longitud del original
     font_size_min_ratio: float = 0.90  # reducción máx de fuente
 
+    # --- Performance ---
+    # Extraction
+    extraction_upload_workers: int = 6  # threads for concurrent MinIO uploads
+
+    # LanguageTool
+    lt_timeout: float = 30.0
+    lt_max_retries: int = 2
+
+    # OpenAI resilience
+    openai_max_retries: int = 3
+    openai_timeout: float = 60.0
+
+    # --- Corrección paralela por lotes (Stage D) ---
+    parallel_correction_enabled: bool = False       # OFF por defecto; activar cuando esté validado
+    parallel_correction_batch_size: int = 150       # párrafos objetivo por lote
+    parallel_correction_max_batches: int = 8        # cap de paralelismo (máx lotes simultáneos)
+    parallel_correction_lt_workers: int = 8         # threads para Pass 1 LT paralelo
+    parallel_correction_boundary_check: bool = True  # re-corregir primer párrafo de cada lote con seed real
+
     # --- LibreOffice ---
     libreoffice_path: str = "soffice"
+
+    # --- Concurrency control ---
+    max_concurrent_pipelines: int = 4
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

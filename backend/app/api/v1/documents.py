@@ -24,13 +24,16 @@ from app.models.style_profile import DocumentProfile
 from app.models.llm_usage import LlmUsage
 from app.schemas.document import (
     DocumentUploadResponse, DocumentDetail, DocumentListItem,
+    ProgressDetail,
     CostSummary, DocumentCostItem, ParagraphCostItem,
+    CorrectionBatchStatus,
 )
 from app.schemas.page import PageListItem
 from app.schemas.patch import PatchDetail, PatchListItem
 from app.schemas.analysis import AnalysisResult, SectionSummaryItem, TermRegistryItem, InferredProfile
 from app.models.section_summary import SectionSummary
 from app.models.term_registry import TermRegistry
+from app.models.correction_batch import CorrectionBatch
 from app.schemas.style_profile import (
     StyleProfileCreate, StyleProfileUpdate, StyleProfileResponse, PresetListItem
 )
@@ -282,8 +285,7 @@ async def list_documents(
 
     items = []
     for doc in documents:
-        # Calcular progreso
-        progress = await _calculate_progress(db, doc)
+        progress = _calculate_progress(doc)
         items.append(DocumentListItem(
             id=doc.id,
             filename=doc.filename,
@@ -292,6 +294,7 @@ async def list_documents(
             total_pages=doc.total_pages,
             created_at=doc.created_at,
             progress=progress,
+            progress_detail=_build_progress_detail(doc),
         ))
 
     return items
@@ -314,7 +317,8 @@ async def get_document(
     if not doc:
         raise HTTPException(404, "Documento no encontrado")
 
-    progress = await _calculate_progress(db, doc)
+    progress = _calculate_progress(doc)
+    progress_detail = _build_progress_detail(doc)
     pages_summary = await _get_pages_summary(db, doc_id)
 
     # Agregar costos desde llm_usage (con fallback a columnas viejas)
@@ -348,6 +352,7 @@ async def get_document(
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         progress=progress,
+        progress_detail=progress_detail,
         pages_summary=pages_summary,
         prompt_tokens=int(prompt_t),
         completion_tokens=int(completion_t),
@@ -732,40 +737,88 @@ async def _get_doc_or_404(db: AsyncSession, doc_id: UUID) -> Document:
     return doc
 
 
-async def _calculate_progress(db: AsyncSession, doc: Document) -> float:
-    """Calcula el progreso del documento (0.0 a 1.0)."""
+# Pesos de cada etapa en el progreso global (suman 1.0)
+_STAGE_WEIGHTS: dict[str, tuple[float, float]] = {
+    "converting":  (0.00, 0.05),
+    "extracting":  (0.05, 0.20),
+    "analyzing":   (0.20, 0.35),
+    "correcting":  (0.35, 0.85),
+    "rendering":   (0.85, 0.99),
+}
+
+_STAGE_LABELS: dict[str, str] = {
+    "converting":  "Conversión",
+    "extracting":  "Extracción",
+    "analyzing":   "Análisis",
+    "correcting":  "Corrección",
+    "rendering":   "Renderizado",
+}
+
+_HEARTBEAT_STALL_SECONDS = 120  # 2 minutos sin heartbeat → stalled
+
+
+def _calculate_progress(doc: Document) -> float:
+    """Calcula el progreso real del documento (0.0 a 1.0) usando campos granulares."""
     if doc.status == "completed":
         return 1.0
     if doc.status in ("uploaded", "failed"):
         return 0.0
-    if not doc.total_pages or doc.total_pages == 0:
-        status_progress = {
-            "converting": 0.1,
-            "extracting": 0.2,
-            "analyzing": 0.35,
-            "correcting": 0.5,
-            "rendering": 0.8,
-        }
-        return status_progress.get(doc.status, 0.0)
 
-    # Calcular basado en páginas completadas
-    total = doc.total_pages
-    rendered = await db.scalar(
-        select(func.count(Page.id))
-        .where(Page.doc_id == doc.id, Page.status == "rendered")
-    ) or 0
-    corrected = await db.scalar(
-        select(func.count(Page.id))
-        .where(Page.doc_id == doc.id, Page.status == "corrected")
-    ) or 0
-    extracted = await db.scalar(
-        select(func.count(Page.id))
-        .where(Page.doc_id == doc.id, Page.status == "extracted")
-    ) or 0
+    weights = _STAGE_WEIGHTS.get(doc.status)
+    if not weights:
+        return 0.0
 
-    # Peso ponderado
-    progress = (extracted * 0.3 + corrected * 0.6 + rendered * 1.0) / total
-    return min(progress, 0.99)  # 1.0 solo cuando status=completed
+    base, end = weights
+    stage_fraction = 0.0
+    if (
+        doc.progress_stage_total
+        and doc.progress_stage_total > 0
+        and doc.progress_stage_current is not None
+    ):
+        stage_fraction = min(doc.progress_stage_current / doc.progress_stage_total, 1.0)
+
+    return base + (end - base) * stage_fraction
+
+
+def _build_progress_detail(doc: Document) -> ProgressDetail | None:
+    """Construye el detalle de progreso con ETA y detección de stall."""
+    from datetime import datetime, timezone
+
+    if doc.status in ("uploaded", "completed"):
+        return None
+
+    is_stalled = False
+    if doc.heartbeat_at:
+        elapsed = (datetime.now(timezone.utc) - doc.heartbeat_at).total_seconds()
+        if elapsed > _HEARTBEAT_STALL_SECONDS:
+            is_stalled = True
+
+    # Calcular ETA basado en velocidad de procesamiento de la etapa
+    eta_seconds = None
+    if (
+        doc.stage_started_at
+        and doc.progress_stage_current
+        and doc.progress_stage_total
+        and doc.progress_stage_current > 0
+        and not is_stalled
+    ):
+        elapsed = (datetime.now(timezone.utc) - doc.stage_started_at).total_seconds()
+        remaining_items = doc.progress_stage_total - doc.progress_stage_current
+        rate = doc.progress_stage_current / elapsed if elapsed > 0 else 0
+        if rate > 0:
+            eta_seconds = round(remaining_items / rate, 1)
+
+    return ProgressDetail(
+        stage=doc.progress_stage or doc.status,
+        stage_label=_STAGE_LABELS.get(doc.progress_stage or doc.status),
+        stage_current=doc.progress_stage_current,
+        stage_total=doc.progress_stage_total,
+        message=doc.progress_message,
+        eta_seconds=eta_seconds,
+        is_stalled=is_stalled,
+        heartbeat_at=doc.heartbeat_at,
+        stage_started_at=doc.stage_started_at,
+    )
 
 
 async def _get_pages_summary(db: AsyncSession, doc_id: UUID) -> dict:
@@ -991,3 +1044,20 @@ async def get_correction_flow(doc_id: str, db: AsyncSession = Depends(get_db)):
         },
         "requests": requests_list,
     }
+
+
+@router.get("/documents/{doc_id}/correction-batches", response_model=list[CorrectionBatchStatus])
+async def get_correction_batches(doc_id: UUID, db: AsyncSession = Depends(get_db)):
+    """
+    Estado de cada lote de corrección paralela.
+    Usado por el frontend durante status='correcting' cuando parallel_correction_enabled=True.
+    Retorna lista vacía si el documento no usa corrección paralela.
+    """
+    await _get_doc_or_404(db, doc_id)
+    result = await db.execute(
+        select(CorrectionBatch)
+        .where(CorrectionBatch.doc_id == doc_id)
+        .order_by(CorrectionBatch.batch_index)
+    )
+    batches = result.scalars().all()
+    return [CorrectionBatchStatus.model_validate(b) for b in batches]
