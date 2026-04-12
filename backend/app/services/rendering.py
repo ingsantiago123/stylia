@@ -55,6 +55,7 @@ def _generate_annotated_previews(
     doc_id: str,
     corrected_pdf_bytes: bytes,
     all_patches: list[dict],
+    render_mode: str = "final",
 ) -> int:
     """
     Genera previews PNG anotados del PDF corregido.
@@ -64,12 +65,19 @@ def _generate_annotated_previews(
     2. Añade highlight con color de categoría
     3. Registra posición (%) para overlay hover en el frontend
 
-    Sube a MinIO:
-    - pages/{doc_id}/preview_corrected/{page_no}.png  (PNG con highlights)
-    - pages/{doc_id}/annotations/{page_no}.json        (metadata para hover)
+    render_mode:
+    - "candidate": sube a preview_candidate/ y annotations_candidate/ (revisión visual)
+    - "final": sube a preview_corrected/ y annotations/ (documento final)
 
     Retorna el número total de páginas.
     """
+    # MinIO path prefixes according to render_mode
+    if render_mode == "candidate":
+        preview_prefix = f"pages/{doc_id}/preview_candidate"
+        annot_prefix = f"pages/{doc_id}/annotations_candidate"
+    else:
+        preview_prefix = f"pages/{doc_id}/preview_corrected"
+        annot_prefix = f"pages/{doc_id}/annotations"
     pdf_doc = fitz.open(stream=corrected_pdf_bytes, filetype="pdf")
     total_pages = len(pdf_doc)
     page_annotations: dict[int, list] = {p + 1: [] for p in range(total_pages)}
@@ -85,6 +93,8 @@ def _generate_annotated_previews(
 
         meta = _get_patch_metadata(patch)
         color = HIGHLIGHT_COLORS.get(meta["category"], DEFAULT_HIGHLIGHT)
+        # patch_ids for linking annotations to DB patches (compare-first HITL)
+        p_ids = patch.get("patch_ids") or ([patch["patch_id"]] if patch.get("patch_id") else [])
 
         # Estimate page from paragraph_index for page-scoped search
         para_idx = patch.get("paragraph_index", patch_idx)
@@ -120,6 +130,7 @@ def _generate_annotated_previews(
                     for quad in quads:
                         r = quad.rect
                         page_annotations[page_no].append({
+                            "patch_ids": p_ids,
                             "x_pct": round(r.x0 / page_rect.width * 100, 2),
                             "y_pct": round(r.y0 / page_rect.height * 100, 2),
                             "w_pct": round((r.x1 - r.x0) / page_rect.width * 100, 2),
@@ -129,6 +140,7 @@ def _generate_annotated_previews(
                             "explanation": meta["explanation"],
                             "confidence": patch.get("confidence"),
                             "source": patch.get("source", ""),
+                            "review_status": patch.get("review_status", ""),
                             "original_snippet": orig[:100],
                             "corrected_snippet": corr[:100],
                         })
@@ -153,6 +165,7 @@ def _generate_annotated_previews(
                         for quad in quads:
                             r = quad.rect
                             page_annotations[page_no].append({
+                                "patch_ids": p_ids,
                                 "x_pct": round(r.x0 / page_rect.width * 100, 2),
                                 "y_pct": round(r.y0 / page_rect.height * 100, 2),
                                 "w_pct": round((r.x1 - r.x0) / page_rect.width * 100, 2),
@@ -162,6 +175,7 @@ def _generate_annotated_previews(
                                 "explanation": meta["explanation"],
                                 "confidence": patch.get("confidence"),
                                 "source": patch.get("source", ""),
+                                "review_status": patch.get("review_status", ""),
                                 "original_snippet": orig[:100],
                                 "corrected_snippet": corr[:100],
                             })
@@ -179,7 +193,7 @@ def _generate_annotated_previews(
         png_bytes = pix.tobytes("png")
 
         # PNG anotado
-        preview_key = f"pages/{doc_id}/preview_corrected/{page_no}.png"
+        preview_key = f"{preview_prefix}/{page_no}.png"
         minio_client.upload_file(preview_key, png_bytes, content_type="image/png")
 
         # Metadata JSON para hover del frontend
@@ -187,7 +201,7 @@ def _generate_annotated_previews(
             {"annotations": page_annotations[page_no]},
             ensure_ascii=False,
         )
-        annot_key = f"pages/{doc_id}/annotations/{page_no}.json"
+        annot_key = f"{annot_prefix}/{page_no}.json"
         minio_client.upload_file(
             annot_key, annot_data.encode("utf-8"),
             content_type="application/json",
@@ -318,6 +332,8 @@ def render_docx_first_sync(
     filename: str,
     all_patches: list[dict],
     docx_bytes_cached: bytes | None = None,
+    apply_mode: str = "all",
+    render_mode: str = "final",
 ) -> dict:
     """
     Renderizado Ruta 1: DOCX-first.
@@ -343,7 +359,21 @@ def render_docx_first_sync(
             logger.info(f"Documento {doc_id}: sin correcciones que aplicar")
             return {"corrected_docx_uri": None, "corrected_pdf_uri": None, "changes_count": 0}
 
-        logger.info(f"Documento {doc_id}: {len(all_patches)} párrafos a corregir")
+        # Filtrar patches según apply_mode (Human-in-the-Loop)
+        if apply_mode == "accepted_only":
+            all_patches = [p for p in all_patches if p.get("review_status") == "accepted"]
+        elif apply_mode == "accepted_and_auto":
+            all_patches = [
+                p for p in all_patches
+                if p.get("review_status") in ("accepted", "auto_accepted")
+            ]
+        # apply_mode == "all" → sin filtro (backward compatible, pipeline original)
+
+        if not all_patches:
+            logger.info(f"Documento {doc_id}: sin correcciones aprobadas que aplicar")
+            return {"corrected_docx_uri": None, "corrected_pdf_uri": None, "changes_count": 0}
+
+        logger.info(f"Documento {doc_id}: {len(all_patches)} párrafos a corregir (mode={apply_mode})")
 
         # Aplicar correcciones por párrafo
         corrected_docx_path = _apply_docx_patches(local_docx, all_patches)
@@ -353,7 +383,7 @@ def render_docx_first_sync(
 
         # Generar previews anotados con highlights sobre correcciones
         corrected_pdf_bytes = Path(corrected_pdf_path).read_bytes()
-        _generate_annotated_previews(doc_id, corrected_pdf_bytes, all_patches)
+        _generate_annotated_previews(doc_id, corrected_pdf_bytes, all_patches, render_mode=render_mode)
 
         # Subir DOCX corregido a MinIO
         stem = Path(filename).stem

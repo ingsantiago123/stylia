@@ -33,10 +33,10 @@ class Document(Base):
     )
     total_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(
-        String(20),
+        String(30),
         nullable=False,
         default="uploaded",
-        comment="uploaded→converting→extracting→analyzing→correcting→rendering→completed→failed",
+        comment="uploaded→converting→extracting→analyzing→correcting→candidate_rendering→candidate_ready→finalizing→completed→failed",
     )
     config_json: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
@@ -78,6 +78,10 @@ class Document(Base):
     )
     worker_hostname: Mapped[str | None] = mapped_column(
         String(200), nullable=True, comment="Hostname del worker Celery que procesó el doc"
+    )
+    render_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1",
+        comment="Versión del render actual (incrementa con cada re-renderizado)"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

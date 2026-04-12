@@ -226,27 +226,23 @@ def _complete_job(db: Session, job: Job, error: str = None) -> None:
 # ETAPAS D+E COMPARTIDAS: PERSISTIR PATCHES + RENDERIZADO
 # =====================================================================
 
-def _run_stage_e(db: Session, doc_id: str, docx_patches: list[dict]) -> None:
+def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None:
     """
-    Persiste patches en BD y ejecuta Etapa E (renderizado DOCX-first).
-    Compartida por la ruta secuencial y por el chord assemble_correction_results.
+    Persiste patches en BD y pone documento en pending_review.
+    NO ejecuta renderizado — eso se hace después de la revisión humana.
     """
-    t0_e = time.time()
+    t0 = time.time()
     doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one()
     existing_timings = dict(doc.stage_timings or {})
     pages = db.execute(
         select(Page).where(Page.doc_id == doc_id).order_by(Page.page_no)
     ).scalars().all()
 
-    _update_document_status(db, doc_id, "rendering")
-    _update_progress(db, doc_id, "rendering", "Generando documento corregido...", start_stage=True)
-    logger.info(f"[Etapa E] Renderizando documento {doc_id}...")
-
     if not docx_patches or doc.original_format != "docx":
         if not docx_patches:
-            logger.info("[Etapa E] Sin correcciones que aplicar — documento limpio")
-        elapsed_e = round(time.time() - t0_e, 1)
-        existing_timings["E"] = elapsed_e
+            logger.info("[Persist] Sin correcciones — documento limpio, completando directo")
+        elapsed = round(time.time() - t0, 1)
+        existing_timings["D_persist"] = elapsed
         _update_document_status(db, doc_id, "completed")
         db.execute(update(Document).where(Document.id == doc_id).values(
             processing_completed_at=datetime.now(timezone.utc),
@@ -391,9 +387,214 @@ def _run_stage_e(db: Session, doc_id: str, docx_patches: list[dict]) -> None:
             _update_page_status(db, page.id, "corrected")
 
     db.commit()
-    logger.info(f"[Etapa E] {patch_version - 1} registros de patches guardados en BD")
 
-    # ── Renderizado DOCX → PDF ──
+    elapsed = round(time.time() - t0, 1)
+    existing_timings["D_persist"] = elapsed
+    db.execute(update(Document).where(Document.id == doc_id).values(
+        stage_timings=existing_timings,
+        heartbeat_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+
+    logger.info(f"[Persist] {patch_version - 1} registros de patches guardados en BD")
+
+
+def _run_candidate_render(db: Session, doc_id: str) -> None:
+    """
+    Renderiza versión candidata usando TODOS los patches (sin filtrar por review_status).
+    Genera previews PNG y anotaciones con patch_ids para revisión visual compare-first.
+    Flujo: candidate_rendering → candidate_ready.
+    """
+    t0 = time.time()
+    doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one()
+    existing_timings = dict(doc.stage_timings or {})
+
+    _update_document_status(db, doc_id, "candidate_rendering")
+    _update_progress(db, doc_id, "candidate_rendering", "Generando vista previa candidata...", start_stage=True)
+    logger.info(f"[Candidato] Renderizando versión candidata para {doc_id}...")
+
+    # Cargar TODOS los patches de BD (sin filtrar) — incluye patch.id para vincular
+    all_patch_rows = db.execute(
+        select(Patch)
+        .join(Block)
+        .join(Page)
+        .where(Page.doc_id == doc_id)
+        .order_by(Patch.paragraph_index)
+    ).scalars().all()
+
+    if not all_patch_rows:
+        logger.info("[Candidato] Sin patches — marcando como completed")
+        elapsed = round(time.time() - t0, 1)
+        existing_timings["E_candidate"] = elapsed
+        _update_document_status(db, doc_id, "completed")
+        db.execute(update(Document).where(Document.id == doc_id).values(
+            processing_completed_at=datetime.now(timezone.utc),
+            stage_timings=existing_timings,
+        ))
+        db.commit()
+        _cleanup_progress(db, doc_id)
+        return
+
+    # Agrupar patch_ids por paragraph_index (múltiples patches por párrafo)
+    para_patch_ids: dict[int, list[str]] = {}
+    for p in all_patch_rows:
+        pidx = p.paragraph_index or 0
+        para_patch_ids.setdefault(pidx, []).append(str(p.id))
+
+    # Construir dicts con patch_ids y review_status
+    # Deduplicate by paragraph_index: un dict por párrafo (patches comparten original/corrected_text)
+    seen_paragraphs: set[int] = set()
+    docx_patches: list[dict] = []
+    for p in all_patch_rows:
+        pidx = p.paragraph_index or 0
+        if pidx in seen_paragraphs:
+            continue
+        seen_paragraphs.add(pidx)
+        docx_patches.append({
+            "patch_ids": para_patch_ids.get(pidx, []),
+            "paragraph_index": pidx,
+            "location": "",
+            "original_text": p.original_text,
+            "corrected_text": p.corrected_text,
+            "source": p.source,
+            "review_status": p.review_status,
+            "changes": p.operations_json or [],
+            "category": p.category,
+            "severity": p.severity,
+            "explanation": p.explanation,
+            "confidence": p.confidence,
+        })
+
+    # Cargar locations desde MinIO (patches_docx.json tiene location strings)
+    try:
+        patch_key = f"docx/{doc_id}/patches_docx.json"
+        if minio_client.file_exists(patch_key):
+            stored_patches = json.loads(minio_client.download_file(patch_key).decode("utf-8"))
+            location_index: dict[tuple, str] = {}
+            for sp in stored_patches:
+                key = (sp.get("paragraph_index", 0), sp.get("original_text", "")[:50])
+                location_index[key] = sp.get("location", "")
+            for dp in docx_patches:
+                key = (dp["paragraph_index"], dp["original_text"][:50])
+                dp["location"] = location_index.get(key, "")
+    except Exception as e:
+        logger.warning(f"[Candidato] Error cargando locations de MinIO: {e}")
+
+    logger.info(f"[Candidato] {len(docx_patches)} párrafos a renderizar como candidato")
+
+    _docx_bytes = _get_cached_docx_bytes(str(doc_id), doc.source_uri)
+    render_result = render_docx_first_sync(
+        doc_id=str(doc_id),
+        docx_uri=doc.source_uri,
+        filename=doc.filename,
+        all_patches=docx_patches,
+        docx_bytes_cached=_docx_bytes,
+        apply_mode="all",
+        render_mode="candidate",
+    )
+
+    elapsed = round(time.time() - t0, 1)
+    existing_timings["E_candidate"] = elapsed
+    _update_document_status(db, doc_id, "candidate_ready")
+    db.execute(update(Document).where(Document.id == doc_id).values(
+        stage_timings=existing_timings,
+        progress_message="Candidato listo para revisión visual",
+        heartbeat_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+
+    logger.info(
+        f"[Candidato] Documento {doc_id} → candidate_ready "
+        f"({render_result.get('changes_count', 0)} correcciones renderizadas, {elapsed}s)"
+    )
+
+
+def _run_stage_e(db: Session, doc_id: str, apply_mode: str = "accepted_and_auto") -> None:
+    """
+    Etapa E: Renderizado DOCX-first con patches filtrados por review_status.
+    Se ejecuta DESPUÉS de la revisión humana, lanzada por render_approved_patches.
+    """
+    t0_e = time.time()
+    doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one()
+    existing_timings = dict(doc.stage_timings or {})
+    pages = db.execute(
+        select(Page).where(Page.doc_id == doc_id).order_by(Page.page_no)
+    ).scalars().all()
+
+    _update_document_status(db, doc_id, "finalizing")
+    _update_progress(db, doc_id, "finalizing", "Generando documento final...", start_stage=True)
+    logger.info(f"[Etapa E] Finalizando documento {doc_id} (mode={apply_mode})...")
+
+    # Cargar patches de BD filtrados por review_status
+    if apply_mode == "accepted_only":
+        accepted_statuses = ("accepted",)
+    else:  # accepted_and_auto: incluye auto_accepted + bulk_finalized
+        accepted_statuses = ("accepted", "auto_accepted", "bulk_finalized")
+
+    all_patch_rows = db.execute(
+        select(Patch)
+        .join(Block)
+        .join(Page)
+        .where(
+            Page.doc_id == doc_id,
+            Patch.review_status.in_(accepted_statuses),
+        )
+        .order_by(Patch.paragraph_index)
+    ).scalars().all()
+
+    # Convertir a dicts para render_docx_first_sync
+    # Si hay edited_text, usar eso en lugar de corrected_text
+    docx_patches = []
+    for p in all_patch_rows:
+        final_text = p.corrected_text
+        if hasattr(p, 'edited_text') and p.edited_text:
+            final_text = p.edited_text
+        docx_patches.append({
+            "paragraph_index": p.paragraph_index or 0,
+            "location": "",
+            "original_text": p.original_text,
+            "corrected_text": final_text,
+            "source": p.source,
+            "review_status": p.review_status,
+            "changes": p.operations_json or [],
+            "category": p.category,
+            "severity": p.severity,
+            "explanation": p.explanation,
+            "confidence": p.confidence,
+        })
+
+    # Load location from MinIO patches file (has location field)
+    try:
+        patch_key = f"docx/{doc_id}/patches_docx.json"
+        if minio_client.file_exists(patch_key):
+            import json as _json
+            stored_patches = _json.loads(minio_client.download_file(patch_key).decode("utf-8"))
+            # Build location index by paragraph_index + original_text prefix
+            location_index: dict[tuple, str] = {}
+            for sp in stored_patches:
+                key = (sp.get("paragraph_index", 0), sp.get("original_text", "")[:50])
+                location_index[key] = sp.get("location", "")
+            for dp in docx_patches:
+                key = (dp["paragraph_index"], dp["original_text"][:50])
+                dp["location"] = location_index.get(key, "")
+    except Exception as e:
+        logger.warning(f"[Etapa E] Error cargando locations de MinIO: {e}")
+
+    if not docx_patches:
+        logger.info("[Etapa E] Sin correcciones aprobadas — documento sin cambios")
+        elapsed_e = round(time.time() - t0_e, 1)
+        existing_timings["E"] = elapsed_e
+        _update_document_status(db, doc_id, "completed")
+        db.execute(update(Document).where(Document.id == doc_id).values(
+            processing_completed_at=datetime.now(timezone.utc),
+            stage_timings=existing_timings,
+        ))
+        db.commit()
+        _cleanup_progress(db, doc_id)
+        return
+
+    logger.info(f"[Etapa E] {len(docx_patches)} correcciones aprobadas a aplicar")
+
     _docx_bytes_for_render = _get_cached_docx_bytes(str(doc_id), doc.source_uri)
     render_result = render_docx_first_sync(
         doc_id=str(doc_id),
@@ -401,15 +602,16 @@ def _run_stage_e(db: Session, doc_id: str, docx_patches: list[dict]) -> None:
         filename=doc.filename,
         all_patches=docx_patches,
         docx_bytes_cached=_docx_bytes_for_render,
+        apply_mode="all",  # Already filtered above
     )
 
-    # Marcar patches como aplicados
+    # Marcar patches aprobados como aplicados
     db.execute(
         update(Patch)
         .where(Patch.block_id.in_(
             select(Block.id).join(Page).where(Page.doc_id == doc_id)
         ))
-        .where(Patch.review_status == "auto_accepted")
+        .where(Patch.review_status.in_(accepted_statuses))
         .values(applied=True)
     )
 
@@ -419,18 +621,24 @@ def _run_stage_e(db: Session, doc_id: str, docx_patches: list[dict]) -> None:
             _update_page_status(db, page.id, "rendered")
     db.commit()
 
+    # Incrementar render_version
+    current_version = doc.render_version if hasattr(doc, 'render_version') else 1
+    new_version = current_version + 1
+
     elapsed_e = round(time.time() - t0_e, 1)
     existing_timings["E"] = elapsed_e
     _update_document_status(db, doc_id, "completed")
     db.execute(update(Document).where(Document.id == doc_id).values(
         processing_completed_at=datetime.now(timezone.utc),
         stage_timings=existing_timings,
+        render_version=new_version,
     ))
     db.commit()
     _cleanup_progress(db, doc_id)
 
     logger.info(
-        f"[Etapa E] Completada: {render_result.get('changes_count', 0)} correcciones aplicadas"
+        f"[Etapa E] Completada: {render_result.get('changes_count', 0)} correcciones aplicadas, "
+        f"render_version={new_version}"
     )
 
 
@@ -932,12 +1140,21 @@ def process_document_pipeline(self, doc_id: str):
         _save_stage_timing(db, doc_id, stage_timings)
 
         # =============================================
-        # ETAPAS D+E: PERSISTIR PATCHES + RENDERIZADO
+        # PERSISTIR PATCHES → PENDING_REVIEW
         # =============================================
-        _run_stage_e(db, str(doc_id), docx_patches)
+        # Guardar patches en MinIO para uso en Etapa E posterior
+        patches_key = f"docx/{doc_id}/patches_docx.json"
+        minio_client.upload_file(
+            patches_key,
+            json.dumps(docx_patches, ensure_ascii=False, indent=2).encode("utf-8"),
+            content_type="application/json",
+        )
+
+        _persist_patches(db, str(doc_id), docx_patches)
+        _run_candidate_render(db, str(doc_id))
 
         _complete_job(db, job)
-        logger.info(f"=== PIPELINE COMPLETADO: {doc.filename} ===")
+        logger.info(f"=== PIPELINE COMPLETADO (candidate_ready): {doc.filename} ===")
 
     except Exception as e:
         logger.exception(f"Error en pipeline: {e}")
@@ -1206,7 +1423,7 @@ def assemble_correction_results(
         # Ordenar patches por paragraph_index (garantiza orden DOCX)
         all_patches.sort(key=lambda p: p.get("paragraph_index", 0))
 
-        # Guardar patches consolidados en MinIO (sobrescribe el de la ruta secuencial si existe)
+        # Guardar patches consolidados en MinIO
         patch_key = f"docx/{doc_id}/patches_docx.json"
         minio_client.upload_file(
             patch_key,
@@ -1214,13 +1431,14 @@ def assemble_correction_results(
             content_type="application/json",
         )
 
-        # Etapas D+E: persistir patches + renderizado
-        _run_stage_e(db, doc_id, all_patches)
+        # Persistir patches en BD y renderizar candidato
+        _persist_patches(db, doc_id, all_patches)
+        _run_candidate_render(db, doc_id)
 
         if job:
             _complete_job(db, job)
 
-        logger.info(f"=== [assemble] PIPELINE PARALELO COMPLETADO: {doc_id} ===")
+        logger.info(f"=== [assemble] PIPELINE PARALELO COMPLETADO (candidate_ready): {doc_id} ===")
 
     except Exception as e:
         logger.exception(f"[assemble] Error ensamblando resultados para {doc_id}: {e}")
@@ -1249,3 +1467,298 @@ def assemble_correction_results(
     finally:
         db.close()
         _release_pipeline_slot(doc_id)
+
+
+# =====================================================================
+# TAREA CELERY: RENDERIZADO POST-REVISIÓN HUMANA
+# =====================================================================
+
+@celery_app.task(bind=True, max_retries=2, name="tasks_pipeline.render_approved_patches")
+def render_approved_patches(self, doc_id: str, apply_mode: str = "accepted_and_auto"):
+    """
+    Etapa E separada: renderiza solo las correcciones aprobadas.
+    Se lanza desde el endpoint POST /documents/{id}/finalize
+    después de que el usuario revise las correcciones.
+    """
+    db = _get_sync_session()
+    job = None
+    try:
+        doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one()
+
+        if doc.status not in ("pending_review", "candidate_ready"):
+            logger.warning(
+                f"[render_approved] Doc {doc_id} no está en candidate_ready/pending_review "
+                f"(status={doc.status}), abortando"
+            )
+            return
+
+        job = _create_job(db, doc_id, "render_approved", self.request.id)
+
+        logger.info(f"=== RENDERIZADO POST-REVISIÓN: {doc.filename} (mode={apply_mode}) ===")
+
+        # Re-cachear DOCX si no está en Redis
+        try:
+            _rcache = _redis.Redis.from_url(settings.redis_url)
+            _docx_cache_key = f"docx_cache:{doc_id}"
+            cached = _rcache.get(_docx_cache_key)
+            if not cached:
+                _docx_bytes = minio_client.download_file(doc.source_uri)
+                _rcache.setex(_docx_cache_key, 3600, _docx_bytes)
+                logger.info(f"[render_approved] DOCX re-cacheado ({len(_docx_bytes)} bytes)")
+        except Exception as e:
+            logger.warning(f"[render_approved] Cache error: {e}")
+
+        _run_stage_e(db, doc_id, apply_mode=apply_mode)
+
+        _complete_job(db, job)
+        logger.info(f"=== RENDERIZADO COMPLETADO: {doc.filename} ===")
+
+    except Exception as e:
+        logger.exception(f"[render_approved] Error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        if job:
+            _complete_job(db, job, error=str(e))
+        try:
+            _update_document_status(db, doc_id, "failed", error_message=str(e))
+            db.execute(
+                update(Document).where(Document.id == doc_id).values(
+                    processing_completed_at=datetime.now(timezone.utc),
+                    progress_message="Error en renderizado post-revisión",
+                    heartbeat_at=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
+        except Exception:
+            pass
+        self.retry(exc=e, countdown=30)
+
+    finally:
+        db.close()
+        # Limpiar cache Redis
+        try:
+            _rcache = _redis.Redis.from_url(settings.redis_url)
+            _rcache.delete(f"docx_cache:{doc_id}")
+        except Exception:
+            pass
+
+
+# =====================================================================
+# TAREA CELERY: RECORRECCIÓN IA INDIVIDUAL
+# =====================================================================
+
+@celery_app.task(bind=True, max_retries=1, name="tasks_pipeline.recorrect_single_patch")
+def recorrect_single_patch(self, doc_id: str, patch_id: str, feedback: str):
+    """
+    Recorrige un patch individual usando feedback del usuario.
+    """
+    db = _get_sync_session()
+    try:
+        doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one()
+        patch = db.execute(select(Patch).where(Patch.id == patch_id)).scalar_one_or_none()
+
+        if not patch:
+            logger.warning(f"[recorrect] Patch {patch_id} no encontrado")
+            return
+
+        patch.recorrection_count = (patch.recorrection_count or 0) + 1
+        patch.recorrection_note = feedback
+
+        profile_dict = None
+        try:
+            profile = db.execute(
+                select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+            ).scalar_one_or_none()
+            if profile:
+                profile_dict = {
+                    "register": profile.register,
+                    "intervention_level": profile.intervention_level,
+                    "audience_type": profile.audience_type,
+                    "audience_expertise": getattr(profile, "audience_expertise", "general"),
+                    "tone": profile.tone,
+                    "preserve_author_voice": getattr(profile, "preserve_author_voice", False),
+                    "max_rewrite_ratio": getattr(profile, "max_rewrite_ratio", 0.5),
+                    "max_expansion_ratio": getattr(profile, "max_expansion_ratio", 1.1),
+                    "style_priorities": profile.style_priorities or [],
+                    "protected_terms": profile.protected_terms or [],
+                    "forbidden_changes": getattr(profile, "forbidden_changes", []) or [],
+                    "lt_disabled_rules": getattr(profile, "lt_disabled_rules", []) or [],
+                }
+        except Exception:
+            pass
+
+        from app.utils.openai_client import OpenAIStyleCorrector
+        original_text = patch.original_text
+
+        try:
+            corrector = OpenAIStyleCorrector()
+
+            if profile_dict:
+                # Usar correct_with_profile con prompt de recorrección
+                from app.services.prompt_builder import PromptBuilder
+                builder = PromptBuilder(profile_dict)
+                system_prompt = builder.system_prompt()
+                user_prompt = builder.user_prompt(
+                    paragraph_text=original_text,
+                    paragraph_index=patch.paragraph_index or 0,
+                    context_paragraphs=[],
+                )
+                # Inyectar feedback al user prompt
+                user_prompt += (
+                    f"\n\nFEEDBACK DEL USUARIO sobre la corrección anterior:\n"
+                    f'"{feedback}"\n'
+                    f"Texto corregido anterior: \"{patch.corrected_text}\"\n"
+                    f"Corrige nuevamente considerando este feedback."
+                )
+                data, usage = corrector.correct_with_profile(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_length=int(len(original_text) * 1.1),
+                )
+            else:
+                # Fallback: correct_text_style con contexto de feedback
+                feedback_text = (
+                    f"{original_text}\n\n"
+                    f"[FEEDBACK del usuario: {feedback}. "
+                    f"Corrección anterior: {patch.corrected_text}]"
+                )
+                corrected, usage = corrector.correct_text_style(
+                    original_text=feedback_text,
+                    context_blocks=[],
+                )
+                data = {"corrected_text": corrected} if corrected else None
+
+            if data and data.get("corrected_text"):
+                new_corrected = data["corrected_text"]
+                if new_corrected and len(new_corrected) <= len(original_text) * 2.2:
+                    patch.corrected_text = new_corrected
+                    patch.review_status = "pending"
+                    patch.decision_source = "ai_recorrection"
+                    patch.explanation = data.get("explanation", f"Recorrección #{patch.recorrection_count}")
+                    patch.model_used = corrector.model
+                    logger.info(f"[recorrect] Patch {patch_id} recorregido exitosamente")
+
+        except Exception as llm_err:
+            logger.error(f"[recorrect] Error LLM para {patch_id}: {llm_err}")
+            patch.review_reason = f"Error en recorrección: {str(llm_err)[:200]}"
+
+        db.commit()
+
+    except Exception as e:
+        logger.exception(f"[recorrect] Error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        self.retry(exc=e, countdown=10)
+
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, max_retries=1, name="tasks_pipeline.rerender_candidate_preview")
+def rerender_candidate_preview(self, doc_id: str):
+    """
+    Re-renderiza el preview candidato con el estado actual de patches.
+    Usa edited_text donde disponible. Excluye patches rechazados.
+    No cambia el status del documento.
+    """
+    import json as _json
+    db = _get_sync_session()
+    try:
+        doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one()
+
+        # Cargar patches no rechazados con edited_text si disponible
+        all_patch_rows = db.execute(
+            select(Patch).join(Block).join(Page)
+            .where(
+                Page.doc_id == doc_id,
+                Patch.review_status.notin_(("rejected", "gate_rejected")),
+            )
+            .order_by(Patch.paragraph_index)
+        ).scalars().all()
+
+        if not all_patch_rows:
+            logger.info(f"[Rerender] Sin patches para {doc_id}, nada que re-renderizar")
+            return
+
+        # Agrupar patch_ids por paragraph_index
+        para_patch_ids: dict[int, list[str]] = {}
+        for p in all_patch_rows:
+            pidx = p.paragraph_index or 0
+            para_patch_ids.setdefault(pidx, []).append(str(p.id))
+
+        # Deduplicar por paragraph_index y aplicar edited_text si existe
+        seen: set[int] = set()
+        docx_patches: list[dict] = []
+        for p in all_patch_rows:
+            pidx = p.paragraph_index or 0
+            if pidx in seen:
+                continue
+            seen.add(pidx)
+            final_text = (
+                p.edited_text
+                if (hasattr(p, "edited_text") and p.edited_text)
+                else p.corrected_text
+            )
+            docx_patches.append({
+                "patch_ids": para_patch_ids.get(pidx, []),
+                "paragraph_index": pidx,
+                "location": "",
+                "original_text": p.original_text,
+                "corrected_text": final_text,
+                "source": p.source,
+                "review_status": p.review_status,
+                "changes": p.operations_json or [],
+                "category": p.category,
+                "severity": p.severity,
+                "explanation": p.explanation,
+                "confidence": p.confidence,
+            })
+
+        # Cargar locations desde patches_docx.json
+        try:
+            patch_key = f"docx/{doc_id}/patches_docx.json"
+            if minio_client.file_exists(patch_key):
+                stored_patches = _json.loads(
+                    minio_client.download_file(patch_key).decode("utf-8")
+                )
+                location_index: dict[tuple, str] = {}
+                for sp in stored_patches:
+                    key = (sp.get("paragraph_index", 0), sp.get("original_text", "")[:50])
+                    location_index[key] = sp.get("location", "")
+                for dp in docx_patches:
+                    key = (dp["paragraph_index"], dp["original_text"][:50])
+                    dp["location"] = location_index.get(key, "")
+        except Exception as loc_err:
+            logger.warning(f"[Rerender] Error cargando locations: {loc_err}")
+
+        logger.info(
+            f"[Rerender] {len(docx_patches)} patches → re-renderizando candidato para {doc_id}"
+        )
+
+        _docx_bytes = _get_cached_docx_bytes(str(doc_id), doc.source_uri)
+        render_docx_first_sync(
+            doc_id=str(doc_id),
+            docx_uri=doc.source_uri,
+            filename=doc.filename,
+            all_patches=docx_patches,
+            docx_bytes_cached=_docx_bytes,
+            apply_mode="all",
+            render_mode="candidate",
+        )
+
+        logger.info(f"[Rerender] Preview candidato actualizado para {doc_id}")
+
+    except Exception as e:
+        logger.exception(f"[Rerender] Error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        self.retry(exc=e, countdown=5)
+
+    finally:
+        db.close()

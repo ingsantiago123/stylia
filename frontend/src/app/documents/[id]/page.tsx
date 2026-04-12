@@ -9,6 +9,7 @@ import {
   getProfile,
   getDocumentAnalysis,
   getCorrectionBatches,
+  getReviewSummary,
   getPagePreviewUrl,
   downloadPdf,
   downloadDocx,
@@ -18,6 +19,7 @@ import {
   StyleProfile,
   AnalysisResult,
   CorrectionBatchStatus,
+  ReviewSummary,
 } from "@/lib/api";
 import { PipelineFlow } from "@/components/PipelineFlow";
 import { CorrectionHistory } from "@/components/CorrectionHistory";
@@ -38,6 +40,7 @@ export default function DocumentDetailPage() {
   const [profile, setProfile] = useState<StyleProfile | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [correctionBatches, setCorrectionBatches] = useState<CorrectionBatchStatus[]>([]);
+  const [reviewSummary, setReviewSummary] = useState<ReviewSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("pipeline");
@@ -50,18 +53,21 @@ export default function DocumentDetailPage() {
       setDoc(docData);
 
       const isCorrecting = docData.status === "correcting";
-      const [correctionsData, pagesData, profileData, analysisData, batchesData] = await Promise.all([
+      const needsReviewSummary = ["pending_review", "candidate_ready", "completed"].includes(docData.status);
+      const [correctionsData, pagesData, profileData, analysisData, batchesData, reviewData] = await Promise.all([
         getDocumentCorrections(docId).catch(() => [] as PatchListItem[]),
         listPages(docId).catch(() => [] as PageListItem[]),
         getProfile(docId).catch(() => null),
         getDocumentAnalysis(docId).catch(() => null),
         isCorrecting ? getCorrectionBatches(docId).catch(() => [] as CorrectionBatchStatus[]) : Promise.resolve([] as CorrectionBatchStatus[]),
+        needsReviewSummary ? getReviewSummary(docId).catch(() => null) : Promise.resolve(null),
       ]);
       setCorrections(correctionsData);
       setPages(pagesData);
       setProfile(profileData);
       setAnalysis(analysisData);
       setCorrectionBatches(batchesData);
+      setReviewSummary(reviewData);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error");
@@ -74,7 +80,7 @@ export default function DocumentDetailPage() {
     fetchData();
     const getInterval = () => {
       if (!doc) return 2000;
-      const isActive = !["completed", "failed", "uploaded"].includes(doc.status);
+      const isActive = !["completed", "failed", "uploaded", "pending_review", "candidate_ready"].includes(doc.status);
       return isActive ? 2000 : 10000;
     };
     let timer: ReturnType<typeof setTimeout>;
@@ -87,6 +93,13 @@ export default function DocumentDetailPage() {
     tick();
     return () => clearTimeout(timer);
   }, [fetchData, doc?.status]);
+
+  // Auto-switch to Compare tab when candidate is ready for visual review
+  useEffect(() => {
+    if (doc?.status === "candidate_ready" && activeTab !== "pages") {
+      setActiveTab("pages");
+    }
+  }, [doc?.status]);
 
   if (loading) {
     return (
@@ -123,7 +136,7 @@ export default function DocumentDetailPage() {
     );
   }
 
-  const isProcessing = !["completed", "failed", "uploaded"].includes(doc.status);
+  const isProcessing = !["completed", "failed", "uploaded", "pending_review", "candidate_ready"].includes(doc.status);
   const isCompleted = doc.status === "completed";
   const pagesWithCorrections = pages.filter((p) => p.has_corrections).length;
   const hasPreview = doc.total_pages && doc.total_pages > 0;
@@ -336,7 +349,13 @@ export default function DocumentDetailPage() {
         )}
 
         {activeTab === "corrections" && (
-          <CorrectionHistory corrections={corrections} />
+          <CorrectionHistory
+            corrections={corrections}
+            docId={docId}
+            docStatus={doc.status}
+            reviewSummary={reviewSummary}
+            onRefresh={fetchData}
+          />
         )}
 
         {activeTab === "api-flow" && (
@@ -406,6 +425,8 @@ export default function DocumentDetailPage() {
             totalPages={doc.total_pages}
             docId={doc.id}
             docStatus={doc.status}
+            reviewSummary={reviewSummary}
+            onRefresh={fetchData}
           />
         )}
       </div>

@@ -2,12 +2,13 @@
 
 ## Proyecto
 
-Sistema de corrección de estilo literario/editorial para documentos DOCX en español. Procesa documentos párrafo por párrafo a través de un pipeline de dos niveles: LanguageTool (ortografía/gramática) seguido de OpenAI GPT (estilo/claridad/fluidez), preservando formato original del documento. Actualmente en MVP 1 (Fase 1 completada). El proyecto está diseñado para escalar a múltiples fases futuras.
+Sistema de corrección editorial para documentos DOCX en español con pipeline de análisis y corrección en dos etapas: LanguageTool (ortografía/gramática) seguido de OpenAI GPT (estilo/claridad/fluidez). Incluye análisis editorial automático (secciones, glosario, clasificación de párrafos), router de complejidad por párrafo y validación multi-gate post-corrección. Preserva formato original del documento. MVP 2 completado (Lotes 1-5): perfiles editoriales, prompts parametrizados, análisis editorial, router de complejidad y quality gates.
 
 **Nombre del producto**: STYLIA
-**Versión**: 0.1.0 (MVP 1)
+**Versión**: 0.2.0 (MVP 2 completado)
 **Idioma principal del código**: Python (backend), TypeScript (frontend)
 **Idioma del contenido/UI**: Español
+**Estado**: Operativo en desarrollo; MVP 2 lotes 1-5 implementados; roadmap: fases 3+ (PDF digital, OCR, escalado)
 
 ---
 
@@ -38,7 +39,7 @@ Sistema de corrección de estilo literario/editorial para documentos DOCX en esp
 
 ```
 corrector de estilos/
-├── backend/                          # API FastAPI + Celery worker
+├── backend/                          # API FastAPI + Celery workers
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── app/
@@ -46,23 +47,23 @@ corrector de estilos/
 │   │   ├── config.py                 # Pydantic Settings (todas las env vars)
 │   │   ├── database.py               # SQLAlchemy async engine + session
 │   │   ├── api/v1/
-│   │   │   └── documents.py          # Todos los endpoints REST (517 líneas)
-│   │   ├── models/                   # ORM: Document, Page, Block, Patch, Job, DocumentProfile, LlmUsage, SectionSummary, TermRegistry
+│   │   │   └── documents.py          # Todos los endpoints REST (incluyendo HITL)
+│   │   ├── models/                   # ORM: 10 tablas (incluye CorrectionBatch)
 │   │   ├── schemas/                  # Pydantic: request/response validation
-│   │   ├── data/                     # Datos estáticos
+│   │   ├── data/
 │   │   │   └── profiles.py           # 10 perfiles editoriales predeterminados (MVP2 Lote 1)
 │   │   ├── services/                 # Lógica de negocio
 │   │   │   ├── ingestion.py          # Etapa A: upload + DOCX→PDF
 │   │   │   ├── extraction.py         # Etapa B: layout extraction (PyMuPDF)
 │   │   │   ├── analysis.py           # Etapa C: análisis editorial (MVP2 Lote 3)
-│   │   │   ├── correction.py         # Etapa D: LanguageTool + ChatGPT (con perfil + router + contexto jerárquico)
-│   │   │   ├── prompt_builder.py     # MVP2: System/user prompts parametrizados por perfil + contexto sección
-│   │   │   ├── complexity_router.py  # MVP2 Lote 4: Router SKIP/CHEAP/EDITORIAL por párrafo
-│   │   │   ├── quality_gates.py     # MVP2 Lote 5: Validación post-corrección (5 gates + INFLESZ)
+│   │   │   ├── correction.py         # Etapa D: LanguageTool + ChatGPT + quality gates
+│   │   │   ├── prompt_builder.py     # MVP2 Lote 2: prompts parametrizados por perfil
+│   │   │   ├── complexity_router.py  # MVP2 Lote 4: router SKIP/CHEAP/EDITORIAL
+│   │   │   ├── quality_gates.py      # MVP2 Lote 5: validación post-corrección (5 gates + INFLESZ)
 │   │   │   ├── rendering.py          # Etapa E: aplicar patches + generar output
 │   │   │   └── context_accumulator.py # Gestión de contexto acumulado para LLM
 │   │   ├── workers/
-│   │   │   ├── celery_app.py         # Configuración Celery + Redis
+│   │   │   ├── celery_app.py         # Configuración Celery + Redis (2 colas: pipeline, batch)
 │   │   │   └── tasks_pipeline.py     # Tarea monolítica del pipeline completo
 │   │   └── utils/
 │   │       ├── openai_client.py      # Cliente OpenAI (prompt, parse, fallback)
@@ -77,24 +78,32 @@ corrector de estilos/
 │   ├── src/
 │   │   ├── app/
 │   │   │   ├── layout.tsx            # Layout global (header STYLIA, footer)
-│   │   │   ├── page.tsx              # Dashboard: upload + lista documentos
+│   │   │   ├── page.tsx              # Dashboard: upload + lista documentos + selector perfil
 │   │   │   ├── globals.css           # Estilos globales + variables CSS
+│   │   │   ├── costs/
+│   │   │   │   └── page.tsx          # Vista de costos y métricas LLM
 │   │   │   └── documents/[id]/
-│   │   │       └── page.tsx          # Vista detalle: pipeline, correcciones, páginas
+│   │   │       └── page.tsx          # Vista detalle: 5 tabs (resume, analysis, corrections, compare, flow)
 │   │   ├── components/
 │   │   │   ├── DocumentUploader.tsx  # Drag-drop .docx (react-dropzone)
 │   │   │   ├── DocumentList.tsx      # Grid de documentos con status
-│   │   │   ├── PipelineFlow.tsx      # Visualización pipeline 6 etapas
-│   │   │   ├── CorrectionHistory.tsx # Correcciones con diff, filtros categoría/severidad, badges (MVP2)
-│   │   │   └── CorrectionFlowViewer.tsx # Flujo API ChatGPT con contexto
+│   │   │   ├── PipelineFlow.tsx      # Visualización pipeline con etapas reales
+│   │   │   ├── CorrectionHistory.tsx # Correcciones con diff, filtros, badges (MVP2 Lote 2)
+│   │   │   ├── CorrectionActionPanel.tsx # Acciones de revisión humana (MVP2 Lotes 4+)
+│   │   │   ├── DiffCompareView.tsx   # Modo comparación detallado
+│   │   │   └── CorrectionFlowViewer.tsx # Flujo API ChatGPT con contexto jerárquico
 │   │   └── lib/
 │   │       └── api.ts                # Cliente API fetch + tipos TypeScript
 │
-├── docker-compose.yml                # 7 servicios: postgres, redis, minio, languagetool, backend, worker, frontend
+├── landing/                          # Sitio landing (Next.js, puerto 3001)
+│   └── src/
+│
+├── docker-compose.yml                # 11 servicios: postgres, pgadmin, redis, minio, 2x languagetool, 
+│                                     #              nginx (LB), backend, worker-pipeline, worker-batch, frontend
 ├── .env.example                      # Template de variables de entorno
 ├── fonts/                            # Liberation + Noto (para LibreOffice)
 ├── scripts/                          # start.bat, start.ps1
-└── models/                           # Modelos LLM locales (futura Fase 2, .gitignored)
+└── models/                           # Modelos LLM locales (futura Fase 3+, .gitignored)
 ```
 
 ---
@@ -128,10 +137,13 @@ celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
 
 ### URLs de servicios (Docker)
 - Frontend: http://localhost:3000
+- Landing: http://localhost:3001 (desarrollo)
 - Backend API: http://localhost:8000
 - API docs (Swagger): http://localhost:8000/docs
+- Health check: http://localhost:8000/health
 - MinIO Console: http://localhost:9001 (minioadmin/minioadmin)
-- LanguageTool: http://localhost:8010
+- LanguageTool (balanceado): http://localhost:8010 (nginx)
+- pgAdmin: http://localhost:5050 (postgresql/admin)
 - PostgreSQL: localhost:5432
 - Redis: localhost:6379
 
@@ -139,39 +151,48 @@ celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
 
 ## Arquitectura del pipeline
 
-El procesamiento de un documento sigue 6 etapas secuenciales ejecutadas en un solo Celery task (`process_document_pipeline`):
+El procesamiento de un documento sigue 5 etapas secuenciales más 2 estados de finalización, ejecutadas en un solo Celery task (`process_document_pipeline`):
 
 ```
-ETAPA A: INGESTA        → Recibe DOCX, convierte a PDF (LibreOffice), cuenta páginas
-ETAPA B: EXTRACCIÓN     → Extrae layout/texto de cada página (PyMuPDF), genera previews PNG
-ETAPA C: ANÁLISIS       → Inferencia de perfil, detección de secciones, glosario, clasificación párrafos (MVP2 Lote 3)
-ETAPA D: CORRECCIÓN     → Por cada párrafo: LanguageTool → ChatGPT (con contexto acumulado + perfil enriquecido)
-ETAPA E: RENDERIZADO    → Aplica patches al DOCX original, genera PDF corregido
-ESTADO FINAL            → completed | failed
+ETAPA A: INGESTA           → Recibe DOCX, convierte a PDF (LibreOffice), cuenta páginas
+ETAPA B: EXTRACCIÓN        → Extrae layout/texto de cada página (PyMuPDF), genera previews PNG
+ETAPA C: ANÁLISIS EDITORIAL → Inferencia de perfil, detección de secciones, glosario, clasificación párrafos (MVP2 Lote 3)
+ETAPA D: CORRECCIÓN        → Por cada párrafo: LanguageTool → ChatGPT (con perfil + router + contexto jerárquico + quality gates)
+ETAPA E: RENDERIZADO       → Aplica patches al DOCX original, genera PDF candidato
+ESTADO INTERMEDIO          → candidate_ready (listo para revisión humana)
+ESTADO FINAL               → completed | failed (después de revisión humana y finalize)
 ```
 
-**Estados del documento**: `uploaded → converting → extracting → analyzing → correcting → rendering → completed/failed`
+**Estados del documento (canónicos)**: 
+```
+uploaded → converting → extracting → analyzing → correcting 
+→ candidate_rendering → candidate_ready → [revisión humana] → finalizing → completed/failed
+```
+
+**Estados legacy compatible** (sin uso activo pero soportados en código): `pending_review`, `rendering`
+
 **Estados de página**: `pending → extracting → extracted → correcting → corrected → rendering → rendered/failed`
 
 ---
 
 ## Base de datos (PostgreSQL)
 
-9 tablas principales:
+10 tablas principales:
 
 | Tabla | Propósito | Campos clave |
 |-------|-----------|-------------|
-| `documents` | Documento maestro | id (UUID), filename, status, source_uri, pdf_uri, docx_uri, config_json, total_pages, prompt_tokens, llm_cost_usd |
-| `document_profiles` | Perfil editorial (MVP2) | doc_id (FK unique), preset_name, source, genre, audience, register, tone, intervention_level, protected_terms, style_priorities |
-| `pages` | Páginas individuales | doc_id (FK), page_no, page_type, layout_uri, text_uri, preview_uri, status |
+| `documents` | Documento maestro | id (UUID), filename, status, source_uri, pdf_uri, docx_uri, config_json, total_pages, prompt_tokens, llm_cost_usd, review_status, final_review_notes |
+| `document_profiles` | Perfil editorial (MVP2 Lote 1) | doc_id (FK unique), preset_name, source, genre, audience, register, tone, intervention_level, protected_terms, style_priorities, max_expansion_ratio, target_inflesz_min/max |
+| `pages` | Páginas individuales | doc_id (FK), page_no, page_type, layout_uri, text_uri, preview_uri, preview_corrected_uri, status |
 | `blocks` | Bloques de texto/imagen | page_id (FK), block_no, block_type, bbox, original_text, font_info, paragraph_type, requires_llm, section_id |
-| `patches` | Correcciones aplicadas | block_id (FK), version, source, original_text, corrected_text, operations_json, category, severity, explanation, confidence, route_taken, gate_results, review_reason |
+| `patches` | Correcciones aplicadas (MVP2 Lote 2) | block_id (FK), version, source, original_text, corrected_text, operations_json, category, severity, explanation, confidence, route_taken, gate_results, review_reason, pass_number, model_used, rewrite_ratio |
 | `jobs` | Tracking de tareas Celery | doc_id (FK), task_type, celery_task_id, status, error |
 | `llm_usage` | Costos LLM por párrafo | doc_id (FK), paragraph_index, call_type, model_used, prompt_tokens, completion_tokens, cost_usd |
-| `section_summaries` | Secciones detectadas (Lote 3) | doc_id (FK), section_index, section_title, start/end_paragraph, summary_text, topic, active_terms |
-| `term_registry` | Glosario de términos (Lote 3) | doc_id (FK), term, normalized_form, frequency, is_protected, decision |
+| `section_summaries` | Secciones detectadas (MVP2 Lote 3) | doc_id (FK), section_index, section_title, start/end_paragraph, summary_text, topic, active_terms |
+| `term_registry` | Glosario de términos (MVP2 Lote 3) | doc_id (FK), term, normalized_form, frequency, is_protected, decision |
+| `correction_batches` | Lotes de corrección paralela (MVP2 Lote 4+) | doc_id (FK), batch_no, paragraph_indices, status, results_json, created_at, completed_at |
 
-**Nota**: En MVP las tablas se crean con `Base.metadata.create_all` en startup. No hay Alembic aún.
+**Nota**: En MVP las tablas se crean con `Base.metadata.create_all` en startup. No hay Alembic aún. Las columnas HITL (review_status, final_review_notes) están en Document para soporte de flujo de revisión humana.
 
 ---
 
@@ -197,25 +218,67 @@ final/{doc_id}/{stem}_corrected.pdf       # PDF corregido final
 
 Base: `/api/v1`
 
+### Flujo principal
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| POST | `/upload` | Sube DOCX (ya NO lanza pipeline, espera selección de perfil) |
-| POST | `/documents/{id}/process` | Lanza pipeline Celery (requiere status=uploaded) |
-| GET | `/presets` | Lista 10 perfiles editoriales predeterminados |
+| POST | `/upload` | Sube DOCX (status=uploaded, espera selección de perfil) |
+| POST | `/documents/{id}/process` | Lanza pipeline Celery (status=uploaded → converting → ... → candidate_ready) |
+| GET | `/health` | Health check |
+
+### Perfiles editoriales
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/presets` | Lista 10 perfiles editoriales predeterminados (MVP2 Lote 1) |
 | POST | `/documents/{id}/profile` | Crea perfil editorial (desde preset o custom) |
 | GET | `/documents/{id}/profile` | Lee perfil editorial del documento |
 | PUT | `/documents/{id}/profile` | Actualiza perfil editorial |
+
+### Documentos y resultados
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
 | GET | `/documents` | Lista documentos (skip, limit) |
-| GET | `/documents/{id}` | Detalle con pages_summary |
-| GET | `/documents/{id}/pages` | Lista páginas con patches_count |
-| GET | `/documents/{id}/corrections` | Lista todas las correcciones |
-| GET | `/documents/{id}/pages/{no}/preview` | Stream PNG preview |
-| GET | `/documents/{id}/download/pdf` | Stream PDF corregido |
-| GET | `/documents/{id}/download/docx` | Stream DOCX corregido |
+| GET | `/documents/{id}` | Detalle documento (incluye review_status, estados de página) |
+| GET | `/documents/{id}/pages` | Lista páginas con patches_count y preview URIs |
+| GET | `/documents/{id}/corrections` | Lista todas las correcciones (MVP2 Lote 2: con category, severity, explanation) |
 | DELETE | `/documents/{id}` | Elimina documento |
-| GET | `/documents/{id}/analysis` | Resultado del análisis editorial (secciones, glosario, perfil inferido) |
-| GET | `/documents/{id}/correction-flow` | Flujo de correcciones (debug/visualización) |
-| GET | `/health` | Health check |
+
+### Análisis editorial
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/documents/{id}/analysis` | Resultado análisis (secciones, glosario, distribución párrafos, perfil inferido) (MVP2 Lote 3) |
+| GET | `/documents/{id}/correction-flow` | Flujo de correcciones (debug/visualización de contexto jerárquico) |
+| GET | `/documents/{id}/correction-batches` | Lotes de corrección paralela (si aplica) (MVP2 Lote 4+) |
+
+### Previews y descargas
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/documents/{id}/pages/{no}/preview` | Stream PNG preview página original |
+| GET | `/documents/{id}/pages/{no}/preview-corrected` | Stream PNG preview página con anotaciones de correcciones |
+| GET | `/documents/{id}/pages/{no}/annotations` | JSON con posiciones de correcciones en página |
+| GET | `/documents/{id}/download/pdf` | Stream PDF corregido (candidate o final) |
+| GET | `/documents/{id}/download/docx` | Stream DOCX corregido (candidate o final) |
+
+### Revisión humana (HITL)
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/documents/{id}/review-summary` | Resumen de correcciones pendientes revisión (gate_rejected, manual_review) |
+| POST | `/documents/{id}/corrections/{patch_id}/review` | Acción sobre un patch: approve/reject/edit |
+| POST | `/documents/{id}/finalize` | Finaliza documento (status=finalizing → completed) después de revisión |
+| POST | `/documents/{id}/reopen` | Reabre documento en revisión (candidate_ready → correcting) |
+| POST | `/documents/{id}/recorrect` | Relanza corrección (para patches editados manualmente) |
+| POST | `/documents/{id}/rerender` | Regenera outputs DOCX/PDF desde patches |
+
+### Costos y métricas
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/costs/summary` | Resumen de costos (total LLM, por modelo, por documento) |
+| GET | `/costs/documents` | Costos agregados por documento |
+| GET | `/documents/{id}/costs` | Desglose de costos por párrafo/llamada LLM |
+
+### Tareas asíncronas (opcional)
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/task-status/{task_id}` | Estado de tarea Celery (para monitoreo avanzado) |
 
 ---
 
@@ -255,10 +318,18 @@ La corrección se hace directamente sobre los párrafos del DOCX (no sobre bloqu
 - **Dark-only**: Siempre tema oscuro (html className="dark")
 - **Paleta**: carbon (#121212), krypton (#D4FF00, acento), bruma (#F5F5F7, texto), plomo (#8E8E93, secundario)
 - **State management**: React hooks locales (no Redux/Zustand)
-- **Polling**: 5s en home, 4s en detalle (no WebSocket)
+- **Polling**: Dinámico por etapa (heartbeat con fallback fijo de 5-30s según estado del documento) (no WebSocket)
 - **Upload**: Solo .docx via react-dropzone
-- **Rutas**: `/` (dashboard), `/documents/[id]` (detalle con 4 tabs)
-- **Tabs detalle**: Pipeline, Correcciones (con diff word-level), Flujo API, Páginas
+- **Rutas principales**: 
+  - `/` (dashboard: upload, lista, selector perfil)
+  - `/documents/[id]` (detalle con 5 tabs)
+  - `/costs` (resumen de costos)
+- **Tabs detalle**: 
+  1. **Resumen** (estado, progreso, perfiles inferido/seleccionado)
+  2. **Análisis** (secciones, glosario, distribución párrafos) (MVP2 Lote 3)
+  3. **Correcciones** (lista con diff word-level, filtros categoría/severidad/ruta, badges) (MVP2 Lote 2/4)
+  4. **Comparar** (vista side-by-side original/corregido con modo diff avanzado)
+  5. **Flujo API** (timeline de requests a LanguageTool y ChatGPT con contexto jerárquico)
 
 ---
 
@@ -341,85 +412,58 @@ MAX_DOCUMENT_PAGES=1000
 ## Fase actual y roadmap
 
 **Fase 1 (MVP 1) — COMPLETADA**:
-- Pipeline DOCX completo (ingest → extract → correct → render)
+- Pipeline DOCX completo (A: ingesta → B: extracción → D: corrección → E: render)
 - LanguageTool + OpenAI gpt-4o-mini
 - Dashboard con upload, lista, visualización pipeline
 - Vista de correcciones con diff word-level
 - Descarga PDF/DOCX corregido
 
-**Fase 2 (MVP 2) — EN DESARROLLO (Lotes 1-2 completados)**:
-El rediseño completo del pipeline de corrección. Implementación por lotes verificables.
+**Fase 2 (MVP 2) — COMPLETADA (Lotes 1-5)**:
+Rediseño completo del pipeline de corrección con análisis editorial, prompts parametrizados, router de complejidad y validación multi-gate. Implementación verificable por lotes.
 
 Documentación:
 - `mvp2.md` → Visión y diseño del pipeline editorial completo
 - `IMPLEMENTACION-MVP2.md` → Guía paso a paso de implementación (fases 2A-2E)
 - `REGISTRO-MVP2.md` → Tracking de progreso IA + humano por lote
-- `CLAUDE-LOGIC.md` → Lógica interna, workflow y flujo de datos del MVP 1
+- `CLAUDE-LOGIC.md` → Lógica interna, workflow y flujo de datos
 
-Lotes de implementación:
-- **Lote 1 (COMPLETADO)**: Perfiles editoriales + flujo upload/process separado + selector UI
-- **Lote 2 (COMPLETADO)**: Prompt parametrizado + patches enriquecidos (category/severity/explanation)
-- **Lote 3 (COMPLETADO)**: Etapa C análisis editorial + modelos section_summaries/term_registry
-- **Lote 4 (COMPLETADO)**: Contexto jerárquico + router de complejidad
-- **Lote 5 (COMPLETADO)**: Quality gates + métricas INFLESZ
+### Lotes de implementación MVP2 (todos completados):
 
-Cambios del Lote 1:
-- Tabla `document_profiles` con perfil editorial por documento
-- 10 perfiles predeterminados (infantil, juvenil, novela, ensayo, psicología, marketing, etc.)
-- Upload ya NO lanza pipeline automáticamente → usuario elige perfil primero
-- Nuevo endpoint POST /documents/{id}/process para lanzar pipeline
+**Lote 1 (COMPLETADO)**: Perfiles editoriales + flujo upload/process separado + selector UI
+- Tabla `document_profiles` con 10 perfiles predeterminados
+- Upload ya NO lanza pipeline → usuario elige perfil → POST /process
+- Frontend: ProfileSelector + ProfileEditor
 - Endpoints CRUD: POST/GET/PUT /documents/{id}/profile
-- Endpoint GET /presets para listar perfiles disponibles
-- Frontend: ProfileSelector (grid de 10 cards) + ProfileEditor (personalización)
-- Flujo: Upload → ProfileSelector → Procesar (o "Sin perfil" para flujo genérico)
 
-Cambios del Lote 2:
-- PromptBuilder: system prompt estático (cacheable) + user prompt dinámico por párrafo con perfil
-- openai_client: nuevo método `correct_with_profile()` para prompts externos
-- correction.py: usa PromptBuilder cuando hay perfil, fallback MVP1 sin perfil
-- tasks_pipeline.py: carga DocumentProfile de BD, pasa como dict a corrección
-- Modelo Patch: 7 nuevas columnas (category, severity, explanation, confidence, rewrite_ratio, pass_number, model_used)
-- API: list_corrections retorna campos enriquecidos
-- Frontend: CorrectionHistory con filtros categoría/severidad, badges coloreados, explicación, confianza %
+**Lote 2 (COMPLETADO)**: Prompts parametrizados + patches enriquecidos
+- PromptBuilder: system prompt cacheable + user prompt dinámico con perfil
+- Modelo Patch extendido: category, severity, explanation, confidence, rewrite_ratio, pass_number, model_used
+- Frontend: CorrectionHistory con filtros categoría/severidad y badges coloreados
 
-Cambios del Lote 3:
-- Tablas `section_summaries` (resúmenes por sección) y `term_registry` (glosario de términos)
-- Block extendido: paragraph_type (11 tipos), requires_llm, section_id (FK)
-- Nuevo status "analyzing" entre "extracting" y "correcting"
-- Servicio analysis.py: C.1 inferencia perfil, C.3 secciones, C.4 glosario, C.5 clasificación heurística
-- Etapa C insertada en pipeline Celery entre B y D
-- Términos protegidos del análisis se agregan al perfil antes de corrección
+**Lote 3 (COMPLETADO)**: Etapa C análisis editorial + tablas section_summaries/term_registry
+- Nuevo status "analyzing" en pipeline (entre extracting y correcting)
+- Análisis de secciones, glosario, clasificación de párrafos (11 tipos)
+- Términos protegidos se agregan al perfil antes de corrección
 - Endpoint GET /documents/{id}/analysis
-- Frontend: AnalysisView (secciones, glosario, distribución tipos, perfil inferido)
-- Frontend: tab "Análisis" en detalle de documento + etapa "Analizando" en PipelineFlow
+- Frontend: tab "Análisis" con secciones, glosario, distribución tipos
 
-Cambios del Lote 4:
-- Nuevo servicio `complexity_router.py`: Router con 3 rutas (SKIP, CHEAP, EDITORIAL) basado en tipo de párrafo, longitud, complejidad sintáctica, posición en sección, nivel de intervención
-- Config: `openai_cheap_model` y `openai_editorial_model` (ambos default gpt-4o-mini, configurables via .env)
-- `openai_client.py`: `correct_with_profile()` acepta `model_override` para modelo distinto por ruta
-- `prompt_builder.py`: User prompt ahora incluye section_summary, active_terms, paragraph_type con hints contextuales
-- `correction.py`: `correct_docx_sync()` acepta `analysis_data`, usa router para decidir ruta, pasa contexto jerárquico, selecciona modelo, logging de distribución
-- `tasks_pipeline.py`: Pasa `analysis_result` a corrección, almacena `route_taken` en patches
-- Modelo Patch: nueva columna `route_taken` (skip|cheap|editorial)
-- Frontend: badges de ruta (Skip/Cheap/Editorial) en CorrectionCard + contadores en stats bar
+**Lote 4 (COMPLETADO)**: Router de complejidad + contexto jerárquico
+- Router SKIP/CHEAP/EDITORIAL por párrafo según tipo, longitud, posición, nivel intervención
+- Contexto jerárquico: section_summary + active_terms + paragraph_type en prompts
+- Modelo override para modelo distinto por ruta (openai_cheap_model, openai_editorial_model)
+- Patch.route_taken para tracking de ruta elegida
+- Frontend: badges de ruta + contadores en stats bar
 
-Cambios del Lote 5:
-- Nuevo servicio `quality_gates.py`: 5 gates de validación post-corrección + INFLESZ (sin dependencias externas)
-  - `gate_not_empty` (crítico): texto corregido no vacío
-  - `gate_expansion_ratio` (crítico): ratio expansión <= max_expansion_ratio del perfil
-  - `gate_rewrite_ratio` (no-crítico): distancia edición normalizada con SequenceMatcher (stdlib)
-  - `gate_protected_terms` (crítico): términos protegidos presentes en original deben mantenerse en corregido
-  - `gate_language_preserved` (no-crítico): heurístico proporción caracteres españoles
-  - `gate_readability_inflesz` (no-crítico): INFLESZ Fernández Huerta en rango target_inflesz_min/max del perfil
-- `correction.py`: Quality gates ejecutados post-LLM; gates críticos descartan corrección (→ gate_rejected), no-críticos marcan manual_review
-- Modelo Patch: 2 columnas nuevas `gate_results` (JSONB) y `review_reason` (Text)
-- `tasks_pipeline.py`: Pasa review_status, review_reason, gate_results a Patch constructor
-- Frontend: barras progreso rewrite_ratio/confidence, badges review_status (Validado/Revisión/Rechazado), detalle de gates expandido, stats bar con contadores de calidad
+**Lote 5 (COMPLETADO)**: Quality gates + INFLESZ
+- 5 gates: not_empty (crítico), expansion_ratio (crítico), protected_terms (crítico), rewrite_ratio (no-crítico), language_preserved (no-crítico), readability_inflesz (no-crítico)
+- Patch.gate_results (JSONB) y Patch.review_reason para validación y trazabilidad
+- Gates críticos descartan corrección (gate_rejected); no-críticos marcan manual_review
+- Frontend: barras de progreso, badges de review_status, detalle de gates
 
 **Fases futuras (post MVP 2)**:
-- Fase 3: Soporte PDF born-digital
-- Fase 4: OCR para PDFs escaneados
-- Fase 5: Autenticación, métricas, Kubernetes
+- **Fase 3**: Soporte PDF born-digital (Ruta 2: extrae bloques del PDF, corrige y regenera overlay)
+- **Fase 4**: OCR para PDFs escaneados (Ruta 3: OCR → texto → corrección → overlay)
+- **Fase 5**: Autenticación, métricas, Kubernetes, escalado productivo
 
 ---
 

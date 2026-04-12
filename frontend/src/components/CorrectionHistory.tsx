@@ -1,10 +1,21 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import { PatchListItem } from "@/lib/api";
+import { useState, useMemo, useCallback } from "react";
+import {
+  PatchListItem,
+  bulkReviewCorrections,
+  finalizeDocument,
+  reopenDocument,
+  ReviewSummary,
+} from "@/lib/api";
+import { CorrectionActionPanel, FinalizeToolbar, ReviewStatusBadge } from "./CorrectionActionPanel";
 
 interface CorrectionHistoryProps {
   corrections: PatchListItem[];
+  docId: string;
+  docStatus: string;
+  reviewSummary?: ReviewSummary | null;
+  onRefresh?: () => void;
 }
 
 type FilterSource = "all" | "languagetool" | "llm";
@@ -35,12 +46,74 @@ const ROUTE_COLORS: Record<string, { bg: string; text: string; label: string }> 
   editorial: { bg: "bg-purple-900/30", text: "text-purple-400", label: "Editorial" },
 };
 
-export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
+export function CorrectionHistory({ corrections, docId, docStatus, reviewSummary, onRefresh }: CorrectionHistoryProps) {
   const [filterSource, setFilterSource] = useState<FilterSource>("all");
   const [filterCategory, setFilterCategory] = useState<FilterCategory>("all");
   const [filterSeverity, setFilterSeverity] = useState<FilterSeverity>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [actionLoading, setActionLoading] = useState(false);
+  const [finalizeLoading, setFinalizeLoading] = useState(false);
+
+  // Review mode: same rules as Compare — active in candidate_ready, completed, pending_review
+  const isReviewMode = docStatus === "pending_review" || docStatus === "candidate_ready" || docStatus === "completed";
+  const isCompleted = docStatus === "completed";
+
+  const handleBulkAction = useCallback(async (action: "accepted" | "rejected") => {
+    if (selectedIds.size === 0) return;
+    setActionLoading(true);
+    try {
+      await bulkReviewCorrections(docId, Array.from(selectedIds), action);
+      setSelectedIds(new Set());
+      onRefresh?.();
+    } catch (err) {
+      console.error("Error bulk reviewing:", err);
+    } finally {
+      setActionLoading(false);
+    }
+  }, [docId, selectedIds, onRefresh]);
+
+  const handleFinalize = useCallback(async (mode: "quick" | "strict") => {
+    setFinalizeLoading(true);
+    try {
+      await finalizeDocument(docId, mode, "accepted_and_auto");
+      onRefresh?.();
+    } catch (err) {
+      console.error("Error finalizing:", err);
+    } finally {
+      setFinalizeLoading(false);
+    }
+  }, [docId, onRefresh]);
+
+  const handleReopen = useCallback(async () => {
+    setFinalizeLoading(true);
+    try {
+      await reopenDocument(docId);
+      onRefresh?.();
+    } catch (err) {
+      console.error("Error reopening:", err);
+    } finally {
+      setFinalizeLoading(false);
+    }
+  }, [docId, onRefresh]);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const selectAllFiltered = useCallback(() => {
+    setSelectedIds(prev => {
+      const all = new Set(prev);
+      filtered.forEach(c => all.add(c.id));
+      return all;
+    });
+  }, []);  // filtered dependency added via useMemo below
 
   const categories = useMemo(() => {
     const cats = new Set<string>();
@@ -227,6 +300,57 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
         </div>
       </div>
 
+      {/* Review toolbar — unified FinalizeToolbar + bulk actions */}
+      {isReviewMode && reviewSummary && (
+        <div className="space-y-3">
+          <FinalizeToolbar
+            reviewSummary={reviewSummary}
+            onFinalize={handleFinalize}
+            onReopen={isCompleted ? handleReopen : undefined}
+            isCompleted={isCompleted}
+            loading={finalizeLoading}
+          />
+          {/* Bulk selection bar */}
+          <div className="glass-card rounded-xl p-3 flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={selectAllFiltered}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-surface text-plomo hover:text-bruma transition-colors"
+              >
+                Seleccionar todo ({filtered.length})
+              </button>
+              {selectedIds.size > 0 && (
+                <button
+                  onClick={() => setSelectedIds(new Set())}
+                  className="px-2 py-1.5 text-xs text-plomo hover:text-bruma transition-colors"
+                >
+                  Deseleccionar ({selectedIds.size})
+                </button>
+              )}
+            </div>
+            {selectedIds.size > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-plomo">{selectedIds.size} seleccionados</span>
+                <button
+                  onClick={() => handleBulkAction("accepted")}
+                  disabled={actionLoading}
+                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 border border-emerald-500/20 transition-colors disabled:opacity-50"
+                >
+                  Aceptar sel.
+                </button>
+                <button
+                  onClick={() => handleBulkAction("rejected")}
+                  disabled={actionLoading}
+                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-red-500/15 text-red-400 hover:bg-red-500/25 border border-red-500/20 transition-colors disabled:opacity-50"
+                >
+                  Rechazar sel.
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Corrections list */}
       <div className="space-y-2">
         {filtered.length === 0 ? (
@@ -241,6 +365,11 @@ export function CorrectionHistory({ corrections }: CorrectionHistoryProps) {
               index={index + 1}
               isExpanded={expandedId === patch.id}
               onToggle={() => setExpandedId(expandedId === patch.id ? null : patch.id)}
+              isReviewMode={isReviewMode}
+              isSelected={selectedIds.has(patch.id)}
+              onSelect={() => toggleSelect(patch.id)}
+              docId={docId}
+              onRefresh={() => onRefresh?.()}
             />
           ))
         )}
@@ -254,11 +383,21 @@ function CorrectionCard({
   index,
   isExpanded,
   onToggle,
+  isReviewMode,
+  isSelected,
+  onSelect,
+  docId,
+  onRefresh,
 }: {
   patch: PatchListItem;
   index: number;
   isExpanded: boolean;
   onToggle: () => void;
+  isReviewMode: boolean;
+  isSelected: boolean;
+  onSelect: () => void;
+  docId: string;
+  onRefresh: () => void;
 }) {
   // Simple word-level diff
   const diffWords = useMemo(() => {
@@ -291,6 +430,14 @@ function CorrectionCard({
       {/* Header */}
       <div className="px-4 py-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
+          {isReviewMode && (
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={(e) => { e.stopPropagation(); onSelect(); }}
+              className="w-4 h-4 rounded border-border bg-surface text-krypton focus:ring-krypton/30 cursor-pointer flex-shrink-0"
+            />
+          )}
           <span className="text-xs font-mono text-plomo w-6 text-right flex-shrink-0">
             #{index}
           </span>
@@ -335,22 +482,7 @@ function CorrectionCard({
           )}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          <span className={`
-            inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium
-            ${patch.review_status === "auto_accepted" ? "bg-krypton/15 text-krypton" : ""}
-            ${patch.review_status === "accepted" ? "bg-krypton/15 text-krypton" : ""}
-            ${patch.review_status === "manual_review" ? "bg-orange-900/20 text-orange-400" : ""}
-            ${patch.review_status === "gate_rejected" ? "bg-red-900/20 text-red-400" : ""}
-            ${patch.review_status === "rejected" ? "bg-red-900/20 text-red-400" : ""}
-            ${patch.review_status === "pending" ? "bg-surface text-plomo" : ""}
-          `}>
-            {patch.review_status === "auto_accepted" && "✓ Validado"}
-            {patch.review_status === "accepted" && "✓ Aceptada"}
-            {patch.review_status === "manual_review" && "⚠ Revisión"}
-            {patch.review_status === "gate_rejected" && "✕ Rechazado"}
-            {patch.review_status === "rejected" && "✕ Rechazada"}
-            {patch.review_status === "pending" && "● Pendiente"}
-          </span>
+          <ReviewStatusBadge status={patch.review_status} />
           <svg
             className={`w-4 h-4 text-plomo transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
             fill="none"
@@ -519,6 +651,19 @@ function CorrectionCard({
               </>
             )}
           </div>
+
+          {/* Review actions — unified CorrectionActionPanel */}
+          {isReviewMode && (
+            <div className="pt-2 border-t border-border mt-2" onClick={(e) => e.stopPropagation()}>
+              <CorrectionActionPanel
+                docId={docId}
+                patch={patch}
+                isReviewMode={isReviewMode}
+                onActionComplete={onRefresh}
+                compact={true}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

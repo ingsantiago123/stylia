@@ -4,51 +4,72 @@ Este documento detalla cómo fluye la información desde que el usuario sube un 
 
 ---
 
-## 1. Flujo completo del usuario
+## 1. Flujo completo del usuario (MVP2)
 
 ```
-USUARIO                         FRONTEND                         BACKEND                          SERVICIOS EXTERNOS
-  │                                │                                │                                │
-  │ 1. Arrastra .docx             │                                │                                │
-  │ ─────────────────────────────→│                                │                                │
-  │                                │ 2. POST /api/v1/upload         │                                │
-  │                                │ (FormData con file)            │                                │
-  │                                │ ──────────────────────────────→│                                │
-  │                                │                                │ 3. Valida formato + tamaño     │
-  │                                │                                │ 4. Guarda en MinIO             │───→ MinIO
-  │                                │                                │ 5. Crea Document en DB          │───→ PostgreSQL
-  │                                │                                │ 6. Lanza Celery task            │───→ Redis (broker)
-  │                                │ 7. Response {id, status}       │                                │
-  │                                │ ←──────────────────────────────│                                │
-  │ 8. Ve doc en lista             │                                │                                │
-  │ ←─────────────────────────────│                                │                                │
-  │                                │                                │                                │
-  │                                │ 9. Polling GET /documents       │                                │
-  │                                │    cada 5s                     │                                │
-  │                                │ ──────────────────────────────→│                                │
-  │ 10. Ve progreso actualizado   │ ←──────────────────────────────│                                │
-  │ ←─────────────────────────────│                                │                                │
-  │                                │                                │                                │
-  │ 11. Click en documento         │                                │                                │
-  │ ─────────────────────────────→│ 12. GET /documents/{id}         │                                │
-  │                                │ + GET /corrections              │                                │
-  │                                │ + GET /pages                    │                                │
-  │                                │ ──────────────────────────────→│                                │
-  │ 13. Ve detalle + tabs          │ ←──────────────────────────────│                                │
-  │ ←─────────────────────────────│                                │                                │
-  │                                │                                │                                │
-  │ 14. Click "Descargar PDF"     │                                │                                │
-  │ ─────────────────────────────→│ 15. GET /download/pdf           │                                │
-  │                                │ ──────────────────────────────→│ 16. Stream desde MinIO          │───→ MinIO
-  │ 17. Descarga archivo           │ ←──────────────────────────────│                                │
-  │ ←─────────────────────────────│                                │                                │
+USUARIO                     FRONTEND                         BACKEND                          SERVICIOS EXTERNOS
+  │                            │                                │                                │
+  │ 1. Arrastra .docx          │                                │                                │
+  │ ───────────────────────→   │                                │                                │
+  │                            │ 2. POST /api/v1/upload         │                                │
+  │                            │ ──────────────────────────────→│ 3. Valida + guarda MinIO       │───→ MinIO
+  │                            │                                │ 4. Crea Document (status=uploaded)
+  │                            │ ← Response {id, status}        │ 5. Crea Document en DB         │───→ PostgreSQL
+  │                            │                                │                                │
+  │ 6. Ve doc en lista          │                                │                                │
+  │ ←───────────────────────   │                                │                                │
+  │                            │                                │                                │
+  │ [OPCIONAL] 7. Selecciona    │                                │                                │
+  │    perfil editorial         │ 8. POST /documents/{id}/profile │                                │
+  │ ───────────────────────→   │ ──────────────────────────────→│ 9. Crear/actualizar perfil     │───→ PostgreSQL
+  │                            │ ← Response (perfil guarado)    │                                │
+  │                            │                                │                                │
+  │ 10. Click "Procesar"        │                                │                                │
+  │ ───────────────────────→   │ 11. POST /documents/{id}/process│                                │
+  │                            │ ──────────────────────────────→│ 12. Lanza Celery task          │───→ Redis (broker)
+  │                            │ ← Response (tarea encolada)    │ 13. Worker: A→B→C→D→E         │
+  │                            │                                │ (status: converting..correcting)
+  │                            │ 14. Polling GET /documents      │                                │
+  │                            │     (dinámico: 5-30s)           │                                │
+  │                            │ ←──────────────────────────────│                                │
+  │ 15. Ve progreso por etapa  │                                │                                │
+  │ ←───────────────────────   │ 16. Pipeline finaliza           │                                │
+  │                            │ ──────────────────────────────→│ candidate_rendering → candidate_ready
+  │                            │ ← Doc con status=candidate_ready│                                │
+  │                            │                                │                                │
+  │ 17. Click en documento      │                                │                                │
+  │ ───────────────────────→   │ 18. GET /documents/{id}         │                                │
+  │                            │     GET /analysis               │                                │
+  │                            │     GET /corrections            │                                │
+  │                            │ ──────────────────────────────→│                                │
+  │ 19. Ve 5 tabs + correcciones│ ←──────────────────────────────│                                │
+  │ (Resumen|Análisis|Correcciones│                               │                                │
+  │  |Comparar|Flujo API)        │                                │                                │
+  │ ←───────────────────────   │                                │                                │
+  │                            │                                │                                │
+  │ [OPCIONAL HITL]            │                                │                                │
+  │ 20. Revisa correcciones     │                                │                                │
+  │ 21. Aprueba/rechaza patches │ 22. POST /corrections/{id}/review│                              │
+  │ ───────────────────────→   │ ──────────────────────────────→│ 23. Actualiza patches         │───→ PostgreSQL
+  │                            │                                │                                │
+  │ 24. Click "Finalizar"       │                                │                                │
+  │ ───────────────────────→   │ 25. POST /documents/{id}/finalize│                              │
+  │                            │ ──────────────────────────────→│ 26. status=finalizing          │───→ Redis (worker)
+  │                            │                                │ 27. Rerender DOCX/PDF final   │───→ MinIO
+  │                            │ ← Response (finalizado)        │ 28. status=completed           │───→ PostgreSQL
+  │                            │                                │                                │
+  │ 29. Click "Descargar PDF"   │                                │                                │
+  │ ───────────────────────→   │ 30. GET /download/pdf           │                                │
+  │                            │ ──────────────────────────────→│ 31. Stream desde MinIO         │───→ MinIO
+  │ 32. Descarga archivo final  │ ←──────────────────────────────│                                │
+  │ ←───────────────────────   │                                │                                │
 ```
 
 ---
 
 ## 2. Pipeline de procesamiento (Celery worker)
 
-Cuando se sube un documento, el endpoint `/upload` dispara `process_document_pipeline` como tarea Celery. Esta tarea ejecuta 4 etapas secuencialmente:
+Cuando el usuario hace POST a `/documents/{id}/process`, el endpoint dispara `process_document_pipeline` como tarea Celery en la cola `pipeline`. Esta tarea ejecuta 5 etapas secuencialmente, seguidas de 2 estados de finalización:
 
 ### ETAPA A: Ingesta (`services/ingestion.py`)
 
@@ -116,12 +137,36 @@ Por cada página:
 
 ---
 
-### ETAPA D: Corrección (`services/correction.py`)
+### ETAPA C: Análisis Editorial (`services/analysis.py`)
+
+**Entrada**: doc_id, list of Blocks with original_text
+**Salida**: {sections[], glossary[], paragraph_classifications{}, inferred_profile{}}
+
+```
+1. Dividir párrafos en secciones (heurística: títulos, cambios temáticos, saltos de línea)
+2. Por cada sección:
+   - Generar resumen con contexto 3-párrafo ventana
+   - Extraer términos clave (frecuencia, campo semántico)
+   - Marcar términos protegidos (nombres, marcas, tecnicismos)
+3. Clasificar cada párrafo (11 tipos):
+   - intro, heading, body, list_item, table, quote, footer, code, image_caption, transition, conclusion
+4. Inferir perfil editorial si no fue proporcionado:
+   - Heurística: género (ensayo/narrativa/técnico), tono (formal/informal), nivel intervención (ligero/medio/profundo)
+5. Actualizar Document.document_profiles.protected_terms con términos del análisis
+6. Crear SectionSummary y TermRegistry records en BD
+7. Guardar análisis completo en Document.analysis_json
+```
+
+**DB updates**: Document.status = "analyzing" → "correcting", SectionSummary[], TermRegistry[]
+
+---
+
+### ETAPA D: Corrección (`services/correction.py` + MVP2 servicios)
 
 **Ruta 1 activa: DOCX-first** (`correct_docx_sync`)
 
-**Entrada**: doc_id, docx_uri (MinIO key del original), config (language, disabled_rules)
-**Salida**: lista de patches [{paragraph_index, location, original_text, corrected_text, lt_operations, source}]
+**Entrada**: doc_id, docx_uri (MinIO key del original), config, profile (opcional), analysis_data (de Etapa C)
+**Salida**: lista de patches [{paragraph_index, location, original_text, corrected_text, lt_operations, category, severity, explanation, confidence, route_taken, gate_results, review_reason}]
 
 ```
 1. Descargar DOCX de MinIO → archivo temporal
@@ -134,8 +179,15 @@ Por cada página:
 
 4. Por cada párrafo (si len(text.strip()) >= 3):
 
+   PASO 0 — Router de complejidad (MVP2 Lote 4):
+   ├─ Evaluar: paragraph_type (del análisis C), longitud, complejidad sintáctica, posición en sección
+   ├─ Decidir ruta: SKIP | CHEAP | EDITORIAL
+   ├─ SKIP: sin llamada LLM (solo LanguageTool)
+   ├─ CHEAP: llamada LLM con modelo económico (openai_cheap_model)
+   └─ EDITORIAL: llamada LLM con modelo potente (openai_editorial_model)
+
    PASO 1 — LanguageTool:
-   ├─ POST http://languagetool:8010/v2/check
+   ├─ POST http://languagetool:8010/v2/check (load-balanced en Nginx)
    │  body: {text, language: "es", disabledRules: "RULE1,RULE2"}
    ├─ Parsear response.matches[]
    ├─ Ordenar matches por offset DESCENDENTE
@@ -144,26 +196,47 @@ Por cada página:
    ├─ Registrar operaciones: [{offset, length, original, replacement, rule_id, category, message}]
    └─ Resultado: post_lt_text (texto con ortografía/gramática corregida)
 
-   PASO 2 — ChatGPT (estilo):
-   ├─ Construir prompt:
-   │  ├─ System: "Eres un corrector de estilo experto en español. Siempre respondes en formato JSON válido."
-   │  ├─ User: instrucciones + contexto (últimos 3 párrafos corregidos) + límite chars + texto
+   PASO 2 — ChatGPT (estilo, si ruta != SKIP):
+   ├─ Construir prompt con PromptBuilder (MVP2 Lote 2):
+   │  ├─ System: cacheable, sin variables
+   │  ├─ User: dinámico incluye
+   │  │  ├─ Instrucciones del perfil (si aplica)
+   │  │  ├─ Contexto jerárquico: section_summary, active_terms, paragraph_type (MVP2 Lote 4)
+   │  │  ├─ Contexto acumulado: últimos 3 párrafos corregidos
+   │  │  ├─ Límite de caracteres (max_expansion_ratio del perfil)
+   │  │  └─ Texto a corregir (post_lt_text)
    │  └─ response_format: {"type": "json_object"}
-   ├─ Llamar OpenAI API:
-   │  client.chat.completions.create(model="gpt-4o-mini", temperature=0.3, max_tokens=500)
+   ├─ Llamar OpenAI API con modelo elegido por router:
+   │  client.chat.completions.create(model=model, temperature=0.3, max_tokens=500)
    ├─ Parsear JSON: {"corrected_text": "...", "changes_made": [...], "character_count": N}
-   ├─ Validar: len(corrected_text) <= max_length (110% original)
-   │  ├─ Si excede → usar texto original (descartar corrección)
-   │  └─ Si OK → usar como final_text
-   ├─ Fallback sin API key: _simulate_correction() con reemplazos básicos
-   └─ Fallback si API falla: usar post_lt_text (solo LanguageTool)
+   └─ Fallback: _simulate_correction() o usar post_lt_text
 
-   CONTEXTO ACUMULADO:
+   PASO 3 — Quality Gates (MVP2 Lote 5):
+   ├─ Validar corrección post-LLM:
+   │  ├─ gate_not_empty (CRÍTICO): texto no vacío
+   │  ├─ gate_expansion_ratio (CRÍTICO): len(corrected) <= 110% original
+   │  ├─ gate_protected_terms (CRÍTICO): términos protegidos preservados
+   │  ├─ gate_rewrite_ratio (no-crítico): distancia edición normalizada
+   │  ├─ gate_language_preserved (no-crítico): proporción chars españoles
+   │  └─ gate_readability_inflesz (no-crítico): INFLESZ en rango target
+   ├─ Decisión:
+   │  ├─ Si gate crítico falla → gate_rejected, usa original, marca para manual_review
+   │  ├─ Si solo gates no-críticos fallan → valida, marca review_reason
+   │  └─ Si todo pasa → valida
+   └─ Resultado: final_text, gate_results (JSONB), review_reason
+
+   CONTEXTO ACUMULADO (MVP2 Lote 4):
+   ├─ Mantener contexto jerárquico por sección + últimos 3 corregidos
    ├─ corrected_context.append(final_text) después de cada párrafo
-   └─ Se pasan corrected_context[-3:] al siguiente párrafo como contexto
+   └─ Se pasan [section_summary, active_terms, corrected_context[-3:]] al siguiente
 
 5. Guardar patches JSON en MinIO: docx/{doc_id}/patches_docx.json
-6. Crear Patch records en DB (vinculados al primer Block de la primera Page)
+6. Crear Patch records en DB con campos MVP2:
+   - category, severity (MVP2 Lote 2)
+   - explanation, confidence, rewrite_ratio (MVP2 Lote 2)
+   - route_taken (MVP2 Lote 4)
+   - gate_results, review_reason (MVP2 Lote 5)
+7. Actualizar Document.review_status = pending_review si hay patches con manual_review=True
 ```
 
 **Estructura de un patch**:
@@ -192,13 +265,13 @@ Por cada página:
 
 ### ETAPA E: Renderizado (`services/rendering.py`)
 
-**Entrada**: doc_id, docx_uri, filename, all_patches (lista de patches de Etapa D)
+**Entrada**: doc_id, docx_uri, filename, all_patches (lista de patches de Etapa D, incluyendo approved de HITL)
 **Salida**: {corrected_docx_uri, corrected_pdf_uri, changes_count}
 
 ```
 1. Descargar DOCX original de MinIO → archivo local temporal
 2. Abrir con python-docx: DocxDocument(local_docx)
-3. Por cada patch:
+3. Por cada patch (filtrar: solo approved=True):
    a. Localizar párrafo: _get_paragraph_by_location(doc, location)
       - Parsea "body:5" → doc.paragraphs[5]
       - Parsea "table:0:1:2:0" → doc.tables[0].rows[1].cells[2].paragraphs[0]
@@ -217,6 +290,52 @@ Por cada página:
    - docx/{doc_id}/{stem}_corrected.docx
    - final/{doc_id}/{stem}_corrected.pdf
 7. Marcar patches como applied=True en DB
+
+DB updates: Document.status = "candidate_rendering" → "candidate_ready"
+Document.docx_uri actualizado, Document.pdf_uri actualizado
+```
+
+---
+
+### ESTADO INTERMEDIO: Candidato listo para revisión (`POST /documents/{id}/finalize`)
+
+**Entrada**: doc_id, user_review_feedback (opcional)
+**Salida**: {review_summary, stats}
+
+```
+document.status = "candidate_ready"
+
+El documento permanece en estado candidato hasta que el usuario:
+- Revisa las correcciones en frontend (CorrectionHistory + DiffCompareView)
+- Aprueba/rechaza correcciones individuales (MVP2 HITL)
+- Opcionalmente edita correcciones manualmente
+- Haz click "Finalizar" → POST /documents/{id}/finalize
+
+En candidate_ready, el usuario puede:
+- Descargar "candidato" (DOCX/PDF con correcciones aprobadas)
+- Reabrir (status=correcting) para relanzar corrección con cambios
+- Finalize (status=finalizing)
+```
+
+---
+
+### ESTADO FINAL: Finalizando y Completado
+
+**POST `/documents/{id}/finalize`**
+
+```
+1. Document.status = "finalizing"
+2. Celery worker tarea finalize_document:
+   a. Si hay edits manuales desde HITL:
+      - Recolectar patches editados manualmente
+      - Lanzar quality_gates nuevamente
+      - Si pasan → aplicar
+   b. Renderizar final (Etapa E nuevamente si hay cambios)
+   c. Generar estadísticas finales y resumen de cambios
+   d. Marcar Document.review_status = "completed"
+3. Document.status = "completed"
+4. Subir resumen a MinIO: final/{doc_id}/summary.json
+5. Actualizar BD: Document.completed_at, Document.final_review_notes
 ```
 
 ---
@@ -378,20 +497,43 @@ def _apply_text_to_paragraph_runs(paragraph, new_text):
 
 ### Vista de detalle (`/documents/[id]`)
 
-4 tabs disponibles:
+5 tabs disponibles (MVP2 completado):
 
-1. **Pipeline**: Visualización de las 6 etapas con indicadores de progreso
-2. **Correcciones**: Lista filtrable con diff word-level (rojo=original, verde=corregido)
-3. **Flujo API**: Timeline de requests a LanguageTool y ChatGPT con contexto acumulado
-4. **Páginas**: Grid de thumbnails con previews y conteo de correcciones por página
+1. **Resumen**: Estado del documento, progreso por etapa, perfiles (inferido vs seleccionado), estadísticas de correcciones
+2. **Análisis**: Secciones detectadas (MVP2 Lote 3), glosario de términos, distribución de tipos de párrafos, perfil editorial inferido
+3. **Correcciones**: Lista filtrable con diff word-level (rojo=original, verde=corregido), filtros por categoría/severidad/ruta (MVP2 Lote 2/4), badges de estado y confianza
+4. **Comparar**: Vista side-by-side original/corregido con modo diff avanzado, anotaciones de calidad (MVP2 Lote 5)
+5. **Flujo API**: Timeline de requests a LanguageTool y ChatGPT con contexto jerárquico (MVP2 Lote 4)
 
 ### Acciones del usuario:
+
+**Fase upload**:
 - **Subir**: Drag-drop o click → solo .docx
-- **Monitorear**: Automático via polling (no necesita refrescar)
-- **Explorar correcciones**: Expandir cards para ver diff detallado
-- **Filtrar**: Por fuente (LanguageTool / LLM) y por búsqueda de texto
-- **Descargar**: PDF o DOCX corregido (botones aparecen solo cuando status=completed)
+- **Ver estado**: Doc aparece en lista con status=uploaded
+
+**Fase selección de perfil**:
+- **(Opcional) Seleccionar perfil**: Grid de 10 presets o editor custom
+- **Sin perfil**: Usar flujo genérico MVP1
+
+**Fase procesamiento**:
+- **Procesar**: Click botón → POST /documents/{id}/process
+- **Monitorear**: Polling dinámico muestra progreso por etapa (5-30s según estado)
+- **Ver detalles**: Click documento → 5 tabs con análisis completo
+
+**Fase revisión (HITL)**:
+- **Revisar correcciones**: Expandir cards para ver diff detallado y explicaciones (MVP2 Lote 2)
+- **Filtrar**: Por categoría, severidad, ruta SKIP/CHEAP/EDITORIAL (MVP2 Lotes 2/4)
+- **Aprobar/rechazar**: Acciones en patches individuales (HITL)
+- **Descargar candidato**: PDF/DOCX con correcciones aprobadas (status=candidate_ready)
+
+**Fase finalización**:
+- **Finalizar**: Click "Completar" → POST /documents/{id}/finalize → status=completed
+- **Reabrir**: Para relanzar corrección → status=correcting
+- **Descargar final**: PDF/DOCX final (status=completed)
 - **Eliminar**: Botón rojo con confirmación
+
+**Costos**:
+- **Ver costos**: Tab `/costs` con resumen de llamadas LLM y costos agregados por documento
 
 ---
 
@@ -516,25 +658,48 @@ Actualmente solo se usan `language` y `lt_disabled_rules`. El resto está prepar
 
 ## 11. Tracking de progreso (cómo se calcula)
 
-El frontend calcula el progreso del documento basado en el estado de las páginas:
+El frontend calcula el progreso del documento basado en la etapa actual y un heartbeat/evento de progreso:
 
-```python
-# Backend: documents.py endpoint list_documents
-progress = 0.0
-for page_status, count in page_counts:
-    if page_status == "extracted":
-        progress += count * 0.3
-    elif page_status == "corrected":
-        progress += count * 0.6
-    elif page_status == "rendered":
-        progress += count * 1.0
-progress = progress / total_pages  # 0.0 a 1.0
+**Modelo MVP2** (etapas A-B-C-D-E):
+```
+- converting (etapa A): 10% (estimado)
+- extracting (etapa B): 20% (estimado)
+- analyzing (etapa C): 30% (estimado)
+- correcting (etapa D): 75% (basado en párrafos procesados: heartbeat)
+- candidate_rendering (etapa E): 90% (estimado)
+- candidate_ready: 100%
+- finalizing → completed: 100%
 ```
 
-Pesos:
-- **extracted** (layout extraído): 30%
-- **corrected** (LanguageTool + GPT aplicados): 60%
-- **rendered** (DOCX/PDF generados): 100%
+El backend emite **heartbeats de progreso** durante la Etapa D (corrección) para indicar avance real:
+```
+POST /documents/{id}/progress
+{
+  "current_paragraph": N,
+  "total_paragraphs": M,
+  "percentage": (N/M) * 75
+}
+```
+
+El frontend polling obtiene este dato cada 5-30s según el estado:
+- Etapas rápidas (A, B, C): polling cada 30s
+- Etapa D (corrección): polling cada 5s (conteo de párrafos procesados)
+- Etapas finales (E, finalize): polling cada 10s
+
+**Cálculo de progreso global**:
+```python
+progress_by_stage = {
+  "converting": 0.10,
+  "extracting": 0.20,
+  "analyzing": 0.30,
+  "correcting": 0.30 + (current_para / total_paras) * 0.45,
+  "candidate_rendering": 0.90,
+  "candidate_ready": 1.0,
+  "finalizing": 1.0,
+  "completed": 1.0
+}
+current_progress = progress_by_stage[document.status]
+```
 
 ---
 

@@ -9,17 +9,21 @@ interface Props {
   onRefresh: () => void;
 }
 
-const PIPELINE_STAGES = ["uploaded", "converting", "extracting", "analyzing", "correcting", "rendering", "completed"];
+const PIPELINE_STAGES = ["uploaded", "converting", "extracting", "analyzing", "correcting", "candidate_rendering", "candidate_ready", "finalizing", "completed"];
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; iconColor: string }> = {
-  uploaded:    { label: "Subido",        color: "text-plomo",   iconColor: "text-plomo" },
-  converting:  { label: "Convirtiendo",  color: "text-krypton", iconColor: "text-krypton" },
-  extracting:  { label: "Extrayendo",    color: "text-krypton", iconColor: "text-krypton" },
-  analyzing:   { label: "Analizando",    color: "text-krypton", iconColor: "text-krypton" },
-  correcting:  { label: "Corrigiendo",   color: "text-krypton", iconColor: "text-krypton" },
-  rendering:   { label: "Renderizando",  color: "text-krypton", iconColor: "text-krypton" },
-  completed:   { label: "Completado",    color: "text-emerald-400", iconColor: "text-emerald-400" },
-  failed:      { label: "Error",         color: "text-red-400", iconColor: "text-red-400" },
+  uploaded:             { label: "Subido",              color: "text-plomo",       iconColor: "text-plomo" },
+  converting:           { label: "Convirtiendo",        color: "text-krypton",     iconColor: "text-krypton" },
+  extracting:           { label: "Extrayendo",          color: "text-krypton",     iconColor: "text-krypton" },
+  analyzing:            { label: "Analizando",          color: "text-krypton",     iconColor: "text-krypton" },
+  correcting:           { label: "Corrigiendo",         color: "text-krypton",     iconColor: "text-krypton" },
+  candidate_rendering:  { label: "Renderizando candidato", color: "text-krypton",  iconColor: "text-krypton" },
+  candidate_ready:      { label: "Listo para revision", color: "text-blue-400",    iconColor: "text-blue-400" },
+  pending_review:       { label: "Pendiente revision",  color: "text-orange-400",  iconColor: "text-orange-400" },
+  finalizing:           { label: "Finalizando",         color: "text-krypton",     iconColor: "text-krypton" },
+  rendering:            { label: "Renderizando",        color: "text-krypton",     iconColor: "text-krypton" },
+  completed:            { label: "Completado",          color: "text-emerald-400", iconColor: "text-emerald-400" },
+  failed:               { label: "Error",               color: "text-red-400",     iconColor: "text-red-400" },
 };
 
 // SVG circular progress ring component
@@ -105,7 +109,7 @@ function DocumentCard({ doc, onRefresh, index }: {
   const [imgError, setImgError] = useState(false);
 
   const statusInfo = STATUS_CONFIG[doc.status] || { label: doc.status, color: "text-plomo", iconColor: "text-plomo" };
-  const isProcessing = !["completed", "failed", "uploaded"].includes(doc.status);
+  const isProcessing = !["completed", "failed", "uploaded", "pending_review", "candidate_ready"].includes(doc.status);
   const isCompleted = doc.status === "completed";
   const isFailed = doc.status === "failed";
   const currentStageIndex = PIPELINE_STAGES.indexOf(doc.status);

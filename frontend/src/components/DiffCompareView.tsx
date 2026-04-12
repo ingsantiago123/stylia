@@ -1,13 +1,20 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import {
   PatchListItem,
   PageAnnotation,
+  ReviewSummary,
   getPagePreviewUrl,
   getCorrectedPagePreviewUrl,
+  getCandidatePagePreviewUrl,
   getPageAnnotations,
+  finalizeDocument,
+  reopenDocument,
+  rerenderCandidatePreview,
+  getTaskStatus,
 } from "@/lib/api";
+import { CorrectionActionPanel, FinalizeToolbar } from "./CorrectionActionPanel";
 
 // =============================================
 // Types
@@ -18,6 +25,8 @@ interface DiffCompareViewProps {
   totalPages: number | null;
   docId: string;
   docStatus: string;
+  reviewSummary?: ReviewSummary | null;
+  onRefresh?: () => void;
 }
 
 interface TooltipData {
@@ -31,6 +40,11 @@ interface TooltipData {
   original_snippet: string;
   corrected_snippet: string;
   cost_usd: number | null;
+}
+
+interface SelectedAnnotation {
+  annotation: PageAnnotation;
+  patches: PatchListItem[];
 }
 
 // =============================================
@@ -53,6 +67,15 @@ const SEVERITY_LABELS: Record<string, { label: string; color: string }> = {
   critico:     { label: "Critico",     color: "bg-red-900/50 text-red-300" },
   importante:  { label: "Importante",  color: "bg-yellow-900/50 text-yellow-300" },
   sugerencia:  { label: "Sugerencia",  color: "bg-emerald-900/50 text-emerald-300" },
+};
+
+const REVIEW_STATUS_STYLES: Record<string, { overlay: string; label: string }> = {
+  accepted:      { overlay: "border-2 border-emerald-400/60 bg-emerald-500/10", label: "Aceptado" },
+  auto_accepted: { overlay: "border border-emerald-400/30 bg-emerald-500/5", label: "Auto-aceptado" },
+  rejected:      { overlay: "border-2 border-red-400/60 bg-red-500/15", label: "Rechazado" },
+  gate_rejected: { overlay: "border-2 border-red-400/40 bg-red-500/10", label: "Gate rechazado" },
+  manual_review: { overlay: "border-2 border-yellow-400/60 bg-yellow-500/15", label: "Revision manual" },
+  pending:       { overlay: "border border-yellow-400/30 bg-yellow-500/5", label: "Pendiente" },
 };
 
 // =============================================
@@ -78,10 +101,19 @@ function getPageNumbers(current: number, total: number): (number | "...")[] {
 // Main Component
 // =============================================
 
-export function DiffCompareView({ corrections, totalPages, docId, docStatus }: DiffCompareViewProps) {
+export function DiffCompareView({
+  corrections,
+  totalPages,
+  docId,
+  docStatus,
+  reviewSummary,
+  onRefresh,
+}: DiffCompareViewProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [tooltip, setTooltip] = useState<TooltipData | null>(null);
   const [annotations, setAnnotations] = useState<PageAnnotation[]>([]);
+  const [selectedAnnotation, setSelectedAnnotation] = useState<SelectedAnnotation | null>(null);
+  const [finalizeLoading, setFinalizeLoading] = useState(false);
 
   // Image loading states
   const [leftLoaded, setLeftLoaded] = useState(false);
@@ -89,8 +121,80 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
   const [leftError, setLeftError] = useState(false);
   const [rightError, setRightError] = useState(false);
 
+  // Re-render preview state
+  const [isRerendering, setIsRerendering] = useState(false);
+  const [rerenderError, setRerenderError] = useState<string | null>(null);
+  const [rightImageCacheBust, setRightImageCacheBust] = useState(0);
+  const rerenderPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Limpiar polling de re-render al desmontar
+  useEffect(() => {
+    return () => {
+      if (rerenderPollRef.current) clearInterval(rerenderPollRef.current);
+    };
+  }, []);
+
+  // Cuando cambia la página, resetear el estado de re-render
+  const handlePageChange = useCallback((newPage: number) => {
+    setCurrentPage(newPage);
+    if (rerenderPollRef.current) {
+      clearInterval(rerenderPollRef.current);
+      rerenderPollRef.current = null;
+    }
+    setIsRerendering(false);
+  }, []);
+
+  // Re-render callback: disparado por CorrectionActionPanel cuando el texto cambia
+  const handleTextChanged = useCallback(async () => {
+    if (isRerendering) return;
+    setIsRerendering(true);
+    setRerenderError(null);
+    setRightLoaded(false);
+    try {
+      const { task_id } = await rerenderCandidatePreview(docId);
+      let attempts = 0;
+      const MAX_ATTEMPTS = 50; // 50 × 3s = 150s
+      rerenderPollRef.current = setInterval(async () => {
+        attempts++;
+        if (attempts > MAX_ATTEMPTS) {
+          if (rerenderPollRef.current) clearInterval(rerenderPollRef.current);
+          rerenderPollRef.current = null;
+          setIsRerendering(false);
+          setRerenderError("El re-render tardó demasiado. Inténtalo de nuevo.");
+          return;
+        }
+        try {
+          const info = await getTaskStatus(task_id);
+          if (info.ready) {
+            if (rerenderPollRef.current) clearInterval(rerenderPollRef.current);
+            rerenderPollRef.current = null;
+            setIsRerendering(false);
+            if (info.status === "FAILURE") {
+              setRerenderError("El re-render falló. Verifica que los workers estén activos.");
+            } else {
+              // SUCCESS: cache bust fuerza recarga de imagen + anotaciones
+              setRightImageCacheBust((v) => v + 1);
+              setRightLoaded(false);
+              setRightError(false);
+            }
+          }
+        } catch {
+          // Ignorar errores de red temporales durante polling
+        }
+      }, 3000);
+    } catch {
+      setIsRerendering(false);
+      setRerenderError("No se pudo iniciar el re-render. ¿El backend está activo?");
+    }
+  }, [docId, isRerendering]);
+
   const maxPage = totalPages || 1;
   const isCompleted = docStatus === "completed";
+  const isCandidateReady = docStatus === "candidate_ready";
+  const isPendingReview = docStatus === "pending_review";
+  const showCorrectedPreview = isCompleted || isCandidateReady;
+  // Review mode: actions available in candidate_ready, completed (reopened), AND pending_review
+  const isReviewMode = isCandidateReady || isCompleted || isPendingReview;
   const pageNumbers = useMemo(() => getPageNumbers(currentPage, maxPage), [currentPage, maxPage]);
 
   // Reset states when page changes
@@ -101,37 +205,104 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
     setRightError(false);
     setAnnotations([]);
     setTooltip(null);
+    setSelectedAnnotation(null);
   }, [currentPage]);
 
-  // Fetch annotations for current page
+  // Fetch annotations for current page (re-fetch también cuando el cache bust cambia tras re-render)
   useEffect(() => {
-    if (!isCompleted) return;
-    getPageAnnotations(docId, currentPage).then(setAnnotations).catch(() => setAnnotations([]));
-  }, [docId, currentPage, isCompleted]);
+    if (!showCorrectedPreview) return;
+    const mode = isCandidateReady ? "candidate" : "final";
+    getPageAnnotations(docId, currentPage, mode)
+      .then(setAnnotations)
+      .catch(() => setAnnotations([]));
+  }, [docId, currentPage, showCorrectedPreview, isCandidateReady, rightImageCacheBust]);
 
-  const handleAnnotationHover = useCallback((e: React.MouseEvent, ann: PageAnnotation) => {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    // Match annotation to correction to get cost
-    const match = corrections.find(
-      (c) => c.original_text === ann.original_snippet && c.corrected_text === ann.corrected_snippet
-    );
-    setTooltip({
-      x: rect.left + rect.width / 2,
-      y: rect.top - 8,
-      category: ann.category,
-      severity: ann.severity,
-      explanation: ann.explanation,
-      confidence: ann.confidence,
-      source: ann.source,
-      original_snippet: ann.original_snippet,
-      corrected_snippet: ann.corrected_snippet,
-      cost_usd: match?.cost_usd ?? null,
-    });
-  }, [corrections]);
+  // Find matching patches for an annotation via patch_ids
+  const findPatchesForAnnotation = useCallback(
+    (ann: PageAnnotation): PatchListItem[] => {
+      if (ann.patch_ids && ann.patch_ids.length > 0) {
+        return corrections.filter((c) => ann.patch_ids!.includes(c.id));
+      }
+      // Fallback: match by text snippet
+      return corrections.filter(
+        (c) =>
+          c.original_text.startsWith(ann.original_snippet.slice(0, 50)) &&
+          c.corrected_text.startsWith(ann.corrected_snippet.slice(0, 50))
+      );
+    },
+    [corrections]
+  );
+
+  // Get current review_status for an annotation (from corrections, not from annotation snapshot)
+  const getAnnotationReviewStatus = useCallback(
+    (ann: PageAnnotation): string => {
+      const patches = findPatchesForAnnotation(ann);
+      if (patches.length > 0) return patches[0].review_status;
+      return ann.review_status || "";
+    },
+    [findPatchesForAnnotation]
+  );
+
+  const handleAnnotationClick = useCallback(
+    (ann: PageAnnotation) => {
+      if (!isReviewMode) return;
+      const patches = findPatchesForAnnotation(ann);
+      setSelectedAnnotation({ annotation: ann, patches });
+      setTooltip(null);
+    },
+    [isReviewMode, findPatchesForAnnotation]
+  );
+
+  const handleAnnotationHover = useCallback(
+    (e: React.MouseEvent, ann: PageAnnotation) => {
+      if (selectedAnnotation) return; // Don't show tooltip when panel is open
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const match = findPatchesForAnnotation(ann);
+      setTooltip({
+        x: rect.left + rect.width / 2,
+        y: rect.top - 8,
+        category: ann.category,
+        severity: ann.severity,
+        explanation: ann.explanation,
+        confidence: ann.confidence,
+        source: ann.source,
+        original_snippet: ann.original_snippet,
+        corrected_snippet: ann.corrected_snippet,
+        cost_usd: match.length > 0 ? (match[0].cost_usd ?? null) : null,
+      });
+    },
+    [findPatchesForAnnotation, selectedAnnotation]
+  );
 
   const handleAnnotationLeave = useCallback(() => {
     setTooltip(null);
   }, []);
+
+  // Finalize handler (dual mode)
+  const handleFinalize = useCallback(async (mode: "quick" | "strict") => {
+    setFinalizeLoading(true);
+    try {
+      await finalizeDocument(docId, mode, "accepted_and_auto");
+      onRefresh?.();
+    } catch (err) {
+      console.error("Finalize failed:", err);
+    } finally {
+      setFinalizeLoading(false);
+    }
+  }, [docId, onRefresh]);
+
+  // Reopen handler
+  const handleReopen = useCallback(async () => {
+    setFinalizeLoading(true);
+    try {
+      await reopenDocument(docId);
+      onRefresh?.();
+    } catch (err) {
+      console.error("Reopen failed:", err);
+    } finally {
+      setFinalizeLoading(false);
+    }
+  }, [docId, onRefresh]);
 
   // Stats
   const correctionStats = useMemo(() => {
@@ -160,6 +331,19 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
   return (
     <div className="space-y-4">
       {/* ============================================= */}
+      {/* REVIEW TOOLBAR (unified for all review states) */}
+      {/* ============================================= */}
+      {reviewSummary && (isCandidateReady || isPendingReview || isCompleted) && (
+        <FinalizeToolbar
+          reviewSummary={reviewSummary}
+          onFinalize={handleFinalize}
+          onReopen={isCompleted ? handleReopen : undefined}
+          isCompleted={isCompleted}
+          loading={finalizeLoading}
+        />
+      )}
+
+      {/* ============================================= */}
       {/* PAGE NAVIGATOR                                */}
       {/* ============================================= */}
       <div className="glass-card rounded-xl p-4">
@@ -167,7 +351,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
           {/* Prev / page buttons / Next */}
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              onClick={() => handlePageChange(Math.max(1, currentPage - 1))}
               disabled={currentPage === 1}
               className="w-8 h-8 flex items-center justify-center rounded-lg bg-surface text-plomo hover:text-bruma hover:bg-carbon-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
             >
@@ -183,7 +367,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
                 ) : (
                   <button
                     key={p}
-                    onClick={() => setCurrentPage(p)}
+                    onClick={() => handlePageChange(p as number)}
                     className={`w-8 h-8 flex items-center justify-center rounded-lg text-xs font-semibold transition-all ${
                       currentPage === p
                         ? "bg-krypton text-carbon shadow-[0_0_10px_rgba(212,255,0,0.2)]"
@@ -197,7 +381,7 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
             </div>
 
             <button
-              onClick={() => setCurrentPage((p) => Math.min(maxPage, p + 1))}
+              onClick={() => handlePageChange(Math.min(maxPage, currentPage + 1))}
               disabled={currentPage === maxPage}
               className="w-8 h-8 flex items-center justify-center rounded-lg bg-surface text-plomo hover:text-bruma hover:bg-carbon-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
             >
@@ -244,7 +428,12 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
                   })}
               </div>
             )}
-            {isCompleted ? (
+            {isCandidateReady ? (
+              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-blue-900/20 text-blue-400 font-medium">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                Listo para revision
+              </span>
+            ) : isCompleted ? (
               <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-krypton/10 text-krypton font-medium">
                 <span className="w-1.5 h-1.5 rounded-full bg-krypton" />
                 Completado
@@ -266,7 +455,9 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
           </div>
           <div className="flex items-center gap-2">
             <div className="w-2.5 h-2.5 rounded-full bg-krypton" />
-            <span className="text-xs uppercase tracking-wider font-semibold text-plomo">Corregido</span>
+            <span className="text-xs uppercase tracking-wider font-semibold text-plomo">
+              {isCandidateReady ? "Candidato" : "Corregido"}
+            </span>
             {annotations.length > 0 && (
               <span className="text-[10px] text-plomo/60">— {annotations.length} marcas en esta pagina</span>
             )}
@@ -275,9 +466,9 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
       </div>
 
       {/* ============================================= */}
-      {/* SIDE-BY-SIDE PAGE IMAGES                      */}
+      {/* SIDE-BY-SIDE PAGE IMAGES + REVIEW PANEL       */}
       {/* ============================================= */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className={`grid gap-4 ${selectedAnnotation ? "grid-cols-[1fr_1fr_320px]" : "grid-cols-2"}`}>
         {/* LEFT: Original page */}
         <div className="glass-card rounded-xl overflow-hidden">
           <div className="max-h-[80vh] overflow-auto">
@@ -296,10 +487,37 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
           </div>
         </div>
 
-        {/* RIGHT: Corrected page with annotation overlays */}
+        {/* RIGHT: Corrected/Candidate page with annotation overlays */}
         <div className="glass-card rounded-xl overflow-hidden">
-          <div className="max-h-[80vh] overflow-auto">
-            {isCompleted ? (
+          <div className="max-h-[80vh] overflow-auto relative">
+            {/* Re-render overlay — spinner o error */}
+            {(isRerendering || rerenderError) && (
+              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-carbon/80 backdrop-blur-sm rounded-xl">
+                {isRerendering ? (
+                  <>
+                    <svg className="w-8 h-8 text-krypton animate-spin mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181 3.182" />
+                    </svg>
+                    <p className="text-sm text-krypton font-medium">Re-renderizando pagina...</p>
+                    <p className="text-xs text-plomo mt-1">Aplicando cambios al documento</p>
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-8 h-8 text-red-400 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                    </svg>
+                    <p className="text-sm text-red-400 font-medium text-center px-4">{rerenderError}</p>
+                    <button
+                      onClick={() => setRerenderError(null)}
+                      className="mt-3 px-3 py-1 text-xs bg-surface text-plomo rounded-lg hover:bg-plomo/20"
+                    >
+                      Cerrar
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            {showCorrectedPreview ? (
               <>
                 {!rightLoaded && !rightError && <ImageSkeleton />}
                 {rightError ? (
@@ -307,27 +525,49 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
                 ) : (
                   <div className="relative">
                     <img
-                      src={getCorrectedPagePreviewUrl(docId, currentPage)}
-                      alt={`Pagina ${currentPage} corregida`}
+                      key={rightImageCacheBust}
+                      src={(() => {
+                        const base = isCandidateReady
+                          ? getCandidatePagePreviewUrl(docId, currentPage)
+                          : getCorrectedPagePreviewUrl(docId, currentPage);
+                        if (!rightImageCacheBust) return base;
+                        return base.includes("?") ? `${base}&v=${rightImageCacheBust}` : `${base}?v=${rightImageCacheBust}`;
+                      })()}
+                      alt={`Pagina ${currentPage} ${isCandidateReady ? "candidato" : "corregida"}`}
                       className={`w-full h-auto ${rightLoaded ? "block" : "hidden"}`}
                       onLoad={() => setRightLoaded(true)}
                       onError={() => { setRightError(true); setRightLoaded(true); }}
                     />
-                    {/* Invisible hover overlays on annotation positions */}
-                    {rightLoaded && annotations.map((ann, i) => (
-                      <div
-                        key={i}
-                        className="absolute cursor-pointer transition-all hover:bg-white/10"
-                        style={{
-                          left: `${ann.x_pct}%`,
-                          top: `${ann.y_pct}%`,
-                          width: `${ann.w_pct}%`,
-                          height: `${ann.h_pct}%`,
-                        }}
-                        onMouseEnter={(e) => handleAnnotationHover(e, ann)}
-                        onMouseLeave={handleAnnotationLeave}
-                      />
-                    ))}
+                    {/* Annotation overlays with review status colors */}
+                    {rightLoaded && annotations.map((ann, i) => {
+                      const reviewStatus = getAnnotationReviewStatus(ann);
+                      const statusStyle = REVIEW_STATUS_STYLES[reviewStatus] || REVIEW_STATUS_STYLES.pending;
+                      const isSelected = selectedAnnotation?.annotation === ann;
+
+                      return (
+                        <div
+                          key={i}
+                          className={`absolute transition-all rounded-sm ${
+                            isReviewMode ? "cursor-pointer" : "cursor-default"
+                          } ${
+                            isSelected
+                              ? "border-2 border-krypton bg-krypton/20 shadow-[0_0_8px_rgba(212,255,0,0.3)]"
+                              : isReviewMode
+                                ? `${statusStyle.overlay} hover:brightness-125`
+                                : "hover:bg-white/10"
+                          }`}
+                          style={{
+                            left: `${ann.x_pct}%`,
+                            top: `${ann.y_pct}%`,
+                            width: `${ann.w_pct}%`,
+                            height: `${ann.h_pct}%`,
+                          }}
+                          onClick={() => handleAnnotationClick(ann)}
+                          onMouseEnter={(e) => handleAnnotationHover(e, ann)}
+                          onMouseLeave={handleAnnotationLeave}
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </>
@@ -344,10 +584,138 @@ export function DiffCompareView({ corrections, totalPages, docId, docStatus }: D
             )}
           </div>
         </div>
+
+        {/* REVIEW PANEL (side panel when annotation selected) */}
+        {selectedAnnotation && (
+          <AnnotationReviewPanel
+            annotation={selectedAnnotation.annotation}
+            patches={selectedAnnotation.patches}
+            docId={docId}
+            isReviewMode={isReviewMode}
+            onClose={() => setSelectedAnnotation(null)}
+            onRefresh={() => onRefresh?.()}
+            onTextChanged={handleTextChanged}
+            onPatchUpdated={(updated) => {
+              // Actualizar el patch en la selección local para que el panel muestre datos frescos
+              setSelectedAnnotation((prev) => {
+                if (!prev) return prev;
+                return {
+                  ...prev,
+                  patches: prev.patches.map((p) => (p.id === updated.id ? updated : p)),
+                };
+              });
+            }}
+          />
+        )}
       </div>
 
-      {/* Floating tooltip */}
-      {tooltip && <AnnotationTooltip data={tooltip} />}
+      {/* Floating tooltip (only when no panel open) */}
+      {tooltip && !selectedAnnotation && <AnnotationTooltip data={tooltip} />}
+    </div>
+  );
+}
+
+// =============================================
+// Review Panel (side panel using shared CorrectionActionPanel)
+// =============================================
+
+function AnnotationReviewPanel({
+  annotation,
+  patches,
+  docId,
+  isReviewMode,
+  onClose,
+  onRefresh,
+  onTextChanged,
+  onPatchUpdated,
+}: {
+  annotation: PageAnnotation;
+  patches: PatchListItem[];
+  docId: string;
+  isReviewMode: boolean;
+  onClose: () => void;
+  onRefresh: () => void;
+  onTextChanged?: () => void;
+  onPatchUpdated?: (p: PatchListItem) => void;
+}) {
+  const firstPatch = patches[0];
+  const catColor = CATEGORY_COLORS[annotation.category];
+  const sevLabel = annotation.severity ? SEVERITY_LABELS[annotation.severity] : null;
+
+  return (
+    <div className="glass-card rounded-xl overflow-hidden flex flex-col max-h-[80vh]">
+      {/* Header */}
+      <div className="p-3 border-b border-border flex items-center justify-between">
+        <span className="text-xs font-semibold text-bruma">Detalle de correccion</span>
+        <button
+          onClick={onClose}
+          className="w-6 h-6 flex items-center justify-center rounded-md hover:bg-surface text-plomo hover:text-bruma transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Content (scrollable) */}
+      <div className="flex-1 overflow-auto p-3 space-y-3">
+        {/* Category + severity + source badges */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {annotation.category && (
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${catColor?.bg || "bg-surface"} ${catColor?.text || "text-plomo"}`}>
+              {annotation.category}
+            </span>
+          )}
+          {sevLabel && (
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${sevLabel.color}`}>
+              {sevLabel.label}
+            </span>
+          )}
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+            annotation.source === "languagetool" ? "bg-blue-900/30 text-blue-400" : "bg-purple-900/30 text-purple-400"
+          }`}>
+            {annotation.source === "languagetool" ? "LT" : "LLM"}
+          </span>
+          {annotation.confidence != null && (
+            <span className={`text-[10px] font-medium ml-auto ${
+              annotation.confidence >= 0.8 ? "text-krypton" : annotation.confidence >= 0.5 ? "text-yellow-400" : "text-red-400"
+            }`}>
+              {Math.round(annotation.confidence * 100)}%
+            </span>
+          )}
+        </div>
+
+        {/* Use shared CorrectionActionPanel for all actions */}
+        {firstPatch && (
+          <CorrectionActionPanel
+            docId={docId}
+            patch={firstPatch}
+            isReviewMode={isReviewMode}
+            onActionComplete={onRefresh}
+            onPatchUpdated={onPatchUpdated}
+            onTextChanged={onTextChanged}
+            compact={false}
+          />
+        )}
+
+        {/* Fallback: show annotation text if no patch matched */}
+        {!firstPatch && (
+          <>
+            <div>
+              <span className="text-[10px] text-red-400 font-semibold uppercase">Original</span>
+              <div className="bg-red-900/10 border border-red-400/20 rounded-lg p-2.5 mt-1">
+                <p className="text-xs text-red-300/80 leading-relaxed">{annotation.original_snippet}</p>
+              </div>
+            </div>
+            <div>
+              <span className="text-[10px] text-krypton font-semibold uppercase">Corregido</span>
+              <div className="bg-krypton/5 border border-krypton/20 rounded-lg p-2.5 mt-1">
+                <p className="text-xs text-krypton/80 leading-relaxed">{annotation.corrected_snippet}</p>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

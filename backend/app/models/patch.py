@@ -40,7 +40,7 @@ class Patch(Base):
     )
     review_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="auto_accepted",
-        comment="auto_accepted, pending, accepted, rejected, manual_review"
+        comment="auto_accepted, pending, accepted, rejected, manual_review, gate_rejected, bulk_finalized"
     )
     applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
@@ -87,6 +87,38 @@ class Patch(Base):
     review_reason: Mapped[str | None] = mapped_column(
         Text, nullable=True,
         comment="Razón del review_status (gates fallidos)"
+    )
+    # Fase 1 MVP2-FIX: Auditoría de revisión humana
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="Cuándo se revisó (aceptó/rechazó) este patch"
+    )
+    reviewer_note: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Nota del revisor humano"
+    )
+    decision_source: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="system",
+        server_default="system",
+        comment="system | human | bulk_finalize | manual_edit | ai_recorrection"
+    )
+    # Edición manual del texto corregido
+    edited_text: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Texto editado manualmente por el usuario (reemplaza corrected_text en render)"
+    )
+    edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="Cuándo se editó manualmente"
+    )
+    # Recorrección IA
+    recorrection_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0",
+        comment="Veces que se ha recorregido este patch con IA"
+    )
+    recorrection_note: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Último feedback del usuario para recorrección IA"
     )
 
     created_at: Mapped[datetime] = mapped_column(

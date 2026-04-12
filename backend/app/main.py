@@ -140,6 +140,21 @@ async def lifespan(app: FastAPI):
             await conn.execute(text(sql))
         logger.info("Timing tracking: columnas en documents verificadas/creadas")
 
+    # HITL redesign: nuevas columnas en patches y documents
+    async with engine.begin() as conn:
+        hitl_migrations = [
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS edited_text TEXT",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS recorrection_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS recorrection_note TEXT",
+            "ALTER TABLE patches ALTER COLUMN decision_source TYPE VARCHAR(30)",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS render_version INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE documents ALTER COLUMN status TYPE VARCHAR(30)",
+        ]
+        for sql in hitl_migrations:
+            await conn.execute(text(sql))
+        logger.info("HITL: columnas de edición manual, recorrección y render_version verificadas/creadas")
+
     # Inicializar bucket de MinIO
     from app.utils.minio_client import ensure_bucket
     await ensure_bucket()

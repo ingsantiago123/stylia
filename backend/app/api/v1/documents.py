@@ -29,7 +29,12 @@ from app.schemas.document import (
     CorrectionBatchStatus,
 )
 from app.schemas.page import PageListItem
-from app.schemas.patch import PatchDetail, PatchListItem
+from app.schemas.patch import (
+    PatchDetail, PatchListItem,
+    PatchReviewAction, BulkPatchReviewAction,
+    FinalizeRequest, ReviewSummary,
+    ManualEditRequest, RecorrectionRequest,
+)
 from app.schemas.analysis import AnalysisResult, SectionSummaryItem, TermRegistryItem, InferredProfile
 from app.models.section_summary import SectionSummary
 from app.models.term_registry import TermRegistry
@@ -39,7 +44,7 @@ from app.schemas.style_profile import (
 )
 from app.services.ingestion import ingest_document
 from app.services.context_accumulator import ContextualCorrectionService, generate_sample_document_flow
-from app.workers.tasks_pipeline import process_document_pipeline
+from app.workers.tasks_pipeline import process_document_pipeline, render_approved_patches, recorrect_single_patch, rerender_candidate_preview
 from app.utils import minio_client
 from app.data.profiles import get_preset, list_presets_ui, PRESETS
 
@@ -405,16 +410,25 @@ async def list_pages(
 @router.get("/documents/{doc_id}/corrections", response_model=list[PatchListItem])
 async def list_corrections(
     doc_id: UUID,
+    review_status: str | None = None,
+    page_no: int | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Lista todas las correcciones de un documento."""
-    result = await db.execute(
+    """
+    Lista correcciones de un documento con filtros opcionales.
+    """
+    query = (
         select(Patch, Block.block_no)
         .join(Block)
         .join(Page)
         .where(Page.doc_id == doc_id)
-        .order_by(Page.page_no, Block.block_no)
     )
+    if review_status:
+        query = query.where(Patch.review_status == review_status)
+    if page_no is not None:
+        query = query.where(Page.page_no == page_no)
+    query = query.order_by(Page.page_no, Block.block_no)
+    result = await db.execute(query)
     rows = result.all()
 
     # Obtener costos por paragraph_index para vincular a cada patch
@@ -452,9 +466,463 @@ async def list_corrections(
             route_taken=patch.route_taken,
             gate_results=patch.gate_results,
             review_reason=patch.review_reason,
+            reviewed_at=patch.reviewed_at,
+            reviewer_note=patch.reviewer_note,
+            decision_source=patch.decision_source,
+            edited_text=patch.edited_text if hasattr(patch, 'edited_text') else None,
+            edited_at=patch.edited_at if hasattr(patch, 'edited_at') else None,
+            recorrection_count=patch.recorrection_count if hasattr(patch, 'recorrection_count') else 0,
         ))
 
     return items
+
+
+# =============================================
+# REVISIÓN HUMANA (Human-in-the-Loop)
+# =============================================
+
+@router.get("/documents/{doc_id}/review-summary", response_model=ReviewSummary)
+async def get_review_summary(
+    doc_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Resumen del estado de revisión de correcciones de un documento."""
+    doc = await _get_doc_or_404(db, doc_id)
+
+    # Conteo por review_status
+    result = await db.execute(
+        select(Patch.review_status, func.count(Patch.id))
+        .join(Block)
+        .join(Page)
+        .where(Page.doc_id == doc_id)
+        .group_by(Patch.review_status)
+    )
+    counts = {status: count for status, count in result.all()}
+
+    total = sum(counts.values())
+    pending = counts.get("pending", 0)
+    manual_review = counts.get("manual_review", 0)
+
+    # Desglose por severidad
+    sev_result = await db.execute(
+        select(Patch.severity, func.count(Patch.id))
+        .join(Block).join(Page)
+        .where(Page.doc_id == doc_id, Patch.severity.isnot(None))
+        .group_by(Patch.severity)
+    )
+    by_severity = {sev: cnt for sev, cnt in sev_result.all()}
+
+    # Desglose por página (pendientes y manual_review por página)
+    page_result = await db.execute(
+        select(Page.page_no, Patch.review_status, func.count(Patch.id))
+        .select_from(Patch).join(Block).join(Page)
+        .where(Page.doc_id == doc_id)
+        .group_by(Page.page_no, Patch.review_status)
+    )
+    by_page: dict[int, dict[str, int]] = {}
+    for page_no, status, cnt in page_result.all():
+        by_page.setdefault(page_no, {})[status] = cnt
+
+    return ReviewSummary(
+        total_patches=total,
+        auto_accepted=counts.get("auto_accepted", 0),
+        pending=pending,
+        accepted=counts.get("accepted", 0),
+        rejected=counts.get("rejected", 0),
+        manual_review=manual_review,
+        gate_rejected=counts.get("gate_rejected", 0),
+        bulk_finalized=counts.get("bulk_finalized", 0),
+        can_finalize_strict=(pending == 0 and manual_review == 0),
+        can_finalize_quick=(total > 0),
+        render_version=doc.render_version if hasattr(doc, 'render_version') else 1,
+        by_severity=by_severity,
+        by_page=by_page,
+    )
+
+
+@router.get("/documents/{doc_id}/corrections/{patch_id}", response_model=PatchListItem)
+async def get_single_correction(
+    doc_id: UUID,
+    patch_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Obtiene un patch individual (para polling post-recorrección)."""
+    result = await db.execute(
+        select(Patch, Block.block_no)
+        .join(Block, Patch.block_id == Block.id)
+        .join(Page, Block.page_id == Page.id)
+        .where(Page.doc_id == doc_id, Patch.id == patch_id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(404, "Corrección no encontrada")
+    patch, block_no = row
+
+    # Costo
+    patch_cost = None
+    if patch.paragraph_index is not None:
+        cost_result = await db.execute(
+            select(LlmUsage.cost_usd)
+            .where(LlmUsage.doc_id == doc_id, LlmUsage.paragraph_index == patch.paragraph_index)
+        )
+        cost_row = cost_result.scalar()
+        patch_cost = cost_row
+
+    return PatchListItem(
+        id=patch.id,
+        block_id=patch.block_id,
+        block_no=block_no,
+        version=patch.version,
+        source=patch.source,
+        original_text=patch.original_text,
+        corrected_text=patch.corrected_text,
+        review_status=patch.review_status,
+        overflow_flag=patch.overflow_flag,
+        created_at=patch.created_at,
+        category=patch.category,
+        severity=patch.severity,
+        explanation=patch.explanation,
+        confidence=patch.confidence,
+        rewrite_ratio=patch.rewrite_ratio,
+        pass_number=patch.pass_number,
+        model_used=patch.model_used,
+        cost_usd=patch_cost,
+        route_taken=patch.route_taken,
+        gate_results=patch.gate_results,
+        review_reason=patch.review_reason,
+        reviewed_at=patch.reviewed_at,
+        reviewer_note=patch.reviewer_note,
+        decision_source=patch.decision_source,
+        edited_text=patch.edited_text if hasattr(patch, 'edited_text') else None,
+        edited_at=patch.edited_at if hasattr(patch, 'edited_at') else None,
+        recorrection_count=patch.recorrection_count if hasattr(patch, 'recorrection_count') else 0,
+    )
+
+
+@router.patch("/documents/{doc_id}/corrections/{patch_id}")
+async def review_correction(
+    doc_id: UUID,
+    patch_id: UUID,
+    body: PatchReviewAction,
+    db: AsyncSession = Depends(get_db),
+):
+    """Acepta o rechaza una corrección individual."""
+    doc = await _get_doc_or_404(db, doc_id)
+
+    if doc.status not in ("pending_review", "candidate_ready", "completed"):
+        raise HTTPException(
+            400,
+            f"Solo se pueden revisar correcciones en status 'candidate_ready', 'pending_review' o 'completed'. "
+            f"Status actual: {doc.status}"
+        )
+
+    # Verificar que el patch pertenece al documento
+    result = await db.execute(
+        select(Patch)
+        .join(Block)
+        .join(Page)
+        .where(Page.doc_id == doc_id, Patch.id == patch_id)
+    )
+    patch = result.scalar_one_or_none()
+    if not patch:
+        raise HTTPException(404, "Corrección no encontrada en este documento")
+
+    from datetime import datetime, timezone
+    patch.review_status = body.action
+    patch.reviewed_at = datetime.now(timezone.utc)
+    patch.reviewer_note = body.reviewer_note
+    patch.decision_source = "human"
+
+    await db.commit()
+    logger.info(f"Patch {patch_id} → {body.action} (doc={doc_id})")
+    return {"message": f"Corrección {body.action}", "patch_id": str(patch_id)}
+
+
+@router.post("/documents/{doc_id}/corrections/bulk-action")
+async def bulk_review_corrections(
+    doc_id: UUID,
+    body: BulkPatchReviewAction,
+    db: AsyncSession = Depends(get_db),
+):
+    """Acepta o rechaza múltiples correcciones a la vez."""
+    doc = await _get_doc_or_404(db, doc_id)
+
+    if doc.status not in ("pending_review", "candidate_ready", "completed"):
+        raise HTTPException(
+            400,
+            f"Solo se pueden revisar correcciones en status 'candidate_ready', 'pending_review' o 'completed'. "
+            f"Status actual: {doc.status}"
+        )
+
+    if not body.patch_ids:
+        raise HTTPException(400, "Lista de patch_ids vacía")
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    # Verificar que todos los patches pertenecen al documento
+    result = await db.execute(
+        select(Patch)
+        .join(Block)
+        .join(Page)
+        .where(Page.doc_id == doc_id, Patch.id.in_(body.patch_ids))
+    )
+    patches = result.scalars().all()
+
+    if len(patches) != len(body.patch_ids):
+        found_ids = {str(p.id) for p in patches}
+        missing = [str(pid) for pid in body.patch_ids if str(pid) not in found_ids]
+        raise HTTPException(404, f"Correcciones no encontradas: {missing[:5]}")
+
+    for patch in patches:
+        patch.review_status = body.action
+        patch.reviewed_at = now
+        patch.reviewer_note = body.reviewer_note
+        patch.decision_source = "human"
+
+    await db.commit()
+    logger.info(f"Bulk {body.action}: {len(patches)} patches (doc={doc_id})")
+    return {
+        "message": f"{len(patches)} correcciones {body.action}",
+        "count": len(patches),
+    }
+
+
+@router.post("/documents/{doc_id}/finalize")
+async def finalize_document(
+    doc_id: UUID,
+    body: FinalizeRequest = FinalizeRequest(),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Finaliza la revisión y lanza el renderizado.
+    mode=quick: pendientes → bulk_finalized (se aplican). No bloquea.
+    mode=strict: requiere 0 pendientes y 0 manual_review.
+    """
+    doc = await _get_doc_or_404(db, doc_id)
+
+    if doc.status not in ("pending_review", "candidate_ready"):
+        raise HTTPException(
+            400,
+            f"Solo se puede finalizar un documento en status 'candidate_ready' o 'pending_review'. "
+            f"Status actual: {doc.status}"
+        )
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    if body.mode == "strict":
+        # Verificar que no haya pendientes ni manual_review
+        result = await db.execute(
+            select(func.count(Patch.id))
+            .join(Block).join(Page)
+            .where(
+                Page.doc_id == doc_id,
+                Patch.review_status.in_(("pending", "manual_review")),
+            )
+        )
+        unresolved = result.scalar() or 0
+        if unresolved > 0:
+            raise HTTPException(
+                400,
+                f"Modo estricto: quedan {unresolved} correcciones sin resolver (pendientes o en revisión manual). "
+                "Resuélvelas antes de finalizar o usa modo rápido."
+            )
+    else:
+        # Modo quick: convertir pendientes y manual_review en bulk_finalized
+        result = await db.execute(
+            select(Patch)
+            .join(Block).join(Page)
+            .where(
+                Page.doc_id == doc_id,
+                Patch.review_status.in_(("pending", "manual_review")),
+            )
+        )
+        pending_patches = result.scalars().all()
+        for patch in pending_patches:
+            patch.review_status = "bulk_finalized"
+            patch.reviewed_at = now
+            patch.decision_source = "bulk_finalize"
+        if pending_patches:
+            await db.commit()
+            logger.info(f"Finalize quick: {len(pending_patches)} patches → bulk_finalized (doc={doc_id})")
+
+    # Lanzar tarea Celery de renderizado
+    task = render_approved_patches.delay(str(doc.id), body.apply_mode)
+    logger.info(f"Renderizado lanzado: doc={doc.id}, mode={body.mode}, apply={body.apply_mode}, task={task.id}")
+
+    return {
+        "message": "Renderizado iniciado",
+        "task_id": task.id,
+        "apply_mode": body.apply_mode,
+        "finalize_mode": body.mode,
+    }
+
+
+@router.post("/documents/{doc_id}/reopen")
+async def reopen_document(
+    doc_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Reabre un documento completado para continuar revisando correcciones.
+    Vuelve a candidate_ready para permitir edición, recorrección y re-renderizado.
+    """
+    doc = await _get_doc_or_404(db, doc_id)
+
+    if doc.status != "completed":
+        raise HTTPException(
+            400,
+            f"Solo se pueden reabrir documentos completados. Status actual: {doc.status}"
+        )
+
+    doc.status = "candidate_ready"
+    doc.processing_completed_at = None
+    await db.commit()
+
+    logger.info(f"Documento {doc_id} reabierto → candidate_ready (render_version={doc.render_version})")
+    return {
+        "message": "Documento reabierto para revisión",
+        "status": "candidate_ready",
+        "render_version": doc.render_version if hasattr(doc, 'render_version') else 1,
+    }
+
+
+@router.post("/documents/{doc_id}/rerender-preview")
+async def rerender_preview(
+    doc_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Re-renderiza el preview candidato usando el estado actual de patches (con edited_text).
+    Lanza una tarea Celery en background. Retorna task_id para polling de estado.
+    """
+    doc = await _get_doc_or_404(db, doc_id)
+    if doc.status not in ("candidate_ready", "pending_review", "completed"):
+        raise HTTPException(
+            400,
+            f"No se puede re-renderizar en status '{doc.status}'. "
+            "Requiere candidate_ready, pending_review o completed."
+        )
+    task = rerender_candidate_preview.delay(str(doc_id))
+    logger.info(f"Re-render preview iniciado: doc={doc_id}, task={task.id}")
+    return {"task_id": task.id, "message": "Re-render de preview iniciado"}
+
+
+@router.get("/tasks/{task_id}/status")
+async def get_task_status(task_id: str):
+    """Verifica el estado de un task Celery (para polling de re-render)."""
+    from app.workers.celery_app import celery_app as _celery_app
+    result = _celery_app.AsyncResult(task_id)
+    return {
+        "task_id": task_id,
+        "status": result.state,   # PENDING | STARTED | SUCCESS | FAILURE | RETRY
+        "ready": result.ready(),
+    }
+
+
+@router.patch("/documents/{doc_id}/corrections/{patch_id}/edit")
+async def manual_edit_correction(
+    doc_id: UUID,
+    patch_id: UUID,
+    body: ManualEditRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Edita manualmente el texto corregido de un patch.
+    El edited_text reemplaza corrected_text en el próximo render.
+    """
+    doc = await _get_doc_or_404(db, doc_id)
+
+    if doc.status not in ("pending_review", "candidate_ready", "completed"):
+        raise HTTPException(400, f"No se puede editar en status {doc.status}")
+
+    result = await db.execute(
+        select(Patch).join(Block).join(Page)
+        .where(Page.doc_id == doc_id, Patch.id == patch_id)
+    )
+    patch = result.scalar_one_or_none()
+    if not patch:
+        raise HTTPException(404, "Corrección no encontrada en este documento")
+
+    # Validar longitud vs original (máx 200% del original)
+    if len(body.edited_text) > len(patch.original_text) * 2 + 100:
+        raise HTTPException(400, "Texto editado excesivamente largo respecto al original")
+
+    from datetime import datetime, timezone
+    patch.edited_text = body.edited_text
+    patch.edited_at = datetime.now(timezone.utc)
+    patch.review_status = "accepted"
+    patch.decision_source = "manual_edit"
+    patch.reviewer_note = body.reviewer_note
+
+    await db.commit()
+    logger.info(f"Patch {patch_id} editado manualmente (doc={doc_id})")
+    return {"message": "Corrección editada", "patch_id": str(patch_id)}
+
+
+@router.post("/documents/{doc_id}/corrections/{patch_id}/recorrect")
+async def recorrect_patch(
+    doc_id: UUID,
+    patch_id: UUID,
+    body: RecorrectionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Solicita recorrección IA de un patch individual con feedback del usuario.
+    Límite: 3 recorrecciones por patch, 20 por documento por hora.
+    """
+    doc = await _get_doc_or_404(db, doc_id)
+
+    if doc.status not in ("pending_review", "candidate_ready", "completed"):
+        raise HTTPException(400, f"No se puede recorregir en status {doc.status}")
+
+    result = await db.execute(
+        select(Patch).join(Block).join(Page)
+        .where(Page.doc_id == doc_id, Patch.id == patch_id)
+    )
+    patch = result.scalar_one_or_none()
+    if not patch:
+        raise HTTPException(404, "Corrección no encontrada en este documento")
+
+    # Anti-abuso: límite por patch
+    MAX_RECORRECTIONS_PER_PATCH = 3
+    current_count = patch.recorrection_count if hasattr(patch, 'recorrection_count') else 0
+    if current_count >= MAX_RECORRECTIONS_PER_PATCH:
+        raise HTTPException(
+            429,
+            f"Límite de recorrecciones alcanzado ({MAX_RECORRECTIONS_PER_PATCH} por corrección)"
+        )
+
+    # Anti-abuso: límite por documento por hora
+    from datetime import datetime, timezone, timedelta
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    doc_recorrections = await db.execute(
+        select(func.sum(Patch.recorrection_count))
+        .join(Block).join(Page)
+        .where(Page.doc_id == doc_id)
+    )
+    total_doc_recorrections = doc_recorrections.scalar() or 0
+    MAX_RECORRECTIONS_PER_DOC_HOUR = 20
+    if total_doc_recorrections >= MAX_RECORRECTIONS_PER_DOC_HOUR:
+        raise HTTPException(
+            429,
+            f"Límite de recorrecciones por documento alcanzado ({MAX_RECORRECTIONS_PER_DOC_HOUR}/hora)"
+        )
+
+    # Lanzar recorrección como tarea Celery
+    from app.workers.tasks_pipeline import recorrect_single_patch
+    task = recorrect_single_patch.delay(
+        str(doc.id), str(patch_id), body.feedback
+    )
+
+    logger.info(f"Recorrección solicitada: patch={patch_id}, doc={doc_id}, task={task.id}")
+    return {
+        "message": "Recorrección iniciada",
+        "task_id": task.id,
+        "patch_id": str(patch_id),
+        "recorrection_count": current_count + 1,
+    }
 
 
 # =============================================
@@ -487,12 +955,17 @@ async def get_page_preview(
 async def get_corrected_page_preview(
     doc_id: UUID,
     page_no: int,
+    mode: str = "final",
     db: AsyncSession = Depends(get_db),
 ):
-    """Preview PNG de una página corregida."""
+    """Preview PNG de una página corregida. mode=candidate para vista candidata."""
     doc = await _get_doc_or_404(db, doc_id)
 
-    preview_key = f"pages/{doc_id}/preview_corrected/{page_no}.png"
+    if mode == "candidate":
+        preview_key = f"pages/{doc_id}/preview_candidate/{page_no}.png"
+    else:
+        preview_key = f"pages/{doc_id}/preview_corrected/{page_no}.png"
+
     if not minio_client.file_exists(preview_key):
         raise HTTPException(404, "Preview corregido no disponible")
 
@@ -508,12 +981,17 @@ async def get_corrected_page_preview(
 async def get_page_annotations(
     doc_id: UUID,
     page_no: int,
+    mode: str = "final",
     db: AsyncSession = Depends(get_db),
 ):
-    """Metadata de anotaciones para overlay hover en el frontend."""
+    """Metadata de anotaciones para overlay hover. mode=candidate para vista candidata."""
     await _get_doc_or_404(db, doc_id)
 
-    annot_key = f"pages/{doc_id}/annotations/{page_no}.json"
+    if mode == "candidate":
+        annot_key = f"pages/{doc_id}/annotations_candidate/{page_no}.json"
+    else:
+        annot_key = f"pages/{doc_id}/annotations/{page_no}.json"
+
     if not minio_client.file_exists(annot_key):
         return {"annotations": []}
 
@@ -739,19 +1217,27 @@ async def _get_doc_or_404(db: AsyncSession, doc_id: UUID) -> Document:
 
 # Pesos de cada etapa en el progreso global (suman 1.0)
 _STAGE_WEIGHTS: dict[str, tuple[float, float]] = {
-    "converting":  (0.00, 0.05),
-    "extracting":  (0.05, 0.20),
-    "analyzing":   (0.20, 0.35),
-    "correcting":  (0.35, 0.85),
-    "rendering":   (0.85, 0.99),
+    "converting":           (0.00, 0.05),
+    "extracting":           (0.05, 0.20),
+    "analyzing":            (0.20, 0.35),
+    "correcting":           (0.35, 0.75),
+    "candidate_rendering":  (0.75, 0.85),
+    "candidate_ready":      (0.85, 0.85),  # Pausa — revisión visual compare-first
+    "pending_review":       (0.85, 0.85),  # Legacy — backward compat
+    "finalizing":           (0.85, 0.99),
+    "rendering":            (0.85, 0.99),  # Legacy — backward compat
 }
 
 _STAGE_LABELS: dict[str, str] = {
-    "converting":  "Conversión",
-    "extracting":  "Extracción",
-    "analyzing":   "Análisis",
-    "correcting":  "Corrección",
-    "rendering":   "Renderizado",
+    "converting":           "Conversión",
+    "extracting":           "Extracción",
+    "analyzing":            "Análisis",
+    "correcting":           "Corrección",
+    "candidate_rendering":  "Renderizando candidato",
+    "candidate_ready":      "Listo para revisión",
+    "pending_review":       "Revisión pendiente",
+    "finalizing":           "Finalizando",
+    "rendering":            "Renderizado",
 }
 
 _HEARTBEAT_STALL_SECONDS = 120  # 2 minutos sin heartbeat → stalled
@@ -761,6 +1247,8 @@ def _calculate_progress(doc: Document) -> float:
     """Calcula el progreso real del documento (0.0 a 1.0) usando campos granulares."""
     if doc.status == "completed":
         return 1.0
+    if doc.status in ("pending_review", "candidate_ready"):
+        return 0.85  # Waiting for human review
     if doc.status in ("uploaded", "failed"):
         return 0.0
 
@@ -784,7 +1272,7 @@ def _build_progress_detail(doc: Document) -> ProgressDetail | None:
     """Construye el detalle de progreso con ETA y detección de stall."""
     from datetime import datetime, timezone
 
-    if doc.status in ("uploaded", "completed"):
+    if doc.status in ("uploaded", "completed", "pending_review", "candidate_ready"):
         return None
 
     is_stalled = False

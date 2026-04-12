@@ -61,8 +61,29 @@ const STAGES: Stage[] = [
     ),
   },
   {
-    key: "rendering",
-    label: "Renderizado",
+    key: "candidate_rendering",
+    label: "Candidato",
+    description: "Preview candidato",
+    icon: (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+      </svg>
+    ),
+  },
+  {
+    key: "candidate_ready",
+    label: "Revision",
+    description: "Comparar y aprobar",
+    icon: (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+      </svg>
+    ),
+  },
+  {
+    key: "finalizing",
+    label: "Finalizando",
     description: "Documento final",
     icon: (
       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -99,8 +120,15 @@ interface PipelineFlowProps {
   correctionBatches?: CorrectionBatchStatus[];
 }
 
+// Map legacy statuses to new pipeline stages
+const STATUS_ALIAS: Record<string, string> = {
+  pending_review: "candidate_ready",
+  rendering: "finalizing",
+};
+
 export function PipelineFlow({ currentStatus, progress, errorMessage, progressDetail, correctionBatches }: PipelineFlowProps) {
-  const currentIndex = STAGE_ORDER.indexOf(currentStatus);
+  const mappedStatus = STATUS_ALIAS[currentStatus] || currentStatus;
+  const currentIndex = STAGE_ORDER.indexOf(mappedStatus);
   const isFailed = currentStatus === "failed";
   const isStalled = progressDetail?.is_stalled ?? false;
   const progressPercent = Math.round(progress * 100);
@@ -116,7 +144,7 @@ export function PipelineFlow({ currentStatus, progress, errorMessage, progressDe
       <div className="flex items-center justify-between mb-5">
         <div className="flex items-center gap-2.5">
           <h3 className="text-xs font-semibold text-bruma uppercase tracking-wider">Pipeline</h3>
-          {!isFailed && currentStatus !== "completed" && currentStatus !== "uploaded" && !isStalled && (
+          {!isFailed && currentStatus !== "completed" && currentStatus !== "uploaded" && mappedStatus !== "candidate_ready" && !isStalled && (
             <span className="inline-flex items-center gap-1.5 text-[10px] text-krypton bg-krypton/8 px-2 py-0.5 rounded-md">
               <span className="w-1 h-1 rounded-full bg-krypton animate-pulse-slow" />
               En proceso

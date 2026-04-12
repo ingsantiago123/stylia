@@ -28,7 +28,7 @@ export default function HomePage() {
     fetchDocuments();
     const getInterval = () => {
       const anyProcessing = documents.some(
-        (d) => !["completed", "failed", "uploaded"].includes(d.status)
+        (d) => !["completed", "failed", "uploaded", "pending_review", "candidate_ready"].includes(d.status)
       );
       return anyProcessing ? 3000 : 15000;
     };
@@ -52,7 +52,7 @@ export default function HomePage() {
   const handleCancelProfile = () => { setPendingDoc(null); fetchDocuments(); };
 
   const processingCount = documents.filter(
-    (d) => !["completed", "failed", "uploaded"].includes(d.status)
+    (d) => !["completed", "failed", "uploaded", "pending_review", "candidate_ready"].includes(d.status)
   ).length;
   const completedCount = documents.filter((d) => d.status === "completed").length;
   const failedCount = documents.filter((d) => d.status === "failed").length;

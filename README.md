@@ -56,16 +56,50 @@ DOCX
   -> completed | failed
 ```
 
-Estados de documento usados en backend:
+Estados de documento (canónicos):
 
-- uploaded
-- converting
-- extracting
-- analyzing
-- correcting
-- rendering
-- completed
-- failed
+- `uploaded` — documento subido, esperando procesamiento
+- `converting` — Etapa A: DOCX → PDF
+- `extracting` — Etapa B: extracción de layout y texto
+- `analyzing` — Etapa C: análisis editorial (secciones, glosario)
+- `correcting` — Etapa D: corrección (LanguageTool + LLM + quality gates)
+- `candidate_rendering` — Etapa E: generando candidato DOCX/PDF
+- `candidate_ready` — candidato listo para revisión humana
+- `finalizing` — finalizando después de revisión humana
+- `completed` — completado y listo para descarga
+- `failed` — error durante procesamiento
+
+Legacy (sin uso activo):
+- `pending_review` — compatibilidad anterior
+- `rendering` — compatibilidad anterior
+
+## 3.5) Flujo de revisión humana (HITL) - MVP2
+
+Después que el pipeline completa las 5 etapas (A-B-C-D-E), el documento entra en estado `candidate_ready`:
+
+```text
+Pipeline completo (A→B→C→D→E)
+  ↓
+candidate_ready (documento candidato generado)
+  ↓
+Usuario revisa en frontend:
+  - Tab "Análisis": secciones, glosario, tipos de párrafo
+  - Tab "Correcciones": lista de patches con diff, categoría, severidad, ruta, confianza
+  - Tab "Comparar": vista side-by-side con anotaciones
+  - Aprueba/rechaza/edita patches individuales (MVP2 Lotes 4-5)
+  ↓
+POST /documents/{id}/finalize
+  ↓
+finalizing (rerender final si hay cambios, generar estadísticas)
+  ↓
+completed (listo para descarga)
+```
+
+Características HITL (MVP2 Lotes 4-5):
+- **Quality gates** pre-HITL: 5 gates (not_empty, expansion_ratio, protected_terms, rewrite_ratio, language_preserved, inflesz)
+- **Patches con anotaciones**: category, severity, explanation, confidence %, route_taken (SKIP|CHEAP|EDITORIAL)
+- **Acciones en HITL**: approve/reject/edit patch individual
+- **Recorrección manual**: API para editar corrección y validar manualmente
 
 ## 4) Corrección: rutas y validaciones
 
@@ -128,12 +162,21 @@ Base: /api/v1
 
 ### Análisis, flujo y costos
 
-- GET /documents/{doc_id}/analysis
-- GET /documents/{doc_id}/correction-flow
-- GET /documents/{doc_id}/correction-batches
-- GET /costs/summary
-- GET /costs/documents
-- GET /documents/{doc_id}/costs
+- GET /documents/{doc_id}/analysis — resultado análisis editorial (secciones, glosario, clasificación párrafos) (MVP2 Lote 3)
+- GET /documents/{doc_id}/correction-flow — flujo de correcciones con contexto jerárquico
+- GET /documents/{doc_id}/correction-batches — lotes de corrección paralela (si aplica) (MVP2 Lote 4+)
+- GET /costs/summary — resumen de costos (total LLM, por modelo, por documento)
+- GET /costs/documents — costos agregados por documento
+- GET /documents/{doc_id}/costs — desglose de costos por párrafo/llamada LLM
+
+### Revisión humana (HITL) - MVP2 Lotes 4-5
+
+- GET /documents/{doc_id}/review-summary — resumen de correcciones pendientes revisión (gate_rejected, manual_review)
+- POST /documents/{doc_id}/corrections/{patch_id}/review — acción sobre un patch: approve/reject/edit
+- POST /documents/{doc_id}/finalize — finaliza documento después de revisión (status=finalizing → completed)
+- POST /documents/{doc_id}/reopen — reabre documento en revisión (candidate_ready → correcting)
+- POST /documents/{doc_id}/recorrect — relanza corrección para patches editados manualmente
+- POST /documents/{doc_id}/rerender — regenera outputs DOCX/PDF desde patches actualizados
 
 ### Salud del servicio
 

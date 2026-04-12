@@ -108,6 +108,14 @@ export interface PatchListItem {
     critical: boolean;
   }> | null;
   review_reason: string | null;
+  // Auditoría de revisión humana
+  reviewed_at: string | null;
+  reviewer_note: string | null;
+  decision_source: string;
+  // Edición manual y recorrección
+  edited_text: string | null;
+  edited_at: string | null;
+  recorrection_count: number;
 }
 
 // =============================================
@@ -237,7 +245,12 @@ export function getCorrectedPagePreviewUrl(docId: string, pageNo: number): strin
   return `${API_BASE}/documents/${docId}/pages/${pageNo}/preview-corrected`;
 }
 
+export function getCandidatePagePreviewUrl(docId: string, pageNo: number): string {
+  return `${API_BASE}/documents/${docId}/pages/${pageNo}/preview-corrected?mode=candidate`;
+}
+
 export interface PageAnnotation {
+  patch_ids: string[] | null;
   x_pct: number;
   y_pct: number;
   w_pct: number;
@@ -247,12 +260,17 @@ export interface PageAnnotation {
   explanation: string | null;
   confidence: number | null;
   source: string;
+  review_status: string;
   original_snippet: string;
   corrected_snippet: string;
 }
 
-export async function getPageAnnotations(docId: string, pageNo: number): Promise<PageAnnotation[]> {
-  const res = await fetch(`${API_BASE}/documents/${docId}/pages/${pageNo}/annotations`);
+export async function getPageAnnotations(
+  docId: string,
+  pageNo: number,
+  mode: "candidate" | "final" = "final",
+): Promise<PageAnnotation[]> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/pages/${pageNo}/annotations?mode=${mode}`);
   if (!res.ok) return [];
   const data = await res.json();
   return data.annotations || [];
@@ -378,6 +396,168 @@ export async function getDocumentCosts(docId: string): Promise<ParagraphCostItem
 export async function processDocument(docId: string): Promise<{ message: string; task_id: string }> {
   const res = await fetch(`${API_BASE}/documents/${docId}/process`, {
     method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+  return res.json();
+}
+
+// =============================================
+// Revisión humana (Human-in-the-Loop)
+// =============================================
+
+export interface ReviewSummary {
+  total_patches: number;
+  auto_accepted: number;
+  pending: number;
+  accepted: number;
+  rejected: number;
+  manual_review: number;
+  gate_rejected: number;
+  bulk_finalized: number;
+  can_finalize_strict: boolean;
+  can_finalize_quick: boolean;
+  render_version: number;
+  by_severity: Record<string, number>;
+  by_page: Record<number, Record<string, number>>;
+}
+
+export async function getReviewSummary(docId: string): Promise<ReviewSummary> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/review-summary`);
+  if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}
+
+export async function reviewCorrection(
+  docId: string,
+  patchId: string,
+  action: "accepted" | "rejected",
+  reviewerNote?: string
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/corrections/${patchId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, reviewer_note: reviewerNote || null }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+}
+
+export async function bulkReviewCorrections(
+  docId: string,
+  patchIds: string[],
+  action: "accepted" | "rejected",
+  reviewerNote?: string
+): Promise<{ count: number }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/corrections/bulk-action`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      patch_ids: patchIds,
+      action,
+      reviewer_note: reviewerNote || null,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function finalizeDocument(
+  docId: string,
+  mode: "quick" | "strict" = "quick",
+  applyMode: "accepted_only" | "accepted_and_auto" = "accepted_and_auto"
+): Promise<{ message: string; task_id: string; finalize_mode: string }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/finalize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode, apply_mode: applyMode }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function reopenDocument(
+  docId: string
+): Promise<{ message: string; status: string; render_version: number }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/reopen`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getSingleCorrection(
+  docId: string,
+  patchId: string
+): Promise<PatchListItem> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/corrections/${patchId}`);
+  if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}
+
+export async function manualEditCorrection(
+  docId: string,
+  patchId: string,
+  editedText: string,
+  reviewerNote?: string
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/corrections/${patchId}/edit`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      edited_text: editedText,
+      reviewer_note: reviewerNote || null,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+}
+
+export async function rerenderCandidatePreview(
+  docId: string
+): Promise<{ task_id: string; message: string }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/rerender-preview`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getTaskStatus(
+  taskId: string
+): Promise<{ task_id: string; status: string; ready: boolean }> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/status`);
+  if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}
+
+export async function recorrectPatch(
+  docId: string,
+  patchId: string,
+  feedback: string
+): Promise<{ message: string; task_id: string; recorrection_count: number }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/corrections/${patchId}/recorrect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ feedback }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Error desconocido" }));

@@ -29,6 +29,9 @@ celery_app.conf.update(
         "tasks_pipeline.process_document_pipeline": {"queue": "pipeline"},
         "tasks_pipeline.correct_batch_llm": {"queue": "batch"},
         "tasks_pipeline.assemble_correction_results": {"queue": "batch"},
+        "tasks_pipeline.render_approved_patches": {"queue": "pipeline"},
+        "tasks_pipeline.recorrect_single_patch": {"queue": "batch"},
+        "tasks_pipeline.rerender_candidate_preview": {"queue": "pipeline"},
     },
     task_default_queue="pipeline",
 )
