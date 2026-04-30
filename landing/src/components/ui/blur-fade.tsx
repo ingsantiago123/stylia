@@ -25,6 +25,7 @@ export function BlurFade({
   const [isVisible, setIsVisible] = useState(false);
 
   useEffect(() => {
+    const isMobile = window.matchMedia("(max-width: 768px)").matches;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -32,7 +33,9 @@ export function BlurFade({
           observer.disconnect();
         }
       },
-      { threshold: 0.1, rootMargin: "0px 0px -50px 0px" }
+      isMobile
+        ? { threshold: 0.03, rootMargin: "0px 0px 0px 0px" }
+        : { threshold: 0.1, rootMargin: "0px 0px -50px 0px" }
     );
     if (ref.current) observer.observe(ref.current);
     return () => observer.disconnect();

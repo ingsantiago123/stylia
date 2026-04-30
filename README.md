@@ -389,3 +389,8 @@ npm run dev
 ## 15) Licencia
 
 MIT
+
+## Últimos cambios
+
+- 2026-04-29: Guardados los cambios locales y subidos al repositorio remoto en GitHub.
+

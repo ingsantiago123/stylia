@@ -23,7 +23,7 @@ class Patch(Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     source: Mapped[str] = mapped_column(
-        String(20), nullable=False, comment="'languagetool', 'llm', 'manual'"
+        String(50), nullable=False, comment="'languagetool', 'llm', 'manual', 'languagetool+chatgpt+audit'"
     )
     original_text: Mapped[str] = mapped_column(Text, nullable=False)
     corrected_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -119,6 +119,34 @@ class Patch(Base):
     recorrection_note: Mapped[str | None] = mapped_column(
         Text, nullable=True,
         comment="Último feedback del usuario para recorrección IA"
+    )
+
+    # Plan v4: Doble pasada
+    corrected_pass1_text: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Texto tras Pasada 1 mecánica (antes de auditoría contextual)"
+    )
+    pass2_audit_json: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment="Resultado auditoría Pasada 2: {reverted_destructions, style_improvements, confidence, pass1_quality}"
+    )
+
+    # Sprint 3: Audit trail dual-engine
+    lt_corrections_json: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment="Correcciones LT aplicadas: [{offset, original, replacement, rule_id}]"
+    )
+    llm_change_log_json: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment="Cambios del LLM con categoría y razón: [{original_fragment, corrected_fragment, category, explanation}]"
+    )
+    reverted_lt_changes_json: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment="Correcciones LT revertidas por colisión con regiones protegidas"
+    )
+    protected_regions_snapshot: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment="Regiones protegidas detectadas en este párrafo: [{start, end, reason, text}]"
     )
 
     created_at: Mapped[datetime] = mapped_column(

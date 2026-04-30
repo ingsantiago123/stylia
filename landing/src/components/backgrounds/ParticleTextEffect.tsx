@@ -189,7 +189,8 @@ export function ParticleTextEffect({
     isRightClick: false,
   });
 
-  const pixelSteps = 6;
+  const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
+  const pixelSteps = isMobile ? 10 : 6;
   const drawAsPoints = true;
 
   const nextWord = (word: string, canvas: HTMLCanvasElement) => {
@@ -254,9 +255,9 @@ export function ParticleTextEffect({
           );
           particle.pos.x = randomPos.x;
           particle.pos.y = randomPos.y;
-          particle.maxSpeed = Math.random() * 6 + 4;
+          particle.maxSpeed = isMobile ? Math.random() * 4 + 3 : Math.random() * 6 + 4;
           particle.maxForce = particle.maxSpeed * 0.05;
-          particle.particleSize = Math.random() * 6 + 6;
+          particle.particleSize = isMobile ? Math.random() * 3 + 3 : Math.random() * 6 + 6;
           particle.colorBlendRate = Math.random() * 0.0275 + 0.0025;
           particles.push(particle);
         }
@@ -326,12 +327,12 @@ export function ParticleTextEffect({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Responsive: match parent container
+    // Responsive: match parent container exactly (no forced minimum on mobile)
     const parent = canvas.parentElement;
     const W = parent ? parent.offsetWidth : 1000;
     const H = parent ? parent.offsetHeight : 500;
-    canvas.width = Math.max(W, 400);
-    canvas.height = Math.max(H, 300);
+    canvas.width = Math.max(W, 100);
+    canvas.height = Math.max(H, 200);
 
     particlesRef.current = [];
     frameCountRef.current = 0;
@@ -368,8 +369,8 @@ export function ParticleTextEffect({
       if (!canvas || !canvas.parentElement) return;
       const nW = canvas.parentElement.offsetWidth;
       const nH = canvas.parentElement.offsetHeight;
-      canvas.width = Math.max(nW, 400);
-      canvas.height = Math.max(nH, 300);
+      canvas.width = Math.max(nW, 100);
+      canvas.height = Math.max(nH, 200);
       particlesRef.current = [];
       nextWord(words[wordIndexRef.current], canvas);
     };

@@ -1,12 +1,13 @@
 """
 Cliente OpenAI para corrección de estilo con contexto.
-Usa gpt-4o-mini para ser económico y eficiente.
+Plan v4: captura RAW de request/response para trazabilidad total.
 """
 
 import json
 import logging
 import threading
-from typing import Optional
+import time
+from typing import Optional, Callable
 
 from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -126,7 +127,7 @@ Formato de respuesta JSON requerido:
                             "content": prompt
                         }
                     ],
-                    max_tokens=self.max_tokens,
+                    max_completion_tokens=self.max_tokens,
                     temperature=self.temperature,
                     response_format={"type": "json_object"}
                 )
@@ -156,6 +157,8 @@ Formato de respuesta JSON requerido:
         user_prompt: str,
         max_length: int | None = None,
         model_override: str | None = None,
+        max_tokens_override: int | None = None,
+        on_audit_log: Callable[[dict], None] | None = None,
     ) -> tuple[dict | None, dict]:
         """
         MVP2: Corrección con prompts parametrizados.
@@ -163,6 +166,7 @@ Formato de respuesta JSON requerido:
 
         Args:
             model_override: Modelo alternativo (ej. editorial). Si None usa self.model.
+            max_tokens_override: Límite de tokens para esta llamada. Si None usa self.max_tokens.
         """
         empty_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -171,23 +175,57 @@ Formato de respuesta JSON requerido:
             return None, empty_usage
 
         model = model_override or self.model
+        max_tokens = max_tokens_override or self.max_tokens
 
+        request_payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_completion_tokens": max_tokens,
+            "temperature": self.temperature,
+        }
+
+        t0 = time.monotonic()
         try:
             with self._semaphore:
                 response = self._retry(self.client.chat.completions.create)(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
+                    **{k: v for k, v in request_payload.items()},
                     response_format={"type": "json_object"},
                 )
 
+            latency_ms = int((time.monotonic() - t0) * 1000)
             content = response.choices[0].message.content
             usage = _extract_usage(response)
             data = json.loads(content)
+
+            # Captura RAW para auditoría
+            if on_audit_log:
+                response_payload = {
+                    "id": getattr(response, "id", None),
+                    "model": getattr(response, "model", model),
+                    "choices": [
+                        {
+                            "finish_reason": c.finish_reason,
+                            "message": {"role": "assistant", "content": c.message.content},
+                        }
+                        for c in (response.choices or [])
+                    ],
+                    "usage": {
+                        "prompt_tokens": usage.get("prompt_tokens"),
+                        "completion_tokens": usage.get("completion_tokens"),
+                        "total_tokens": usage.get("total_tokens"),
+                    },
+                }
+                on_audit_log({
+                    "request_payload": request_payload,
+                    "response_payload": response_payload,
+                    "latency_ms": latency_ms,
+                    "model_used": model,
+                    **usage,
+                    "error_text": None,
+                })
 
             # Validar longitud si se especifica
             corrected = data.get("corrected_text", "")
@@ -202,7 +240,19 @@ Formato de respuesta JSON requerido:
             return data, usage
 
         except Exception as e:
+            latency_ms = int((time.monotonic() - t0) * 1000)
             logger.error(f"Error en correct_with_profile: {e}")
+            if on_audit_log:
+                on_audit_log({
+                    "request_payload": request_payload,
+                    "response_payload": None,
+                    "latency_ms": latency_ms,
+                    "model_used": model,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "error_text": str(e),
+                })
             return None, empty_usage
 
     def _simulate_correction(self, text: str) -> str:

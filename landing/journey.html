@@ -1,0 +1,1031 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>STYLIA · El viaje de tu documento</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --carbon:#0A0A0B;
+    --carbon-100:#141416;
+    --carbon-200:#1C1C1F;
+    --carbon-300:#222225;
+    --carbon-400:#2A2A2E;
+    --border:#2A2A2E;
+    --border-subtle:#1F1F23;
+    --bruma:#F5F5F7;
+    --bruma-muted:#C7C7CC;
+    --plomo:#8E8E93;
+    --plomo-light:#AEAEB2;
+    --krypton:#D4FF00;
+    --krypton-dim:rgba(212,255,0,0.08);
+    --krypton-glow:rgba(212,255,0,0.22);
+    --ok:#7BE495;
+    --warn:#FFC857;
+    --err:#FF7A7A;
+    --blue:#7DB9FF;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--carbon);color:var(--bruma);font-family:'Inter',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  body{line-height:1.6; overflow-x:hidden}
+  ::selection{background:rgba(212,255,0,0.28); color:var(--bruma)}
+
+  /* ============== FIXED HEADER ============== */
+  .top{
+    position:fixed; top:0; left:0; right:0; z-index:60;
+    padding:16px 28px; display:flex; align-items:center; gap:16px;
+    background:linear-gradient(180deg, rgba(10,10,11,0.88), rgba(10,10,11,0));
+    backdrop-filter:blur(6px);
+    pointer-events:none;
+  }
+  .brand{display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:-0.01em; pointer-events:auto}
+  .brand-mark{width:26px; height:26px; border-radius:6px; background:var(--krypton); color:var(--carbon); display:grid; place-items:center; font-weight:800; font-size:14px}
+  .top .hint{margin-left:auto; color:var(--plomo); font-size:12px; font-family:'JetBrains Mono',monospace; letter-spacing:0.08em; text-transform:uppercase; pointer-events:auto}
+  .top .hint span{color:var(--krypton)}
+
+  /* ============== PROGRESS RAIL (right side) ============== */
+  .rail{
+    position:fixed; right:28px; top:50%; transform:translateY(-50%);
+    z-index:55; display:flex; flex-direction:column; gap:14px;
+    pointer-events:none;
+  }
+  .rail-step{
+    display:flex; align-items:center; gap:10px;
+    color:var(--plomo); font-size:11px;
+    font-family:'JetBrains Mono',monospace; letter-spacing:0.05em;
+    opacity:0.55; transition:opacity .4s, color .4s;
+    pointer-events:auto; cursor:pointer;
+    justify-content:flex-end;
+  }
+  .rail-step .num{
+    width:22px; height:22px; border-radius:50%;
+    border:1px solid var(--border); display:grid; place-items:center;
+    font-size:10px; background:var(--carbon-100);
+    transition:all .4s;
+  }
+  .rail-step.active{opacity:1; color:var(--bruma)}
+  .rail-step.active .num{background:var(--krypton); color:var(--carbon); border-color:var(--krypton); box-shadow:0 0 16px var(--krypton-glow)}
+  .rail-step.done{opacity:0.9; color:var(--plomo-light)}
+  .rail-step.done .num{background:var(--krypton-dim); color:var(--krypton); border-color:rgba(212,255,0,0.3)}
+  @media(max-width:980px){ .rail{display:none} }
+
+  /* ============== SCROLL PROGRESS BAR (top) ============== */
+  .progress{position:fixed; top:0; left:0; height:2px; background:var(--krypton); z-index:70; width:0%; box-shadow:0 0 12px var(--krypton-glow)}
+
+  /* ============== INTRO ============== */
+  .intro{
+    min-height:100vh; display:grid; place-items:center; padding:120px 24px 40px;
+    position:relative; overflow:hidden;
+  }
+  .intro::before{
+    content:""; position:absolute; inset:0;
+    background:radial-gradient(circle at 50% 40%, rgba(212,255,0,0.10), transparent 55%);
+    pointer-events:none;
+  }
+  .intro-inner{max-width:900px; text-align:center; position:relative}
+  .chip{
+    display:inline-flex; align-items:center; gap:8px;
+    padding:6px 14px; border-radius:999px;
+    border:1px solid var(--border); background:var(--carbon-100);
+    font-size:12px; color:var(--plomo-light);
+    font-family:'JetBrains Mono',monospace;
+  }
+  .chip .dot{width:6px; height:6px; border-radius:50%; background:var(--krypton); box-shadow:0 0 8px var(--krypton); animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:0.4}}
+  .intro h1{
+    font-size:clamp(44px, 7vw, 92px); line-height:1.0;
+    letter-spacing:-0.035em; font-weight:700;
+    margin:24px auto 22px; max-width:14ch; text-wrap:balance;
+  }
+  .intro h1 em{font-family:'Instrument Serif',serif; font-style:italic; font-weight:400; color:var(--krypton); letter-spacing:-0.02em}
+  .intro p{color:var(--plomo-light); font-size:19px; max-width:60ch; margin:0 auto 40px; text-wrap:pretty}
+  .scroll-hint{display:inline-flex; flex-direction:column; align-items:center; gap:10px; color:var(--plomo); font-size:11px; font-family:'JetBrains Mono',monospace; letter-spacing:0.15em; text-transform:uppercase}
+  .scroll-hint svg{animation:bounce 2s ease-in-out infinite}
+  @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(6px)}}
+
+  /* ============== SCROLLY STRUCTURE ============== */
+  .scrolly{position:relative}
+  /* Each stage: a tall scroll spacer holds a sticky viewport */
+  .stage{position:relative; height:260vh}
+  .stage.short{height:180vh}
+  .stage.tall{height:320vh}
+  .stage-sticky{
+    position:sticky; top:0; height:100vh;
+    display:grid; grid-template-columns:minmax(360px, 1fr) 1.25fr;
+    gap:40px; padding:80px 80px;
+    align-items:center;
+  }
+  @media(max-width:1100px){
+    .stage-sticky{grid-template-columns:1fr; padding:80px 32px 40px; gap:24px; align-items:start; overflow-y:auto}
+    .stage{height:auto; min-height:100vh}
+    .stage-sticky{position:relative}
+  }
+
+  /* LEFT copy column */
+  .copy{max-width:460px}
+  .stage-eyebrow{
+    display:inline-flex; align-items:center; gap:10px;
+    font-family:'JetBrains Mono',monospace; font-size:11px;
+    letter-spacing:0.18em; text-transform:uppercase;
+    color:var(--krypton); margin-bottom:18px; font-weight:600;
+  }
+  .stage-eyebrow .ix{
+    padding:2px 8px; border-radius:5px; background:var(--krypton-dim);
+    border:1px solid rgba(212,255,0,0.25);
+  }
+  .copy h2{
+    font-size:clamp(34px, 4.2vw, 54px); line-height:1.05;
+    letter-spacing:-0.025em; font-weight:700;
+    margin:0 0 18px; text-wrap:balance;
+  }
+  .copy h2 em{font-family:'Instrument Serif',serif; font-style:italic; font-weight:400; color:var(--krypton)}
+  .copy p{color:var(--plomo-light); font-size:17px; margin:0 0 14px; text-wrap:pretty}
+  .copy p b{color:var(--bruma); font-weight:600}
+  .copy .kvs{
+    margin-top:22px; display:flex; flex-direction:column; gap:8px;
+    font-size:13px; color:var(--plomo-light);
+    font-family:'JetBrains Mono',monospace;
+  }
+  .copy .kvs div{display:flex; gap:14px; align-items:baseline}
+  .copy .kvs .k{color:var(--plomo); min-width:120px}
+  .copy .kvs .v{color:var(--bruma)}
+  .copy .kvs .v b{color:var(--krypton); font-weight:600}
+
+  /* RIGHT visual column (sticky canvas) */
+  .canvas{
+    position:relative; height:min(82vh, 700px);
+    border-radius:18px;
+    background:linear-gradient(180deg, var(--carbon-100), var(--carbon-200));
+    border:1px solid var(--border);
+    overflow:hidden;
+    box-shadow:0 40px 80px rgba(0,0,0,0.5), 0 0 0 1px rgba(212,255,0,0.03);
+  }
+  .canvas-bar{
+    display:flex; align-items:center; gap:10px;
+    padding:12px 16px; border-bottom:1px solid var(--border);
+    font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--plomo);
+  }
+  .canvas-bar .dots{display:flex; gap:6px}
+  .canvas-bar .dots i{width:9px; height:9px; border-radius:50%; background:var(--carbon-400)}
+  .canvas-bar .file{background:var(--carbon-300); color:var(--bruma-muted); padding:3px 10px; border-radius:5px; font-size:11px}
+  .canvas-bar .status{margin-left:auto; color:var(--krypton); display:inline-flex; align-items:center; gap:6px; font-size:11px}
+  .canvas-bar .status .d{width:7px; height:7px; border-radius:50%; background:var(--krypton); box-shadow:0 0 8px var(--krypton); animation:pulse 1.5s ease-in-out infinite}
+  .canvas-body{position:absolute; inset:45px 0 0 0; padding:24px 28px}
+
+  /* ============== STAGE 1 · UPLOAD ============== */
+  .doc-float{
+    position:relative; width:220px; height:280px;
+    margin:0 auto; top:50%; transform:translate(0, calc(-50% + var(--float, -40px)));
+    border-radius:10px;
+    background:linear-gradient(180deg, #FAFAFA, #E5E5E7);
+    box-shadow:0 40px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05);
+    padding:24px 20px;
+    transition:transform .6s cubic-bezier(0.2,0.8,0.2,1);
+  }
+  .doc-float::before{
+    content:""; position:absolute; top:0; right:0; width:36px; height:36px;
+    background:linear-gradient(135deg, #E5E5E7 50%, #C7C7CC 50%);
+    border-top-right-radius:10px;
+  }
+  .doc-float .page-title{font-size:9px; color:#1C1C1F; font-weight:600; margin-bottom:10px; letter-spacing:-0.01em}
+  .doc-float .line{height:4px; background:#C7C7CC; border-radius:2px; margin-bottom:5px}
+  .doc-float .line:nth-child(2){width:85%}
+  .doc-float .line:nth-child(3){width:92%}
+  .doc-float .line:nth-child(4){width:76%}
+  .doc-float .line:nth-child(5){width:88%; margin-top:10px}
+  .doc-float .line:nth-child(6){width:60%}
+  .doc-float .line:nth-child(7){width:90%; margin-top:10px}
+  .doc-float .line:nth-child(8){width:70%}
+  .doc-float .tag{
+    position:absolute; bottom:14px; right:14px;
+    font-size:8px; background:#1C1C1F; color:#FAFAFA;
+    padding:2px 6px; border-radius:3px; font-family:'JetBrains Mono',monospace; font-weight:600;
+  }
+  .upload-beam{
+    position:absolute; left:50%; top:50%;
+    width:1px; height:0; transform:translate(-50%, -50%);
+    background:linear-gradient(180deg, transparent, var(--krypton), transparent);
+    opacity:0; transition:height .8s ease, opacity .4s;
+    box-shadow:0 0 20px var(--krypton);
+  }
+  .upload-beam.on{opacity:0.8; height:400px}
+
+  .file-meta{
+    position:absolute; inset:auto 0 30px 0; text-align:center;
+    font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--plomo);
+  }
+  .file-meta b{color:var(--bruma); font-weight:500}
+  .file-meta .big{font-size:15px; color:var(--bruma)}
+
+  /* ============== STAGE 2 · ANALYSIS (extraction map) ============== */
+  .analysis{position:absolute; inset:45px 0 0 0; padding:28px}
+  .pages-grid{
+    display:grid; grid-template-columns:repeat(18, 1fr); gap:3px;
+    margin-bottom:28px;
+  }
+  .page-cell{
+    aspect-ratio:0.7; background:var(--carbon-300);
+    border-radius:2px; transition:background .3s, box-shadow .3s;
+  }
+  .page-cell.scanned{background:var(--krypton); box-shadow:0 0 8px var(--krypton-glow)}
+  .page-cell.scanning{background:rgba(212,255,0,0.4); animation:scan 0.4s ease-in-out infinite alternate}
+  @keyframes scan{to{background:var(--krypton)}}
+
+  .extractions{
+    display:grid; grid-template-columns:1fr 1fr; gap:14px;
+  }
+  .extract-card{
+    padding:14px 16px; border:1px solid var(--border);
+    border-radius:10px; background:var(--carbon-100);
+    opacity:0; transform:translateY(12px);
+    transition:all .5s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .extract-card.in{opacity:1; transform:translateY(0)}
+  .extract-card .lbl{
+    font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--plomo);
+    letter-spacing:0.1em; text-transform:uppercase; margin-bottom:6px;
+  }
+  .extract-card .val{color:var(--bruma); font-size:14px; line-height:1.5}
+  .extract-card .val b{color:var(--krypton); font-weight:600}
+  .extract-card.big{grid-column:span 2}
+  .pill-row{display:flex; flex-wrap:wrap; gap:6px; margin-top:6px}
+  .pill{
+    display:inline-flex; align-items:center; gap:5px;
+    padding:3px 9px; border-radius:999px;
+    background:var(--krypton-dim); color:var(--krypton);
+    font-size:11px; font-family:'JetBrains Mono',monospace;
+    border:1px solid rgba(212,255,0,0.2);
+  }
+  .pill.muted{background:var(--carbon-300); color:var(--bruma-muted); border-color:var(--border)}
+
+  /* ============== STAGE 3 · SPELLING (LanguageTool) ============== */
+  .spell{position:absolute; inset:45px 0 0 0; padding:26px 30px; display:flex; flex-direction:column}
+  .spell-text{
+    font-size:15px; line-height:1.95; color:var(--bruma-muted);
+    font-family:'Georgia', serif;
+    flex:1;
+  }
+  .spell-err{
+    position:relative; color:var(--bruma);
+    border-bottom:2px wavy var(--err);
+    padding-bottom:1px;
+  }
+  .spell-protected{
+    color:var(--krypton); font-weight:600;
+    border-bottom:1.5px dotted var(--krypton);
+  }
+  .spell-stats{
+    display:grid; grid-template-columns:repeat(3, 1fr); gap:10px;
+    margin-top:18px; padding-top:16px; border-top:1px solid var(--border);
+  }
+  .spell-stat{
+    text-align:center;
+  }
+  .spell-stat .n{
+    font-size:22px; font-weight:700; letter-spacing:-0.02em;
+    font-feature-settings:'tnum';
+    color:var(--bruma);
+  }
+  .spell-stat .n.err{color:var(--err)}
+  .spell-stat .n.ok{color:var(--ok)}
+  .spell-stat .n.proj{color:var(--krypton)}
+  .spell-stat .l{font-size:11px; color:var(--plomo); font-family:'JetBrains Mono',monospace; letter-spacing:0.05em; text-transform:uppercase; margin-top:2px}
+
+  .callout{
+    display:flex; gap:10px; padding:10px 12px; margin-top:14px;
+    border:1px dashed rgba(212,255,0,0.3); border-radius:8px;
+    background:rgba(212,255,0,0.04);
+    font-size:12px; color:var(--bruma-muted); line-height:1.5;
+  }
+  .callout svg{flex-shrink:0; color:var(--krypton); margin-top:2px}
+  .callout b{color:var(--bruma); font-weight:500}
+
+  /* ============== STAGE 4 · EDITORIAL (deep analysis) ============== */
+  .editorial{position:absolute; inset:45px 0 0 0; padding:24px 28px}
+  .edit-head{font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:var(--plomo); margin-bottom:14px}
+  .edit-head b{color:var(--krypton); font-weight:500}
+  .edit-layers{display:flex; flex-direction:column; gap:10px}
+  .edit-layer{
+    display:flex; align-items:center; gap:14px;
+    padding:12px 14px;
+    border:1px solid var(--border); border-radius:10px;
+    background:var(--carbon-100);
+    opacity:0.35; transition:all .5s;
+  }
+  .edit-layer.active{opacity:1; border-color:rgba(212,255,0,0.3); background:var(--carbon-200); box-shadow:0 0 24px rgba(212,255,0,0.08)}
+  .edit-layer.done{opacity:0.7}
+  .edit-layer .icon{
+    width:34px; height:34px; flex-shrink:0;
+    border-radius:8px; background:var(--carbon-300);
+    display:grid; place-items:center;
+    color:var(--plomo);
+    transition:all .4s;
+  }
+  .edit-layer.active .icon{background:var(--krypton); color:var(--carbon)}
+  .edit-layer .content{flex:1; min-width:0}
+  .edit-layer .title{font-weight:600; font-size:14px; color:var(--bruma); margin-bottom:2px}
+  .edit-layer .desc{font-size:12px; color:var(--plomo-light)}
+  .edit-layer .count{
+    font-family:'JetBrains Mono',monospace; font-size:13px;
+    color:var(--krypton); font-weight:600;
+    min-width:38px; text-align:right;
+  }
+  .edit-layer.done .count{color:var(--bruma-muted)}
+
+  .voice-quote{
+    margin-top:16px; padding:14px 16px;
+    background:var(--carbon-200); border-left:2px solid var(--krypton);
+    border-radius:4px;
+    font-family:'Instrument Serif',serif; font-style:italic;
+    font-size:15px; color:var(--bruma-muted); line-height:1.6;
+  }
+  .voice-quote b{color:var(--bruma); font-style:normal; font-family:'Inter',sans-serif; font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:0.1em; display:block; margin-top:8px}
+
+  /* ============== STAGE 5 · DIFF REVIEW ============== */
+  .review{position:absolute; inset:45px 0 0 0; padding:24px 28px; display:flex; flex-direction:column}
+  .review-paragraph{
+    padding:16px 18px; border-radius:12px;
+    border:1px solid var(--border); background:var(--carbon-100);
+    font-family:'Georgia', serif;
+    font-size:14.5px; line-height:1.9;
+    margin-bottom:14px;
+    position:relative;
+  }
+  .review-paragraph .label{
+    position:absolute; top:-8px; left:14px;
+    font-family:'JetBrains Mono',monospace; font-size:9px;
+    padding:2px 8px; border-radius:4px;
+    background:var(--carbon); border:1px solid var(--border);
+    color:var(--plomo); letter-spacing:0.1em; text-transform:uppercase;
+  }
+  .ins{background:rgba(123,228,149,0.18); color:#C3F4D0; padding:1px 5px; border-radius:3px; font-weight:500}
+  .del{background:rgba(255,122,122,0.14); color:#FFA8A8; text-decoration:line-through; padding:1px 4px; border-radius:3px; margin-right:2px}
+  .review-actions{
+    display:flex; gap:10px; align-items:center;
+    margin-top:auto; padding-top:12px; border-top:1px solid var(--border);
+  }
+  .btn-accept, .btn-reject{
+    display:inline-flex; align-items:center; gap:6px;
+    padding:8px 14px; border-radius:8px;
+    font-family:inherit; font-size:12px; font-weight:600;
+    border:1px solid var(--border); background:var(--carbon-100); color:var(--bruma);
+    cursor:pointer; transition:all .2s;
+  }
+  .btn-accept.primary{background:var(--krypton); color:var(--carbon); border-color:var(--krypton)}
+  .btn-accept.pulsing{animation:btnpulse 1.6s ease-in-out infinite}
+  @keyframes btnpulse{50%{box-shadow:0 0 0 6px rgba(212,255,0,0.15)}}
+  .review-meta{
+    margin-left:auto; font-family:'JetBrains Mono',monospace;
+    font-size:11px; color:var(--plomo);
+  }
+  .review-meta b{color:var(--krypton); font-weight:500}
+
+  .explain-chip{
+    display:inline-flex; align-items:center; gap:6px;
+    padding:3px 9px; border-radius:5px;
+    background:var(--carbon-300); border:1px solid var(--border);
+    font-family:'JetBrains Mono',monospace; font-size:10px;
+    color:var(--bruma-muted); margin:0 4px;
+    vertical-align:1px;
+  }
+  .explain-chip .cat{color:var(--krypton)}
+
+  /* ============== STAGE 6 · FINALE (finished book + metrics) ============== */
+  .finale{position:absolute; inset:45px 0 0 0; padding:30px; display:grid; grid-template-columns:auto 1fr; gap:28px; align-items:center}
+  .book{
+    width:180px; height:250px; position:relative;
+    border-radius:4px 10px 10px 4px;
+    background:linear-gradient(135deg, #1C1C1F, #0A0A0B);
+    border:1px solid var(--border);
+    box-shadow:
+      -20px 0 0 -4px #141416,
+      -40px 0 0 -8px #1C1C1F,
+      0 30px 60px rgba(0,0,0,0.6),
+      0 0 40px rgba(212,255,0,0.08);
+    padding:28px 18px;
+    transform-origin:left center;
+    transform:rotateY(var(--book-rot, -18deg));
+    transition:transform 1s cubic-bezier(0.2,0.8,0.2,1);
+  }
+  .book::before{
+    content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
+    background:var(--krypton); opacity:0.7;
+  }
+  .book .bt{
+    font-family:'Instrument Serif',serif; font-style:italic;
+    font-size:18px; color:var(--krypton); margin-bottom:30px;
+    letter-spacing:-0.01em; line-height:1.2;
+  }
+  .book .ba{font-size:9px; color:var(--plomo); letter-spacing:0.1em; text-transform:uppercase; font-family:'JetBrains Mono',monospace}
+  .book .bs{position:absolute; bottom:22px; left:18px; font-size:9px; color:var(--plomo); font-family:'JetBrains Mono',monospace; letter-spacing:0.1em}
+  .book .bs b{color:var(--krypton); font-weight:500}
+  .book-lines{margin-top:20px}
+  .book-lines i{display:block; height:2px; background:var(--plomo); opacity:0.3; margin-bottom:5px; border-radius:1px}
+  .book-lines i:nth-child(2){width:85%}
+  .book-lines i:nth-child(3){width:70%}
+
+  .finale-metrics{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+  .metric{
+    padding:14px 16px; border:1px solid var(--border); border-radius:10px;
+    background:var(--carbon-100);
+  }
+  .metric .n{
+    font-size:26px; font-weight:700; letter-spacing:-0.02em;
+    color:var(--krypton); font-feature-settings:'tnum';
+    line-height:1;
+  }
+  .metric .u{font-size:13px; color:var(--plomo-light); font-weight:400; margin-left:2px}
+  .metric .l{font-size:11px; color:var(--plomo); font-family:'JetBrains Mono',monospace; letter-spacing:0.05em; text-transform:uppercase; margin-top:6px}
+  .metric.wide{grid-column:span 2}
+
+  /* ============== OUTRO ============== */
+  .outro{
+    min-height:80vh; display:grid; place-items:center;
+    padding:100px 24px; text-align:center;
+    position:relative; overflow:hidden;
+  }
+  .outro::before{
+    content:""; position:absolute; inset:0;
+    background:radial-gradient(circle at 50% 50%, rgba(212,255,0,0.08), transparent 60%);
+  }
+  .outro-inner{max-width:780px; position:relative}
+  .outro h3{
+    font-size:clamp(36px, 5vw, 60px); line-height:1.05;
+    letter-spacing:-0.025em; font-weight:700;
+    margin:0 0 18px; text-wrap:balance;
+  }
+  .outro h3 em{font-family:'Instrument Serif',serif; font-style:italic; font-weight:400; color:var(--krypton)}
+  .outro p{color:var(--plomo-light); font-size:17px; max-width:52ch; margin:0 auto 32px}
+  .btn-primary{
+    display:inline-flex; align-items:center; gap:8px;
+    background:var(--krypton); color:var(--carbon);
+    padding:14px 22px; border-radius:12px;
+    font-weight:600; font-size:15px; text-decoration:none;
+    box-shadow:0 0 0 1px rgba(212,255,0,0.3), 0 10px 32px rgba(212,255,0,0.22);
+    transition:transform .15s, box-shadow .15s;
+  }
+  .btn-primary:hover{transform:translateY(-1px); box-shadow:0 0 0 1px rgba(212,255,0,0.5), 0 14px 40px rgba(212,255,0,0.3)}
+</style>
+</head>
+<body>
+
+<!-- progress + rail -->
+<div class="progress" id="progress"></div>
+<header class="top">
+  <div class="brand"><span class="brand-mark">S</span> STYLIA</div>
+  <div class="hint">Desplázate para seguir el viaje <span>↓</span></div>
+</header>
+
+<nav class="rail" id="rail">
+  <div class="rail-step" data-step="0"><span class="lbl">Inicio</span><span class="num">0</span></div>
+  <div class="rail-step" data-step="1"><span class="lbl">Cargar</span><span class="num">1</span></div>
+  <div class="rail-step" data-step="2"><span class="lbl">Leer</span><span class="num">2</span></div>
+  <div class="rail-step" data-step="3"><span class="lbl">Ortografía</span><span class="num">3</span></div>
+  <div class="rail-step" data-step="4"><span class="lbl">Editar</span><span class="num">4</span></div>
+  <div class="rail-step" data-step="5"><span class="lbl">Revisar</span><span class="num">5</span></div>
+  <div class="rail-step" data-step="6"><span class="lbl">Entregar</span><span class="num">6</span></div>
+</nav>
+
+<!-- ======================== INTRO ======================== -->
+<section class="intro" data-stage="0">
+  <div class="intro-inner">
+    <span class="chip"><span class="dot"></span> Así viaja tu documento por STYLIA</span>
+    <h1>Seis paradas entre tu <em>borrador</em> y el libro listo.</h1>
+    <p>Desde que sueltas el DOCX hasta que descargas el texto corregido, STYLIA lo lee entero, lo entiende, lo corrige por capas y te devuelve el control. Desplázate para verlo etapa por etapa.</p>
+    <div class="scroll-hint">
+      Desplázate
+      <svg width="18" height="22" viewBox="0 0 18 22" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="16" height="20" rx="8"/><line x1="9" y1="5" x2="9" y2="10" stroke-linecap="round"/></svg>
+    </div>
+  </div>
+</section>
+
+<div class="scrolly">
+
+<!-- ======================== STAGE 1 · UPLOAD ======================== -->
+<section class="stage short" data-stage="1">
+  <div class="stage-sticky">
+    <div class="copy">
+      <div class="stage-eyebrow"><span class="ix">01</span> Sueltas tu DOCX</div>
+      <h2>Empiezas donde estabas: con tu <em>manuscrito</em>.</h2>
+      <p>Arrastras el archivo o lo seleccionas. Sin convertir, sin aplanar, sin tocar tu maquetación. STYLIA acepta <b>DOCX de hasta 500 páginas</b> —novelas, ensayos, tesis, informes— y empieza a trabajar en segundos.</p>
+      <div class="kvs">
+        <div><span class="k">Formato</span><span class="v">.docx <b>·</b> estilos, tablas y notas preservadas</span></div>
+        <div><span class="k">Tamaño máx.</span><span class="v"><b>500 MB</b> · 1000 páginas</span></div>
+        <div><span class="k">Privacidad</span><span class="v">No entrenamos modelos con tu texto</span></div>
+      </div>
+    </div>
+    <div class="canvas">
+      <div class="canvas-bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <span class="file">stylia.app / cargar</span>
+        <span class="status" id="s1status" style="opacity:0"><span class="d"></span> recibido</span>
+      </div>
+      <div class="canvas-body" style="position:relative; height:calc(100% - 45px)">
+        <div class="upload-beam" id="beam"></div>
+        <div class="doc-float" id="doc1">
+          <div class="page-title">Capítulo 3</div>
+          <div class="line"></div><div class="line"></div><div class="line"></div><div class="line"></div>
+          <div class="line"></div><div class="line"></div><div class="line"></div><div class="line"></div>
+          <div class="tag">DOCX</div>
+        </div>
+        <div class="file-meta">
+          <div class="big"><b id="s1name">manuscrito-novela.docx</b></div>
+          <div style="margin-top:6px"><span id="s1pages">—</span> páginas · <span id="s1size">—</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================== STAGE 2 · ANALYSIS ======================== -->
+<section class="stage tall" data-stage="2">
+  <div class="stage-sticky">
+    <div class="copy">
+      <div class="stage-eyebrow"><span class="ix">02</span> Lo lee entero, no por trozos</div>
+      <h2>Antes de corregir, STYLIA <em>entiende</em>.</h2>
+      <p>Recorre página por página. Identifica capítulos, personajes, lugares, términos técnicos y tu voz. Deduce el género, el público y el tono. Todo eso alimenta las correcciones siguientes — sin este paso, cualquier corrector es ciego al contexto.</p>
+      <p>Los <b>términos protegidos</b> (nombres propios, marcas, neologismos tuyos) quedan blindados desde aquí. No se tocan en ninguna pasada.</p>
+      <div class="kvs">
+        <div><span class="k">Modelo</span><span class="v">lectura contextual multi-pasada</span></div>
+        <div><span class="k">Salida</span><span class="v"><b>resumen + glosario</b> por documento</span></div>
+        <div><span class="k">Tiempo típico</span><span class="v">12–20 s para 300 páginas</span></div>
+      </div>
+    </div>
+    <div class="canvas">
+      <div class="canvas-bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <span class="file">análisis editorial previo</span>
+        <span class="status" id="s2status"><span class="d"></span> leyendo <span id="s2page">0</span>/312</span>
+      </div>
+      <div class="analysis">
+        <div class="pages-grid" id="pages"></div>
+        <div class="extractions">
+          <div class="extract-card" data-ex="0" style="grid-column:span 2">
+            <div class="lbl">Género detectado</div>
+            <div class="val"><b>Novela · realismo contemporáneo</b> · público adulto · tono introspectivo</div>
+          </div>
+          <div class="extract-card" data-ex="1">
+            <div class="lbl">Personajes</div>
+            <div class="val"><div class="pill-row">
+              <span class="pill">Elena</span><span class="pill">Mateo</span><span class="pill">la abuela</span><span class="pill">Don Ernesto</span>
+            </div></div>
+          </div>
+          <div class="extract-card" data-ex="2">
+            <div class="lbl">Lugares</div>
+            <div class="val"><div class="pill-row">
+              <span class="pill muted">Cartagena</span><span class="pill muted">el muelle</span><span class="pill muted">Bogotá</span>
+            </div></div>
+          </div>
+          <div class="extract-card" data-ex="3" style="grid-column:span 2">
+            <div class="lbl">Términos protegidos <span style="color:var(--krypton)">(no se modifican)</span></div>
+            <div class="val"><div class="pill-row">
+              <span class="pill">Elena Vargas</span><span class="pill">Casa de los Acantilados</span><span class="pill">Feria del Libro</span><span class="pill">Los Bienaventurados</span>
+            </div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================== STAGE 3 · SPELLING ======================== -->
+<section class="stage" data-stage="3">
+  <div class="stage-sticky">
+    <div class="copy">
+      <div class="stage-eyebrow"><span class="ix">03</span> Pasada ortográfica</div>
+      <h2>Primero lo obvio: <em>ortografía</em> y gramática.</h2>
+      <p>Una capa determinista —no IA— revisa cada párrafo contra las reglas del español: tildes, concordancia, puntuación, dequeísmos, mayúsculas. Es rápido, gratuito y muy preciso.</p>
+      <p>Lo importante: STYLIA <b>descarta automáticamente</b> los falsos positivos sobre tus términos protegidos. Si llamaste «Bienaventurados» a tu grupo, el corrector no te lo va a subrayar.</p>
+      <div class="kvs">
+        <div><span class="k">Motor</span><span class="v">LanguageTool ES · offline</span></div>
+        <div><span class="k">Coste</span><span class="v">cero tokens de IA</span></div>
+        <div><span class="k">Precisión típica</span><span class="v"><b>98 %</b> sobre reglas RAE</span></div>
+      </div>
+    </div>
+    <div class="canvas">
+      <div class="canvas-bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <span class="file">capítulo 3 · pasada 1</span>
+        <span class="status"><span class="d"></span> revisado</span>
+      </div>
+      <div class="spell">
+        <div class="spell-text">
+          Elena caminaba calle abajo cuando <span class="spell-err" data-tip="falta coma vocativa">Mateo</span> la llamó desde el muelle. <span class="spell-protected">La Casa de los Acantilados</span> quedaba a dos cuadras, pero ella no tenía <span class="spell-err" data-tip="acentuación">prisa.</span> <span class="spell-err" data-tip="dequeísmo">Pensó de que</span> aún era temprano, <span class="spell-err" data-tip="coma ausente">se sentó en un banco y</span> lo esperó. El mar olía como siempre, a sal y a <span class="spell-protected">Los Bienaventurados</span>, aquella <span class="spell-err" data-tip="concordancia">banda musicales</span> que Mateo escuchaba los sábados.
+        </div>
+        <div class="callout">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <div>Se detectaron <b>posibles errores</b> sobre <b>«Casa de los Acantilados»</b> y <b>«Los Bienaventurados»</b>, pero están en tu lista de términos protegidos. <b>Se descartaron automáticamente.</b></div>
+        </div>
+        <div class="spell-stats">
+          <div class="spell-stat"><div class="n err" id="sErr">0</div><div class="l">errores reales</div></div>
+          <div class="spell-stat"><div class="n proj" id="sProt">0</div><div class="l">descartados · protegidos</div></div>
+          <div class="spell-stat"><div class="n ok" id="sConf">0</div><div class="l">% confianza</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================== STAGE 4 · EDITORIAL ======================== -->
+<section class="stage tall" data-stage="4">
+  <div class="stage-sticky">
+    <div class="copy">
+      <div class="stage-eyebrow"><span class="ix">04</span> Análisis editorial profundo</div>
+      <h2>Ahora sí: <em>estilo</em>, claridad, voz.</h2>
+      <p>Con el documento ya entendido, STYLIA aplica cuatro capas de análisis editorial profesional. No es un «revisar todo de una vez»: cada capa busca algo distinto y se nutre del análisis previo.</p>
+      <p>Y sobre todo: <b>preserva tu voz</b>. Si una frase es rara pero es tuya, no la toca. El principio es el mismo que sigue un corrector humano: «corrige todo menos el estilo del autor».</p>
+      <div class="kvs">
+        <div><span class="k">Capas</span><span class="v">léxico · claridad · coherencia · ritmo</span></div>
+        <div><span class="k">Contexto</span><span class="v">ventana de 3 párrafos + glosario</span></div>
+        <div><span class="k">Verificación</span><span class="v"><b>5 controles</b> de calidad por párrafo</span></div>
+      </div>
+    </div>
+    <div class="canvas">
+      <div class="canvas-bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <span class="file">capítulo 3 · pasada 2</span>
+        <span class="status"><span class="d"></span> analizando</span>
+      </div>
+      <div class="editorial">
+        <div class="edit-head">Análisis editorial · <b>perfil: novela / tono introspectivo</b></div>
+        <div class="edit-layers">
+          <div class="edit-layer" data-layer="0">
+            <div class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5z"/></svg></div>
+            <div class="content">
+              <div class="title">Léxico</div>
+              <div class="desc">muletillas, repeticiones y palabras manidas</div>
+            </div>
+            <div class="count">— / —</div>
+          </div>
+          <div class="edit-layer" data-layer="1">
+            <div class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg></div>
+            <div class="content">
+              <div class="title">Claridad</div>
+              <div class="desc">frases largas, redundancias y ambigüedad</div>
+            </div>
+            <div class="count">— / —</div>
+          </div>
+          <div class="edit-layer" data-layer="2">
+            <div class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3h4v4M21 3l-7 7M7 21H3v-4M3 21l7-7M7 3H3v4M3 3l7 7M17 21h4v-4M21 21l-7-7"/></svg></div>
+            <div class="content">
+              <div class="title">Coherencia</div>
+              <div class="desc">transiciones, tiempos verbales y terminología</div>
+            </div>
+            <div class="count">— / —</div>
+          </div>
+          <div class="edit-layer" data-layer="3">
+            <div class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13M9 9l12-2M6 21a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM18 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></svg></div>
+            <div class="content">
+              <div class="title">Ritmo y voz</div>
+              <div class="desc">cadencia, variedad de oraciones, tono del autor</div>
+            </div>
+            <div class="count">— / —</div>
+          </div>
+        </div>
+        <div class="voice-quote" id="voiceQuote" style="opacity:0; transform:translateY(10px); transition:all .6s">
+          «STYLIA conserva tu voz. Solo cambia lo que estorba.»
+          <b>Principio de corrección</b>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================== STAGE 5 · REVIEW ======================== -->
+<section class="stage tall" data-stage="5">
+  <div class="stage-sticky">
+    <div class="copy">
+      <div class="stage-eyebrow"><span class="ix">05</span> Tú decides, párrafo a párrafo</div>
+      <h2>STYLIA propone. Tú <em>apruebas</em>.</h2>
+      <p>Cada sugerencia llega con <b>categoría</b>, <b>explicación</b> y <b>nivel de confianza</b>. Aceptas con un clic, descartas con otro, o reescribes a mano. Ningún cambio se aplica sin tu visto bueno.</p>
+      <p>Lo subrayado en rojo desaparece; lo verde se integra. El formato original se mantiene intacto todo el tiempo.</p>
+      <div class="kvs">
+        <div><span class="k">Interacción</span><span class="v">aprobar · descartar · editar</span></div>
+        <div><span class="k">Atajos</span><span class="v">A aceptar · D descartar · → siguiente</span></div>
+        <div><span class="k">Histórico</span><span class="v">cada decisión queda registrada</span></div>
+      </div>
+    </div>
+    <div class="canvas">
+      <div class="canvas-bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <span class="file">revisión de cambios · 3 / 47</span>
+        <span class="status"><span class="d"></span> sugerencia abierta</span>
+      </div>
+      <div class="review">
+        <div class="review-paragraph">
+          <span class="label">Original</span>
+          <span class="del">Caminaba lentamente por la calle, cuando de repente</span> escuchó unos pasos detrás de él. Se <span class="del">dio la vuelta rápidamente</span> y no vio a nadie, pero <span class="del">estaba completamente seguro de que</span> alguien lo seguía. «¿Quién anda ahí?» <span class="del">dijo</span> con voz <span class="del">temblorosa</span>.
+        </div>
+        <div class="review-paragraph" id="revSug">
+          <span class="label">Sugerido</span>
+          <span class="ins">Caminaba calle abajo</span> cuando <span class="ins">oyó</span> pasos detrás. Se <span class="ins">giró</span> y no vio a nadie, pero <span class="ins">supo</span> que alguien lo seguía. «¿Quién anda ahí?» <span class="ins">susurró</span>.
+        </div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px">
+          <span class="explain-chip"><span class="cat">léxico</span> · 3 adverbios -mente consecutivos</span>
+          <span class="explain-chip"><span class="cat">claridad</span> · «estaba completamente seguro» redundante</span>
+          <span class="explain-chip"><span class="cat">ritmo</span> · verbo de habla genérico</span>
+        </div>
+        <div class="review-actions">
+          <button class="btn-accept primary pulsing" id="btnAccept">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Aceptar
+          </button>
+          <button class="btn-reject">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12" stroke-linecap="round"/></svg>
+            Descartar
+          </button>
+          <button class="btn-reject">Editar</button>
+          <div class="review-meta">confianza <b>92 %</b> · tecla <b>A</b> para aceptar</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================== STAGE 6 · FINALE ======================== -->
+<section class="stage short" data-stage="6">
+  <div class="stage-sticky">
+    <div class="copy">
+      <div class="stage-eyebrow"><span class="ix">06</span> Libro corregido</div>
+      <h2>Descargas el DOCX. <em>Listo.</em></h2>
+      <p>El archivo vuelve con el mismo formato, con las correcciones aplicadas y con un informe detallado: qué se cambió, por qué, cuánto tardó, cuánto costó. Todo trazable.</p>
+      <p>Los editores que lo usan terminan un manuscrito de 200 páginas <b>en una tarde</b> en lugar de tres días. No porque trabajen menos —sino porque dejan de pelear con el texto fácil.</p>
+      <div class="kvs">
+        <div><span class="k">Entrega</span><span class="v">DOCX + PDF + reporte JSON</span></div>
+        <div><span class="k">Coste medio</span><span class="v"><b>$0,08</b> por libro de 100 páginas</span></div>
+        <div><span class="k">Soporte</span><span class="v">control de cambios compatible con Word</span></div>
+      </div>
+    </div>
+    <div class="canvas">
+      <div class="canvas-bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <span class="file">entrega final</span>
+        <span class="status"><span class="d"></span> listo para descargar</span>
+      </div>
+      <div class="finale">
+        <div class="book" id="book">
+          <div class="bt">La casa de los acantilados</div>
+          <div class="ba">Elena Vargas</div>
+          <div class="book-lines"><i></i><i></i><i></i></div>
+          <div class="bs">312 pp · <b>revisado por STYLIA</b></div>
+        </div>
+        <div class="finale-metrics">
+          <div class="metric"><div class="n" data-count="18">0</div><div class="l">min · duración total</div></div>
+          <div class="metric"><div class="n" data-count="312">0</div><div class="l">páginas revisadas</div></div>
+          <div class="metric"><div class="n" data-count="1247">0</div><div class="l">sugerencias generadas</div></div>
+          <div class="metric"><div class="n" data-count="89"><span class="u"></span></div><div class="l">% aceptadas por ti</div></div>
+          <div class="metric wide"><div class="n" style="display:flex; align-items:baseline; gap:6px">17<span class="u">pp / min</span> <span style="font-size:12px; color:var(--plomo-light); margin-left:auto; font-family:'Inter',sans-serif; font-weight:400">velocidad de revisión sostenida</span></div><div class="l">— tu editor humano es más rápido ahora</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</div><!-- /.scrolly -->
+
+<!-- ======================== OUTRO ======================== -->
+<section class="outro">
+  <div class="outro-inner">
+    <h3>Seis etapas. Una <em>tarde</em>. Tu libro listo.</h3>
+    <p>Esto es exactamente lo que pasa cuando sueltas tu DOCX en STYLIA. Sin cajas negras, sin jerga, sin sorpresas. Pruébalo con tu próximo manuscrito.</p>
+    <a href="#" class="btn-primary">Probar STYLIA gratis
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </a>
+    <div style="margin-top:18px; font-size:13px; color:var(--plomo)">Corrige tu primer DOCX en 2 minutos · sin tarjeta</div>
+  </div>
+</section>
+
+<script>
+// ============ build page grid ============
+const PAGES = 54; // 18×3 visual grid
+const pagesEl = document.getElementById('pages');
+for (let i = 0; i < PAGES; i++) {
+  const c = document.createElement('div');
+  c.className = 'page-cell';
+  pagesEl.appendChild(c);
+}
+
+// ============ scroll progress ============
+const progressBar = document.getElementById('progress');
+const railSteps = [...document.querySelectorAll('.rail-step')];
+
+function setRail(step) {
+  railSteps.forEach((el, i) => {
+    el.classList.remove('active', 'done');
+    if (i === step) el.classList.add('active');
+    else if (i < step) el.classList.add('done');
+  });
+}
+
+// ============ rail click → scroll to stage ============
+railSteps.forEach(el => {
+  el.addEventListener('click', () => {
+    const n = parseInt(el.dataset.step, 10);
+    const target = document.querySelector(`[data-stage="${n}"]`);
+    if (target) target.scrollIntoView({behavior:'smooth', block:'start'});
+  });
+});
+
+// ============ per-stage progress (0..1 through each stage) ============
+function getStageProgress(stage) {
+  if (!stage) return 0;
+  const r = stage.getBoundingClientRect();
+  const vh = window.innerHeight;
+  const total = r.height - vh; // scrollable distance within the sticky frame
+  if (total <= 0) return r.top < 0 ? 1 : 0;
+  const traveled = -r.top;
+  return Math.max(0, Math.min(1, traveled / total));
+}
+
+// cache stages
+const stages = [...document.querySelectorAll('[data-stage]')];
+
+// ============ STAGE 1 effects ============
+const doc1 = document.getElementById('doc1');
+const beam = document.getElementById('beam');
+const s1status = document.getElementById('s1status');
+const s1pages = document.getElementById('s1pages');
+const s1size = document.getElementById('s1size');
+
+function updateStage1(p) {
+  // p in [0..1]. Doc floats down, beam lights up, meta appears
+  const float = -40 + p * 40; // -40px → 0
+  doc1.style.setProperty('--float', float + 'px');
+  if (p > 0.35) beam.classList.add('on'); else beam.classList.remove('on');
+  if (p > 0.55) {
+    s1status.style.transition = 'opacity .4s';
+    s1status.style.opacity = '1';
+    s1pages.textContent = '312';
+    s1size.textContent = '2,4 MB';
+  } else {
+    s1status.style.opacity = '0';
+    s1pages.textContent = '—';
+    s1size.textContent = '—';
+  }
+}
+
+// ============ STAGE 2 effects ============
+const pageCells = [...document.querySelectorAll('.page-cell')];
+const extractCards = [...document.querySelectorAll('.extract-card')];
+const s2page = document.getElementById('s2page');
+
+function updateStage2(p) {
+  // First half: pages fill. Second half: extract cards appear.
+  const fillP = Math.min(1, p / 0.55);
+  const scannedCount = Math.floor(PAGES * fillP);
+  pageCells.forEach((c, i) => {
+    c.classList.remove('scanned', 'scanning');
+    if (i < scannedCount) c.classList.add('scanned');
+    else if (i === scannedCount && p < 0.55) c.classList.add('scanning');
+  });
+  s2page.textContent = Math.floor(312 * fillP);
+  // extract cards reveal
+  extractCards.forEach((el, i) => {
+    const threshold = 0.55 + i * 0.1;
+    if (p > threshold) el.classList.add('in'); else el.classList.remove('in');
+  });
+}
+
+// ============ STAGE 3 effects ============
+const sErr = document.getElementById('sErr');
+const sProt = document.getElementById('sProt');
+const sConf = document.getElementById('sConf');
+
+function updateStage3(p) {
+  // counters animate up
+  sErr.textContent = Math.floor(14 * Math.min(1, p / 0.6));
+  sProt.textContent = Math.floor(23 * Math.min(1, p / 0.75));
+  sConf.textContent = Math.floor(98 * Math.min(1, p / 0.9));
+}
+
+// ============ STAGE 4 effects ============
+const editLayers = [...document.querySelectorAll('.edit-layer')];
+const editCounts = [
+  [12, 12],
+  [7, 9],
+  [4, 6],
+  [3, 5],
+];
+const voiceQuote = document.getElementById('voiceQuote');
+
+function updateStage4(p) {
+  // Each layer activates in sequence, fills its count, then marks done
+  const perLayer = 0.22; // window for each
+  editLayers.forEach((el, i) => {
+    const start = i * perLayer;
+    const end = start + perLayer;
+    const countEl = el.querySelector('.count');
+    const [done, total] = editCounts[i];
+    el.classList.remove('active', 'done');
+    if (p < start) {
+      countEl.textContent = '— / ' + total;
+    } else if (p >= start && p < end) {
+      el.classList.add('active');
+      const t = (p - start) / perLayer;
+      countEl.textContent = Math.floor(done * t) + ' / ' + total;
+    } else {
+      el.classList.add('done');
+      countEl.textContent = done + ' / ' + total;
+    }
+  });
+  if (p > 0.88) {
+    voiceQuote.style.opacity = '1';
+    voiceQuote.style.transform = 'translateY(0)';
+  } else {
+    voiceQuote.style.opacity = '0';
+    voiceQuote.style.transform = 'translateY(10px)';
+  }
+}
+
+// ============ STAGE 5 effects ============
+const btnAccept = document.getElementById('btnAccept');
+const revSug = document.getElementById('revSug');
+let acceptTriggered = false;
+
+function updateStage5(p) {
+  // Around mid-scroll, simulate clicking "Aceptar"
+  if (p > 0.6 && !acceptTriggered) {
+    acceptTriggered = true;
+    btnAccept.classList.remove('pulsing');
+    btnAccept.style.background = 'var(--ok)';
+    btnAccept.style.borderColor = 'var(--ok)';
+    btnAccept.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5" stroke-linecap="round" stroke-linejoin="round"/></svg> Aceptado';
+    // fold original strikes into clean text visually
+    revSug.style.transform = 'scale(1.01)';
+    revSug.style.boxShadow = '0 0 0 1px rgba(123,228,149,0.3), 0 0 32px rgba(123,228,149,0.08)';
+    setTimeout(() => { revSug.style.transform = ''; }, 700);
+  } else if (p < 0.4 && acceptTriggered) {
+    acceptTriggered = false;
+    btnAccept.classList.add('pulsing');
+    btnAccept.style.background = '';
+    btnAccept.style.borderColor = '';
+    btnAccept.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5" stroke-linecap="round" stroke-linejoin="round"/></svg> Aceptar';
+    revSug.style.boxShadow = '';
+  }
+}
+
+// ============ STAGE 6 effects ============
+const book = document.getElementById('book');
+const metricNums = [...document.querySelectorAll('.metric .n[data-count]')];
+
+function updateStage6(p) {
+  // Book rotates from -18deg to 0deg
+  const rot = -18 + p * 18;
+  book.style.setProperty('--book-rot', rot + 'deg');
+  // Metrics count up
+  metricNums.forEach(el => {
+    const target = parseInt(el.dataset.count, 10);
+    const cur = Math.floor(target * Math.min(1, p / 0.7));
+    el.textContent = cur.toLocaleString('es-ES');
+  });
+}
+
+// ============ main scroll handler ============
+function onScroll() {
+  const doc = document.documentElement;
+  const maxScroll = doc.scrollHeight - window.innerHeight;
+  const scrollP = maxScroll > 0 ? window.scrollY / maxScroll : 0;
+  progressBar.style.width = (scrollP * 100) + '%';
+
+  // Determine active stage: the one whose sticky viewport is currently occupying the screen
+  let activeStage = 0;
+  for (let i = 0; i < stages.length; i++) {
+    const r = stages[i].getBoundingClientRect();
+    // A stage is active if its top is above center AND its bottom is still below top
+    if (r.top <= window.innerHeight * 0.5 && r.bottom > window.innerHeight * 0.5) {
+      activeStage = parseInt(stages[i].dataset.stage, 10);
+      break;
+    }
+  }
+  setRail(activeStage);
+
+  // Update per-stage progress for stages 1..6
+  for (let n = 1; n <= 6; n++) {
+    const stage = document.querySelector(`.stage[data-stage="${n}"]`);
+    if (!stage) continue;
+    const p = getStageProgress(stage);
+    if (n === 1) updateStage1(p);
+    else if (n === 2) updateStage2(p);
+    else if (n === 3) updateStage3(p);
+    else if (n === 4) updateStage4(p);
+    else if (n === 5) updateStage5(p);
+    else if (n === 6) updateStage6(p);
+  }
+}
+
+let ticking = false;
+window.addEventListener('scroll', () => {
+  if (!ticking) {
+    requestAnimationFrame(() => { onScroll(); ticking = false; });
+    ticking = true;
+  }
+});
+window.addEventListener('resize', onScroll);
+onScroll();
+</script>
+
+</body>
+</html>

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { GradientBlur } from "@/components/backgrounds/GradientBlur";
 import { ParticleTextEffect } from "@/components/backgrounds/ParticleTextEffect";
 import { AnimatedGradientText } from "@/components/ui/animated-gradient-text";
@@ -9,13 +10,32 @@ import { BlurFade } from "@/components/ui/blur-fade";
 import { APP_URL } from "@/lib/utils";
 
 export function Hero() {
+  const [enableParticles, setEnableParticles] = useState(true);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+    const updateParticles = () => {
+      setEnableParticles(!mediaQuery.matches);
+    };
+
+    updateParticles();
+    mediaQuery.addEventListener("change", updateParticles);
+
+    return () => {
+      mediaQuery.removeEventListener("change", updateParticles);
+    };
+  }, []);
+
   return (
     <section className="relative min-h-screen flex items-center justify-center overflow-hidden pt-16">
       {/* Backgrounds: ParticleTextEffect (21st.dev) + GradientBlur */}
-      <ParticleTextEffect
-        words={["STYLIA", "CORRIGE", "EDITA", "ESTILO", "FLUYE"]}
-        opacity={0.28}
-      />
+      {enableParticles && (
+        <ParticleTextEffect
+          words={["STYLIA", "CORRIGE", "EDITA", "ESTILO", "FLUYE"]}
+          opacity={0.28}
+        />
+      )}
       <GradientBlur variant="hero" />
 
       <div className="container-landing relative z-10 text-center max-w-5xl py-20">
@@ -113,33 +133,6 @@ export function Hero() {
           </p>
         </BlurFade>
 
-        {/* Hero visual — product screenshot placeholder */}
-        <BlurFade delay={550}>
-          <div className="mt-16 relative mx-auto max-w-4xl">
-            <div className="absolute -inset-4 bg-krypton/5 rounded-3xl blur-2xl" />
-            <div className="relative rounded-2xl border border-border overflow-hidden shadow-card bg-surface">
-              {/* Placeholder for product screenshot */}
-              <div className="aspect-[16/9] bg-gradient-to-br from-surface to-carbon-100 flex items-center justify-center">
-                <img
-                  src="/images/placeholders/hero-screenshot.png"
-                  alt="Interfaz de STYLIA mostrando correcciones editoriales"
-                  className="w-full h-full object-cover"
-                  onError={(e) => {
-                    const target = e.target as HTMLImageElement;
-                    target.style.display = "none";
-                    target.parentElement!.innerHTML = `
-                      <div class="flex flex-col items-center justify-center h-full gap-4 text-plomo">
-                        <svg class="w-16 h-16 text-krypton/30" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
-                        <span class="text-sm">[hero-screenshot.png — 1440×810px]</span>
-                      </div>`;
-                  }}
-                />
-              </div>
-            </div>
-          </div>
-        </BlurFade>
       </div>
     </section>
   );

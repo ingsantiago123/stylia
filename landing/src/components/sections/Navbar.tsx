@@ -9,18 +9,32 @@ export function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 20);
-    window.addEventListener("scroll", onScroll);
+    let ticking = false;
+
+    const onScroll = () => {
+      if (ticking) return;
+
+      ticking = true;
+      requestAnimationFrame(() => {
+        const nextScrolled = window.scrollY > 20;
+        setScrolled((prev) => (prev === nextScrolled ? prev : nextScrolled));
+        ticking = false;
+      });
+    };
+
+    window.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
   const navLinks = [
-    { label: "Problema", href: "#problema" },
-    { label: "Cómo funciona", href: "#como-funciona" },
-    { label: "Funcionalidades", href: "#funcionalidades" },
-    { label: "Resultados", href: "#resultados" },
-    { label: "Precios", href: "#precios" },
-    { label: "FAQ", href: "#faq" },
+    { label: "El viaje", href: "#journey" },
+    { label: "Cargar", href: "#stage-1" },
+    { label: "Análisis", href: "#stage-2" },
+    { label: "Edición", href: "#stage-4" },
+    { label: "Revisión", href: "#stage-5" },
+    { label: "Entregar", href: "#stage-6" },
   ];
 
   return (

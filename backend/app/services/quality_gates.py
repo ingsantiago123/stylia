@@ -280,10 +280,16 @@ def validate_correction(
     corrected: str,
     profile: dict | None = None,
     protected_terms: list[str] | None = None,
+    paragraph_type: str | None = None,
 ) -> list[GateResult]:
     """
     Ejecuta todos los quality gates sobre una corrección.
     Retorna lista de resultados. Si alguno crítico falla → descartar.
+
+    Args:
+        paragraph_type: Tipo del párrafo. Acepta el parámetro pero NO lo usa para
+            ajustar umbrales — la expansión estricta para celdas (1.05) causaba
+            descarte masivo de correcciones legítimas.
     """
     profile = profile or {}
     max_expansion = profile.get("max_expansion_ratio", 1.15)

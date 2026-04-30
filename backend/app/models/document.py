@@ -114,6 +114,10 @@ class Document(Base):
     terms: Mapped[list["TermRegistry"]] = relationship(  # noqa: F821
         "TermRegistry", back_populates="document", cascade="all, delete-orphan"
     )
+    global_context: Mapped["DocumentGlobalContext | None"] = relationship(  # noqa: F821
+        "DocumentGlobalContext", back_populates="document", uselist=False,
+        cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         Index("idx_documents_status", "status"),

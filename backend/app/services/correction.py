@@ -32,6 +32,9 @@ from app.services.complexity_router import (
     route_paragraph, compute_section_position, CorrectionRoute,
 )
 from app.services.quality_gates import validate_correction as run_quality_gates
+from app.services.engine_router import decide_engines, revert_lt_changes_in_protected_regions
+from app.services.protected_regions import regions_to_prompt_text
+from app.services.audit_pass import audit_paragraph_with_context, should_run_pass2
 
 logger = logging.getLogger(__name__)
 
@@ -225,19 +228,26 @@ def _correct_single_paragraph(
     max_expansion: float,
     sections: list[dict],
     para_classifications: dict[int, dict],
-    context_prev: str | None,
+    context_prev: str | dict | None,
     context_window: list[str] | None = None,
     precomputed_lt: dict | None = None,
+    next_paragraph_type: str | None = None,
+    table_context: dict | None = None,
+    has_page_break: bool = False,
+    audit_log_collector: list | None = None,
 ) -> tuple[dict | None, dict | None, str, str]:
     """
     Corrige un párrafo individual.
     Reutilizado por la ruta secuencial, los batch tasks y el boundary check.
 
     Args:
-        context_prev: Texto del último párrafo corregido (seed para MVP2).
+        context_prev: Último párrafo corregido — puede ser str (legacy) o dict enriquecido
+            {text, type, ends_abruptly, location_type} para mayor contexto estructural.
         context_window: Últimos N párrafos corregidos (seed para fallback MVP1).
         precomputed_lt: Resultado pre-computado de LT (evita llamada HTTP). Tiene las
             claves: corrected_text, operations, has_changes. Si es None se llama a LT.
+        next_paragraph_type: Tipo del párrafo siguiente (lookahead para no alterar flujo).
+        table_context: Contexto de tabla {header_row, num_cols, col_index} para celdas.
 
     Returns:
         Tupla (patch_data | None, usage_record | None, final_text, route_taken).
@@ -246,28 +256,61 @@ def _correct_single_paragraph(
     """
     text = para_text.strip()
 
+    # === Lote 4: Clasificación — necesaria antes de engines para las reglas de decisión ===
+    classification = para_classifications.get(idx, {})
+    paragraph_type = classification.get("paragraph_type")
+
+    # Fallback: inferir tipo desde location string si no hay clasificación
+    if not paragraph_type:
+        if location.startswith("header:"):
+            paragraph_type = "encabezado"
+        elif location.startswith("footer:"):
+            paragraph_type = "footer"
+        elif location.startswith("table:"):
+            paragraph_type = "celda_tabla"
+
+    # === Sprint 3: Engine Router — detectar regiones protegidas y reglas de colisión ===
+    engine_decision = decide_engines(
+        text=text,
+        paragraph_type=paragraph_type,
+        profile=profile,
+        base_disabled_rules=disabled_rules,
+    )
+    protected_regions = engine_decision.protected_regions
+    effective_disabled_rules = engine_decision.lt_disabled_rules
+    reverted_lt: list[dict] = []
+
     # === PASO 1: LanguageTool (ortografía y gramática) ===
     if precomputed_lt is not None:
-        # Usar resultado pre-computado (Pass 1 paralelo)
+        # Usar resultado pre-computado (Pass 1 paralelo) — los disabled_rules ya se aplicaron
         post_lt_text = precomputed_lt["corrected_text"]
         lt_operations = precomputed_lt["operations"]
     else:
         lt_result = correct_text_with_languagetool(
             text=text,
             language=language,
-            disabled_rules=disabled_rules,
+            disabled_rules=effective_disabled_rules,
         )
         post_lt_text = lt_result.corrected_text
         lt_operations = lt_result.operations
+
+    # Revertir cambios LT que afecten regiones protegidas
+    if protected_regions and post_lt_text != text:
+        post_lt_text, reverted_lt = revert_lt_changes_in_protected_regions(
+            original_text=text,
+            lt_corrected=post_lt_text,
+            protected_regions=protected_regions,
+        )
+        if reverted_lt:
+            logger.info(
+                f"Párrafo {idx}: {len(reverted_lt)} correcciones LT revertidas "
+                f"(región protegida)"
+            )
 
     source = "languagetool"
 
     if lt_operations:
         logger.info(f"Párrafo {idx}: LanguageTool → {len(lt_operations)} correcciones")
-
-    # === Lote 4: Contexto jerárquico y routing ===
-    classification = para_classifications.get(idx, {})
-    paragraph_type = classification.get("paragraph_type")
 
     section_position, is_section_transition, current_section = \
         compute_section_position(idx, sections)
@@ -300,7 +343,8 @@ def _correct_single_paragraph(
         final_text = post_lt_text
 
     elif profile and system_prompt:
-        # MVP2: Prompt parametrizado con perfil + contexto jerárquico
+        # MVP2: Prompt parametrizado con perfil + contexto jerárquico enriquecido
+        protected_regions_text = regions_to_prompt_text(protected_regions) if protected_regions else None
         user_prompt = build_user_prompt(
             text=post_lt_text,
             profile=profile,
@@ -309,19 +353,37 @@ def _correct_single_paragraph(
             section_summary=section_summary,
             active_terms=active_terms,
             paragraph_type=paragraph_type,
+            next_paragraph_type=next_paragraph_type,
+            table_context=table_context,
+            has_page_break=has_page_break,
+            protected_regions_text=protected_regions_text,
         )
 
         if route_decision.route == CorrectionRoute.EDITORIAL:
             model_override = settings.openai_editorial_model
+            max_tokens_for_route = settings.openai_editorial_max_tokens
         else:
             model_override = settings.openai_cheap_model
+            max_tokens_for_route = settings.openai_cheap_max_tokens
         model_used_actual = model_override
+
+        def _p1_audit_cb(raw: dict) -> None:
+            if audit_log_collector is not None:
+                audit_log_collector.append({
+                    **raw,
+                    "paragraph_index": idx,
+                    "location": location,
+                    "pass_number": 1,
+                    "call_purpose": "mechanical_correction",
+                })
 
         llm_response, llm_usage = openai_client.correct_with_profile(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_length=max_length,
             model_override=model_override,
+            max_tokens_override=max_tokens_for_route,
+            on_audit_log=_p1_audit_cb,
         )
         if llm_usage["total_tokens"] > 0:
             _cost = (llm_usage["prompt_tokens"] / 1e6 * settings.openai_pricing_input) + \
@@ -335,7 +397,15 @@ def _correct_single_paragraph(
                 "cost_usd": round(_cost, 8),
             }
 
-        if llm_response and llm_response.get("action") == "correct":
+        if llm_response is None:
+            # LLM no respondió (timeout, error de modelo, API key inválida, etc.)
+            # Visibilidad explícita en logs — antes era un fallback silencioso.
+            logger.warning(
+                f"Párrafo {idx}: LLM no respondió (modelo={model_override}, ruta={route_taken}). "
+                f"Aplicando solo LanguageTool como fallback."
+            )
+            final_text = post_lt_text
+        elif llm_response.get("action") == "correct":
             corrected = llm_response.get("corrected_text", "")
             if corrected and corrected != post_lt_text:
                 final_text = corrected
@@ -350,6 +420,7 @@ def _correct_single_paragraph(
             else:
                 final_text = post_lt_text
         else:
+            # LLM respondió pero decidió skip/flag — no es un error
             final_text = post_lt_text
     else:
         # MVP1 fallback: prompt genérico
@@ -388,6 +459,7 @@ def _correct_single_paragraph(
             corrected=final_text,
             profile=profile,
             protected_terms=profile.get("protected_terms", []) if profile else [],
+            paragraph_type=paragraph_type,
         )
         gate_results_data = [g.to_dict() for g in gates]
         failed_critical = [g for g in gates if not g.passed and g.critical]
@@ -429,6 +501,11 @@ def _correct_single_paragraph(
             "review_status": review_status,
             "review_reason": review_reason,
             "gate_results": gate_results_data,
+            # Sprint 3: Audit trail dual-engine
+            "lt_corrections_json": lt_operations if lt_operations else None,
+            "llm_change_log_json": llm_changes if llm_changes else None,
+            "reverted_lt_changes_json": reverted_lt if reverted_lt else None,
+            "protected_regions_snapshot": [r.to_dict() for r in protected_regions] if protected_regions else None,
         }
 
     return patch_data, usage_record, final_text, route_taken
@@ -442,15 +519,18 @@ def correct_docx_sync(
     analysis_data: dict | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     docx_bytes_cached: bytes | None = None,
-) -> tuple[list[dict], list[dict]]:
+    global_context: dict | None = None,
+) -> tuple[list[dict], list[dict], list[tuple[str, str, bool]], list[dict]]:
     """
     Corrige un DOCX directamente, párrafo por párrafo.
-    Pipeline: Router → LanguageTool → ChatGPT (con contexto jerárquico).
+    Plan v4: Pipeline de Doble Pasada — Pasada 1 (mecánica) + Pasada 2 (auditoría contextual).
 
     Args:
         analysis_data: Resultado de Etapa C con sections, paragraph_classifications.
+        global_context: ADN editorial del documento (de Etapa C.6). Si None, no hay Pasada 2.
 
-    Retorna tupla (patches, usage_records).
+    Retorna tupla (patches, usage_records, all_paragraphs, audit_log_entries).
+    audit_log_entries: lista de payloads RAW de cada llamada LLM para persistir en llm_audit_log.
     """
     language = config.get("language", "es")
     disabled_rules = config.get("lt_disabled_rules", [])
@@ -473,7 +553,9 @@ def correct_docx_sync(
 
     patches = []
     corrected_context: list[str] = []
+    corrected_meta: list[dict] = []   # contexto enriquecido con tipo y metadata
     usage_records: list[dict] = []
+    audit_log_entries: list[dict] = []  # Plan v4: payloads RAW para llm_audit_log
 
     all_paragraphs = _collect_all_paragraphs(doc)
     logger.info(f"Documento {doc_id}: {len(all_paragraphs)} párrafos a corregir")
@@ -487,6 +569,9 @@ def correct_docx_sync(
     para_classifications = {}
     for pc in (analysis_data or {}).get("paragraph_classifications", []):
         para_classifications[pc["paragraph_index"]] = pc
+
+    # Construir mapa de contexto de tabla para corrección table-aware
+    table_context_map = _build_table_context_map(doc)
 
     # Contadores para logging final
     route_counts = {"skip": 0, "cheap": 0, "editorial": 0}
@@ -504,12 +589,47 @@ def correct_docx_sync(
             max_workers=lt_workers,
         )
 
-    for idx, (para_text, location) in enumerate(all_paragraphs):
+    for idx, (para_text, location, para_has_pb) in enumerate(all_paragraphs):
         text = para_text.strip()
         if not text or len(text) < 3:
             continue
 
-        context_prev = corrected_context[-1] if corrected_context else None
+        # Contexto previo enriquecido con metadata estructural
+        context_prev: dict | None = None
+        if corrected_meta:
+            last = corrected_meta[-1]
+            last_text = last["text"]
+            context_prev = {
+                "text": last_text,
+                "type": last.get("type", ""),
+                "ends_abruptly": bool(last_text) and last_text[-1] not in '.?!:)"»\n',
+                "location_type": last.get("location", "body:").split(":")[0],
+            }
+
+        # Lookahead: tipo del párrafo siguiente
+        next_para_type: str | None = None
+        if idx + 1 < len(all_paragraphs):
+            _, next_loc, _ = all_paragraphs[idx + 1]
+            next_cls = para_classifications.get(idx + 1, {})
+            next_para_type = next_cls.get("paragraph_type")
+            if not next_para_type:
+                if next_loc.startswith("header:"):
+                    next_para_type = "encabezado"
+                elif next_loc.startswith("footer:"):
+                    next_para_type = "footer"
+                elif next_loc.startswith("table:"):
+                    next_para_type = "celda_tabla"
+
+        # Contexto de tabla para celdas
+        table_ctx: dict | None = None
+        if location.startswith("table:"):
+            parts_loc = location.split(":")
+            if len(parts_loc) >= 4:
+                t_key = f"table:{parts_loc[1]}"
+                col_index = int(parts_loc[3]) if len(parts_loc) > 3 else 0
+                if t_key in table_context_map:
+                    table_ctx = {**table_context_map[t_key], "col_index": col_index}
+
         precomputed_lt = lt_precomputed[idx] if lt_precomputed else None
         patch_data, usage_record, final_text, route_taken = _correct_single_paragraph(
             idx=idx,
@@ -525,9 +645,107 @@ def correct_docx_sync(
             context_prev=context_prev,
             context_window=corrected_context[-3:],
             precomputed_lt=precomputed_lt,
+            next_paragraph_type=next_para_type,
+            table_context=table_ctx,
+            has_page_break=para_has_pb,
+            audit_log_collector=audit_log_entries,
         )
 
+        # ── Plan v4: PASADA 2 — Auditoría Contextual ────────────────────
+        classification = para_classifications.get(idx, {})
+        paragraph_type = classification.get("paragraph_type")
+        p1_rewrite_ratio = patch_data.get("rewrite_ratio") if patch_data else None
+        p1_has_changes = patch_data is not None
+        intervention_level = (profile or {}).get("intervention_level")
+
+        if global_context and should_run_pass2(
+            route_taken=route_taken,
+            pass1_rewrite_ratio=p1_rewrite_ratio,
+            intervention_level=intervention_level,
+            pass1_has_changes=p1_has_changes,
+        ):
+            corrected_pass1 = final_text  # resultado de Pasada 1
+
+            def _p2_audit_cb(raw: dict) -> None:
+                audit_log_entries.append({
+                    **raw,
+                    "paragraph_index": idx,
+                    "location": location,
+                    "pass_number": 2,
+                    "call_purpose": "contextual_audit",
+                })
+
+            audit_result, p2_usage = audit_paragraph_with_context(
+                original_text=text,
+                corrected_pass1=corrected_pass1,
+                global_context=global_context,
+                context_window=corrected_context[-3:],
+                paragraph_type=paragraph_type,
+                location=location,
+                on_audit_log=_p2_audit_cb,
+            )
+
+            if audit_result and audit_result.get("final_text"):
+                final_text = audit_result["final_text"]
+                # Calcular costo Pasada 2
+                if p2_usage.get("total_tokens", 0) > 0:
+                    _p2_cost = (
+                        p2_usage["prompt_tokens"] / 1e6 * settings.openai_pricing_input
+                        + p2_usage["completion_tokens"] / 1e6 * settings.openai_pricing_output
+                    )
+                    usage_records.append({
+                        "paragraph_index": idx,
+                        "location": location,
+                        "call_type": "audit_pass2",
+                        "model_used": settings.openai_editorial_model,
+                        **p2_usage,
+                        "cost_usd": round(_p2_cost, 8),
+                    })
+                # Actualizar o crear patch_data con resultado de Pasada 2
+                if patch_data is None and final_text != text:
+                    patch_data = {
+                        "paragraph_index": idx,
+                        "location": location,
+                        "original_text": text,
+                        "corrected_text": final_text,
+                        "lt_operations": [],
+                        "source": "chatgpt",
+                        "changes": audit_result.get("style_improvements", []),
+                        "confidence": audit_result.get("confidence"),
+                        "rewrite_ratio": None,
+                        "model_used": settings.openai_editorial_model,
+                        "route_taken": route_taken,
+                        "review_status": "auto_accepted",
+                        "review_reason": None,
+                        "gate_results": [],
+                        "lt_corrections_json": None,
+                        "llm_change_log_json": None,
+                        "reverted_lt_changes_json": None,
+                        "protected_regions_snapshot": None,
+                    }
+                if patch_data is not None:
+                    patch_data["corrected_pass1_text"] = corrected_pass1
+                    patch_data["pass2_audit_json"] = {
+                        "reverted_destructions": audit_result.get("reverted_destructions", []),
+                        "style_improvements": audit_result.get("style_improvements", []),
+                        "confidence": audit_result.get("confidence"),
+                        "pass1_quality": audit_result.get("pass1_quality"),
+                    }
+                    # Solo actualizar corrected_text si Pasada 2 produjo resultado diferente
+                    if final_text != corrected_pass1:
+                        patch_data["corrected_text"] = final_text
+                        patch_data["source"] = (
+                            patch_data.get("source", "languagetool") + "+audit"
+                        ).lstrip("+")
+
         corrected_context.append(final_text)
+        # Guardar metadata para el siguiente contexto enriquecido
+        cls = para_classifications.get(idx, {})
+        corrected_meta.append({
+            "text": final_text,
+            "type": cls.get("paragraph_type", ""),
+            "location": location,
+        })
         route_counts[route_taken] += 1
 
         if patch_data:
@@ -564,29 +782,61 @@ def correct_docx_sync(
         f"rutas: skip={route_counts['skip']} cheap={route_counts['cheap']} editorial={route_counts['editorial']}, "
         f"gates: ok={gate_stats['passed']} descartados={gate_stats['discarded']} revisión={gate_stats['flagged']}"
     )
-    return patches, usage_records
+    return patches, usage_records, all_paragraphs, audit_log_entries
 
 
-def _collect_all_paragraphs(doc: DocxDocument) -> list[tuple[str, str]]:
+def _build_table_context_map(doc: DocxDocument) -> dict[str, dict]:
     """
-    Recolecta todos los párrafos del documento con su ubicación.
-    Retorna lista de (texto, ubicación) donde ubicación es:
+    Construye un mapa de contexto por tabla para corrección table-aware.
+    Clave: 'table:T_IDX', valor: {num_cols, header_row, num_rows}.
+    """
+    result: dict[str, dict] = {}
+    for t_idx, table in enumerate(doc.tables):
+        rows = table.rows
+        if not rows:
+            continue
+        header_row = [cell.text.strip() for cell in rows[0].cells]
+        result[f"table:{t_idx}"] = {
+            "num_cols": len(rows[0].cells),
+            "num_rows": len(rows),
+            "header_row": header_row,
+        }
+    return result
+
+
+_WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _has_internal_page_break(para) -> bool:
+    """Devuelve True si el párrafo contiene un <w:br w:type="page"/> interno."""
+    for br in para._p.findall(f".//{{{_WORD_NS}}}br"):
+        if br.get(f"{{{_WORD_NS}}}type") == "page":
+            return True
+    return False
+
+
+def _collect_all_paragraphs(doc: DocxDocument) -> list[tuple[str, str, bool]]:
+    """
+    Recolecta todos los párrafos del documento con su ubicación y flag de salto de página.
+    Retorna lista de (texto, ubicación, has_page_break) donde ubicación es:
     - 'body:N' para párrafos del cuerpo
     - 'table:T:R:C:P' para párrafos en tablas
     - 'header:S:P' / 'footer:S:P' para encabezados/pies
     """
-    paragraphs = []
+    paragraphs: list[tuple[str, str, bool]] = []
 
     # Cuerpo principal
     for i, para in enumerate(doc.paragraphs):
-        paragraphs.append((para.text, f"body:{i}"))
+        paragraphs.append((para.text, f"body:{i}", _has_internal_page_break(para)))
 
     # Tablas
     for t_idx, table in enumerate(doc.tables):
         for r_idx, row in enumerate(table.rows):
             for c_idx, cell in enumerate(row.cells):
                 for p_idx, para in enumerate(cell.paragraphs):
-                    paragraphs.append((para.text, f"table:{t_idx}:{r_idx}:{c_idx}:{p_idx}"))
+                    paragraphs.append(
+                        (para.text, f"table:{t_idx}:{r_idx}:{c_idx}:{p_idx}", False)
+                    )
 
     # Headers y footers
     for s_idx, section in enumerate(doc.sections):
@@ -594,9 +844,54 @@ def _collect_all_paragraphs(doc: DocxDocument) -> list[tuple[str, str]]:
             if hf is None:
                 continue
             for p_idx, para in enumerate(hf.paragraphs):
-                paragraphs.append((para.text, f"{hf_type}:{s_idx}:{p_idx}"))
+                paragraphs.append((para.text, f"{hf_type}:{s_idx}:{p_idx}", False))
 
     return paragraphs
+
+
+def save_paragraph_locations_sync(
+    doc_id: str,
+    all_paragraphs: list[tuple[str, str, bool]],
+    para_classifications: dict[int, dict],
+    total_pages: int,
+    db,
+) -> int:
+    """
+    Persiste paragraph_locations para un documento.
+    Usa heurística lineal para page_start (mejora futura: correlación con bloques PDF).
+    Retorna el número de registros creados.
+    """
+    from app.models.paragraph_location import ParagraphLocation
+    from sqlalchemy import delete as sa_delete
+
+    total_paras = max(len(all_paragraphs), 1)
+
+    # Limpiar registros previos del documento
+    db.execute(sa_delete(ParagraphLocation).where(ParagraphLocation.doc_id == doc_id))
+
+    records = []
+    for idx, (_, location, has_pb) in enumerate(all_paragraphs):
+        cls = para_classifications.get(idx, {})
+        para_type = cls.get("paragraph_type")
+
+        # Heurística lineal: asume distribución uniforme de párrafos en páginas
+        est_page = max(1, min(int(idx / total_paras * total_pages) + 1, total_pages))
+
+        records.append(ParagraphLocation(
+            doc_id=doc_id,
+            paragraph_index=idx,
+            location=location,
+            page_start=est_page,
+            page_end=est_page,
+            has_internal_page_break=has_pb,
+            paragraph_type=para_type,
+            position_in_page="middle",
+        ))
+
+    db.bulk_save_objects(records)
+    db.commit()
+    logger.info(f"Documento {doc_id}: {len(records)} paragraph_locations guardadas")
+    return len(records)
 
 
 def compute_batch_boundaries(
@@ -653,7 +948,7 @@ def correct_batch_with_llm_sync(
     start_para: int,
     end_para: int,
     lt_results: list[dict],
-    all_paragraphs: list[tuple[str, str]],
+    all_paragraphs: list[tuple[str, str, bool]],
     language: str,
     disabled_rules: list[str],
     profile: dict | None,
@@ -662,26 +957,32 @@ def correct_batch_with_llm_sync(
     sections: list[dict],
     para_classifications: dict[int, dict],
     context_seed: str | None,
-) -> tuple[list[dict], list[dict], str]:
+    global_context: dict | None = None,
+) -> tuple[list[dict], list[dict], str, list[dict]]:
     """
-    Pass 2 LLM para el rango [start_para..end_para] (inclusive).
+    Pass 1 LLM + Pass 2 auditoría para el rango [start_para..end_para] (inclusive).
     Usa resultados LT pre-computados. Secuencial dentro del batch (preserva contexto LLM).
 
     Args:
         lt_results: Lista de resultados LT para todos los párrafos (indexada globalmente).
         context_seed: Texto del último párrafo corregido del batch anterior (aprox.).
+        global_context: ADN editorial del documento (Plan v4). Si None, no hay Pasada 2.
 
     Returns:
-        (patches, usage_records, last_corrected_text)
+        (patches, usage_records, last_corrected_text, audit_log_entries)
         last_corrected_text: último párrafo no vacío corregido — seed para el siguiente batch.
+        audit_log_entries: payloads RAW de llamadas LLM para llm_audit_log.
     """
     patches: list[dict] = []
     usage_records: list[dict] = []
+    audit_log_entries: list[dict] = []
     corrected_context: list[str] = [context_seed] if context_seed else []
     last_corrected_text: str = context_seed or ""
 
+    intervention_level = (profile or {}).get("intervention_level")
+
     for idx in range(start_para, min(end_para + 1, len(all_paragraphs))):
-        para_text, location = all_paragraphs[idx]
+        para_text, location, para_has_pb = all_paragraphs[idx]
         text = para_text.strip()
         if not text or len(text) < 3:
             continue
@@ -703,7 +1004,93 @@ def correct_batch_with_llm_sync(
             context_prev=context_prev,
             context_window=corrected_context[-3:],
             precomputed_lt=precomputed_lt,
+            has_page_break=para_has_pb,
+            audit_log_collector=audit_log_entries,
         )
+
+        # ── Plan v4: PASADA 2 — Auditoría Contextual ────────────────────
+        route_taken = patch_data.get("route_taken") if patch_data else "skip"
+        p1_rewrite_ratio = patch_data.get("rewrite_ratio") if patch_data else None
+        p1_has_changes = patch_data is not None
+        classification = para_classifications.get(idx, {})
+        paragraph_type = classification.get("paragraph_type")
+
+        if global_context and should_run_pass2(
+            route_taken=route_taken,
+            pass1_rewrite_ratio=p1_rewrite_ratio,
+            intervention_level=intervention_level,
+            pass1_has_changes=p1_has_changes,
+        ):
+            corrected_pass1 = final_text
+
+            def _p2_audit_cb(raw: dict, _idx=idx, _loc=location) -> None:
+                audit_log_entries.append({
+                    **raw,
+                    "paragraph_index": _idx,
+                    "location": _loc,
+                    "pass_number": 2,
+                    "call_purpose": "contextual_audit",
+                })
+
+            audit_result, p2_usage = audit_paragraph_with_context(
+                original_text=text,
+                corrected_pass1=corrected_pass1,
+                global_context=global_context,
+                context_window=corrected_context[-3:],
+                paragraph_type=paragraph_type,
+                location=location,
+                on_audit_log=_p2_audit_cb,
+            )
+
+            if audit_result and audit_result.get("final_text"):
+                final_text = audit_result["final_text"]
+                if p2_usage.get("total_tokens", 0) > 0:
+                    _p2_cost = (
+                        p2_usage["prompt_tokens"] / 1e6 * settings.openai_pricing_input
+                        + p2_usage["completion_tokens"] / 1e6 * settings.openai_pricing_output
+                    )
+                    usage_records.append({
+                        "paragraph_index": idx,
+                        "location": location,
+                        "call_type": "audit_pass2",
+                        "model_used": settings.openai_editorial_model,
+                        **p2_usage,
+                        "cost_usd": round(_p2_cost, 8),
+                    })
+                if patch_data is None and final_text != text:
+                    patch_data = {
+                        "paragraph_index": idx,
+                        "location": location,
+                        "original_text": text,
+                        "corrected_text": final_text,
+                        "lt_operations": [],
+                        "source": "chatgpt+audit",
+                        "changes": audit_result.get("style_improvements", []),
+                        "confidence": audit_result.get("confidence"),
+                        "rewrite_ratio": None,
+                        "model_used": settings.openai_editorial_model,
+                        "route_taken": route_taken,
+                        "review_status": "auto_accepted",
+                        "review_reason": None,
+                        "gate_results": [],
+                        "lt_corrections_json": None,
+                        "llm_change_log_json": None,
+                        "reverted_lt_changes_json": None,
+                        "protected_regions_snapshot": None,
+                    }
+                if patch_data is not None:
+                    patch_data["corrected_pass1_text"] = corrected_pass1
+                    patch_data["pass2_audit_json"] = {
+                        "reverted_destructions": audit_result.get("reverted_destructions", []),
+                        "style_improvements": audit_result.get("style_improvements", []),
+                        "confidence": audit_result.get("confidence"),
+                        "pass1_quality": audit_result.get("pass1_quality"),
+                    }
+                    if final_text != corrected_pass1:
+                        patch_data["corrected_text"] = final_text
+                        patch_data["source"] = (
+                            patch_data.get("source", "languagetool") + "+audit"
+                        ).lstrip("+")
 
         corrected_context.append(final_text)
         last_corrected_text = final_text
@@ -713,17 +1100,19 @@ def correct_batch_with_llm_sync(
         if usage_record:
             usage_records.append(usage_record)
 
+    p2_count = sum(1 for e in audit_log_entries if e.get("pass_number") == 2)
     logger.info(
-        f"Batch {batch_index} [{start_para}-{end_para}]: {len(patches)} parches generados"
+        f"Batch {batch_index} [{start_para}-{end_para}]: {len(patches)} parches, "
+        f"{p2_count} auditorías P2"
     )
-    return patches, usage_records, last_corrected_text
+    return patches, usage_records, last_corrected_text, audit_log_entries
 
 
 def check_batch_boundaries(
     batch_results: dict[int, dict],
     batch_boundaries: list[tuple[int, int]],
     lt_results: list[dict],
-    all_paragraphs: list[tuple[str, str]],
+    all_paragraphs: list[tuple[str, str, bool]],
     language: str,
     disabled_rules: list[str],
     profile: dict | None,
@@ -764,7 +1153,7 @@ def check_batch_boundaries(
         first_idx = None
         for para_idx in range(start_para, end_para + 1):
             if para_idx < len(all_paragraphs):
-                para_text, _ = all_paragraphs[para_idx]
+                para_text = all_paragraphs[para_idx][0]
                 if para_text.strip() and len(para_text.strip()) >= 3:
                     first_idx = para_idx
                     break
@@ -788,7 +1177,7 @@ def check_batch_boundaries(
             continue
 
         # Re-corregir con el seed real
-        para_text, location = all_paragraphs[first_idx]
+        para_text, location, para_has_pb = all_paragraphs[first_idx]
         precomputed_lt = lt_results[first_idx] if lt_results and first_idx < len(lt_results) else None
 
         try:
@@ -805,6 +1194,7 @@ def check_batch_boundaries(
                 para_classifications=para_classifications,
                 context_prev=real_seed_trimmed,
                 precomputed_lt=precomputed_lt,
+                has_page_break=para_has_pb,
             )
         except Exception as e:
             logger.error(
@@ -857,7 +1247,7 @@ def check_batch_boundaries(
 
 
 def correct_all_paragraphs_lt_sync(
-    all_paragraphs: list[tuple[str, str]],
+    all_paragraphs: list[tuple[str, str, bool]],
     language: str,
     disabled_rules: list[str],
     max_workers: int,
@@ -873,7 +1263,7 @@ def correct_all_paragraphs_lt_sync(
     results: list[dict | None] = [None] * len(all_paragraphs)
 
     def _run_lt(idx: int) -> tuple[int, dict]:
-        para_text, _ = all_paragraphs[idx]
+        para_text = all_paragraphs[idx][0]
         text = para_text.strip()
         if not text or len(text) < 3:
             return idx, {

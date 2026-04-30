@@ -5,4 +5,8 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+const prodFallbackAppUrl = "https://ingsantiago123.github.io/stylia-landing/";
+
+export const APP_URL =
+  process.env.NEXT_PUBLIC_APP_URL ||
+  (process.env.NODE_ENV === "production" ? prodFallbackAppUrl : "http://localhost:3000");

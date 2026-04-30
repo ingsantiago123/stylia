@@ -155,6 +155,75 @@ async def lifespan(app: FastAPI):
             await conn.execute(text(sql))
         logger.info("HITL: columnas de edición manual, recorrección y render_version verificadas/creadas")
 
+    # Plan v3: audit trail en patches + columna batch_id alias
+    async with engine.begin() as conn:
+        v3_migrations = [
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS lt_corrections_json JSONB",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS llm_change_log_json JSONB",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS reverted_lt_changes_json JSONB",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS protected_regions_snapshot JSONB",
+        ]
+        for sql in v3_migrations:
+            await conn.execute(text(sql))
+        logger.info("Plan v3: columnas de audit trail en patches verificadas/creadas")
+
+    # Plan v4: doble pasada + trazabilidad RAW
+    async with engine.begin() as conn:
+        v4_patch_migrations = [
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS corrected_pass1_text TEXT",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS pass2_audit_json JSONB",
+            # Ampliar source de varchar(20) a varchar(50) para 'languagetool+chatgpt+audit'
+            "ALTER TABLE patches ALTER COLUMN source TYPE VARCHAR(50)",
+        ]
+        for sql in v4_patch_migrations:
+            await conn.execute(text(sql))
+        logger.info("Plan v4: columnas de doble pasada en patches verificadas/creadas")
+
+    async with engine.begin() as conn:
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS document_global_context (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                doc_id UUID NOT NULL UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
+                global_summary TEXT,
+                dominant_voice TEXT,
+                dominant_register VARCHAR(50),
+                key_themes_json JSONB,
+                protected_globals_json JSONB,
+                style_fingerprint_json JSONB,
+                total_paragraphs INTEGER,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS llm_audit_log (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                doc_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                paragraph_index INTEGER,
+                location VARCHAR(100),
+                pass_number SMALLINT NOT NULL DEFAULT 1,
+                call_purpose VARCHAR(40) NOT NULL,
+                model_used VARCHAR(50),
+                request_payload JSONB,
+                response_payload JSONB,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                latency_ms INTEGER,
+                error_text TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_llm_audit_doc_para "
+            "ON llm_audit_log (doc_id, paragraph_index, pass_number)"
+        ))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_llm_audit_doc_created "
+            "ON llm_audit_log (doc_id, created_at)"
+        ))
+        logger.info("Plan v4: tablas document_global_context y llm_audit_log verificadas/creadas")
+
     # Inicializar bucket de MinIO
     from app.utils.minio_client import ensure_bucket
     await ensure_bucket()

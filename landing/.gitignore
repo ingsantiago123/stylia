@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# build outputs
+.next/
+out/
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# local env files
+.env*
+!.env.example
+
+# misc
+.DS_Store
+coverage/
+*.tsbuildinfo

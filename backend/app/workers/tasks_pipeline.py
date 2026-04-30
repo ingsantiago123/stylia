@@ -28,11 +28,13 @@ from app.models.job import Job
 from app.models.style_profile import DocumentProfile
 from app.models.llm_usage import LlmUsage
 from app.models.correction_batch import CorrectionBatch
+from app.models.document_global_context import DocumentGlobalContext
+from app.models.llm_audit_log import LlmAuditLog
 
 from app.utils import minio_client
 from app.services.ingestion import process_ingestion_sync
 from app.services.extraction import extract_all_pages_sync
-from app.services.analysis import analyze_document_sync
+from app.services.analysis import analyze_document_sync, analyze_global_context_sync
 from app.services.correction import (
     correct_page_blocks_sync,
     correct_docx_sync,
@@ -40,6 +42,7 @@ from app.services.correction import (
     compute_batch_boundaries,
     correct_all_paragraphs_lt_sync,
     check_batch_boundaries,
+    save_paragraph_locations_sync,
 )
 from app.services.rendering import render_docx_first_sync
 from app.models.section_summary import SectionSummary
@@ -335,6 +338,11 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
         p_review_status = patch_data.get("review_status", "auto_accepted")
         p_review_reason = patch_data.get("review_reason")
         p_gate_results = patch_data.get("gate_results")
+        # Sprint 3: Audit trail dual-engine
+        p_lt_corrections = patch_data.get("lt_corrections_json")
+        p_llm_log = patch_data.get("llm_change_log_json")
+        p_reverted = patch_data.get("reverted_lt_changes_json")
+        p_protected = patch_data.get("protected_regions_snapshot")
 
         if llm_changes:
             for change in llm_changes:
@@ -358,6 +366,12 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
                     model_used=patch_data.get("model_used", "languagetool"),
                     paragraph_index=para_idx,
                     route_taken=route,
+                    lt_corrections_json=p_lt_corrections,
+                    llm_change_log_json=p_llm_log,
+                    reverted_lt_changes_json=p_reverted,
+                    protected_regions_snapshot=p_protected,
+                    corrected_pass1_text=patch_data.get("corrected_pass1_text"),
+                    pass2_audit_json=patch_data.get("pass2_audit_json"),
                 ))
                 patch_version += 1
         else:
@@ -378,6 +392,12 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
                 model_used=patch_data.get("model_used", "languagetool"),
                 paragraph_index=para_idx,
                 route_taken=route,
+                lt_corrections_json=p_lt_corrections,
+                llm_change_log_json=p_llm_log,
+                reverted_lt_changes_json=p_reverted,
+                protected_regions_snapshot=p_protected,
+                corrected_pass1_text=patch_data.get("corrected_pass1_text"),
+                pass2_audit_json=patch_data.get("pass2_audit_json"),
             ))
             patch_version += 1
 
@@ -654,6 +674,7 @@ def _dispatch_parallel_correction(
     profile_dict: dict | None,
     analysis_result: dict,
     job: Job,
+    global_context_dict: dict | None = None,
 ) -> bool:
     """
     Orquesta la corrección paralela por lotes (Stage D).
@@ -732,6 +753,16 @@ def _dispatch_parallel_correction(
         content_type="application/json",
     )
 
+    # Plan v4: serializar contexto global para que cada lote lo use en la doble pasada
+    global_context_key: str | None = None
+    if global_context_dict:
+        global_context_key = f"correction/{doc_id}/global_context.json"
+        minio_client.upload_file(
+            global_context_key,
+            json.dumps(global_context_dict, ensure_ascii=False).encode("utf-8"),
+            content_type="application/json",
+        )
+
     # Context seeds: texto post-LT del último párrafo no-vacío del batch anterior
     seeds: list[str | None] = [None]
     for b_idx in range(1, len(batch_boundaries)):
@@ -776,6 +807,7 @@ def _dispatch_parallel_correction(
             analysis_key=analysis_key,
             language=language,
             disabled_rules=disabled_rules,
+            global_context_key=global_context_key,
         )
         for b_idx, (start, end) in enumerate(batch_boundaries)
     )
@@ -789,6 +821,7 @@ def _dispatch_parallel_correction(
         analysis_key=analysis_key,
         enable_boundary_check=settings.parallel_correction_boundary_check,
         job_id=str(job.id),
+        global_context_key=global_context_key,
     ))
 
     logger.info(
@@ -1055,6 +1088,61 @@ def process_document_pipeline(self, doc_id: str):
                 content_type="application/json",
             )
 
+        # =============================================
+        # C.6: Análisis de Contexto Global (Plan v4)
+        # =============================================
+        global_context_dict: dict | None = None
+        try:
+            all_paras_for_c6 = [
+                (pc["text_preview"], pc["location"])
+                for pc in analysis_result.get("paragraph_classifications", [])
+            ]
+            protected_terms_for_c6 = [
+                t["term"] for t in analysis_result.get("terms", []) if t["is_protected"]
+            ]
+            c6_result = analyze_global_context_sync(
+                doc_id=str(doc_id),
+                all_paragraphs=all_paras_for_c6,
+                profile=profile_dict,
+                protected_terms=protected_terms_for_c6,
+            )
+            global_context_dict = {
+                "global_summary": c6_result.get("global_summary"),
+                "dominant_voice": c6_result.get("dominant_voice"),
+                "dominant_register": c6_result.get("dominant_register"),
+                "key_themes_json": c6_result.get("key_themes_json", []),
+                "protected_globals_json": c6_result.get("protected_globals_json", []),
+                "style_fingerprint_json": c6_result.get("style_fingerprint_json", {}),
+            }
+            # Persistir en document_global_context
+            existing_gc = db.execute(
+                select(DocumentGlobalContext).where(DocumentGlobalContext.doc_id == doc_id)
+            ).scalar_one_or_none()
+            if existing_gc:
+                for k, v in global_context_dict.items():
+                    setattr(existing_gc, k, v)
+                existing_gc.total_paragraphs = analysis_result.get("stats", {}).get("total_paragraphs")
+            else:
+                db.add(DocumentGlobalContext(
+                    doc_id=doc_id,
+                    total_paragraphs=analysis_result.get("stats", {}).get("total_paragraphs"),
+                    **global_context_dict,
+                ))
+            # Agregar uso LLM de C.6 si existe
+            if c6_result.get("usage_record"):
+                db.add(LlmUsage(doc_id=doc_id, **c6_result["usage_record"]))
+            # Agregar términos globales protegidos al perfil activo
+            global_protected = [p.get("term") for p in c6_result.get("protected_globals_json", []) if p.get("term")]
+            if global_protected and profile_dict:
+                existing_pt = set(profile_dict.get("protected_terms", []))
+                new_global = [t for t in global_protected if t not in existing_pt]
+                if new_global:
+                    profile_dict["protected_terms"] = list(existing_pt) + new_global
+                    logger.info(f"[Etapa C.6] {len(new_global)} términos globales protegidos añadidos al perfil")
+            logger.info(f"[Etapa C.6] Contexto global generado: register={c6_result.get('dominant_register')}")
+        except Exception as _c6_err:
+            logger.warning(f"[Etapa C.6] Error no bloqueante: {_c6_err}")
+
         db.commit()
         logger.info(
             f"[Etapa C] Completada: "
@@ -1091,6 +1179,7 @@ def process_document_pipeline(self, doc_id: str):
                     db=db, doc_id=str(doc_id), doc=doc,
                     config=config, profile_dict=profile_dict,
                     analysis_result=analysis_result, job=job,
+                    global_context_dict=global_context_dict,
                 )
                 if dispatched:
                     stage_timings["D"] = round(time.time() - t0_d, 1)
@@ -1109,8 +1198,8 @@ def process_document_pipeline(self, doc_id: str):
                     current=current, total=total,
                 )
 
-            logger.info("[Etapa D] Ruta 1: corrigiendo párrafos directamente del DOCX...")
-            docx_patches, usage_records = correct_docx_sync(
+            logger.info("[Etapa D] Ruta 1: corrigiendo párrafos (doble pasada Plan v4)...")
+            docx_patches, usage_records, _all_paragraphs, audit_log_entries = correct_docx_sync(
                 doc_id=str(doc_id),
                 docx_uri=doc.source_uri,
                 config=config,
@@ -1118,10 +1207,48 @@ def process_document_pipeline(self, doc_id: str):
                 analysis_data=analysis_result,
                 on_progress=_correction_progress,
                 docx_bytes_cached=_docx_bytes,
+                global_context=global_context_dict,
             )
+
+            # Sprint 2: persistir mapa canónico paragraph_index → página
+            try:
+                _para_cls = {
+                    pc["paragraph_index"]: pc
+                    for pc in (analysis_result or {}).get("paragraph_classifications", [])
+                }
+                save_paragraph_locations_sync(
+                    doc_id=str(doc_id),
+                    all_paragraphs=_all_paragraphs,
+                    para_classifications=_para_cls,
+                    total_pages=doc.total_pages or 1,
+                    db=db,
+                )
+            except Exception as _e:
+                logger.warning(f"[Etapa D] paragraph_locations no guardadas (no bloqueante): {_e}")
 
             for record in usage_records:
                 db.add(LlmUsage(doc_id=doc_id, **record))
+
+            # Plan v4: persistir audit log entries (RAW request/response)
+            if audit_log_entries:
+                for entry in audit_log_entries:
+                    db.add(LlmAuditLog(
+                        doc_id=doc_id,
+                        paragraph_index=entry.get("paragraph_index"),
+                        location=entry.get("location"),
+                        pass_number=entry.get("pass_number", 1),
+                        call_purpose=entry.get("call_purpose", "mechanical_correction"),
+                        model_used=entry.get("model_used"),
+                        request_payload=entry.get("request_payload"),
+                        response_payload=entry.get("response_payload"),
+                        prompt_tokens=entry.get("prompt_tokens"),
+                        completion_tokens=entry.get("completion_tokens"),
+                        total_tokens=entry.get("total_tokens"),
+                        latency_ms=entry.get("latency_ms"),
+                        error_text=entry.get("error_text"),
+                    ))
+                logger.info(f"[Etapa D] {len(audit_log_entries)} entradas de audit log guardadas")
+
             db.commit()
 
             total_prompt = sum(r["prompt_tokens"] for r in usage_records)
@@ -1217,6 +1344,7 @@ def correct_batch_llm(
     analysis_key: str | None,
     language: str,
     disabled_rules: list[str],
+    global_context_key: str | None = None,
 ) -> str:
     """
     Tarea Celery: Pass 2 (LLM) para un batch de párrafos [start_para..end_para].
@@ -1254,6 +1382,18 @@ def correct_batch_llm(
         if analysis_key:
             analysis_data = json.loads(minio_client.download_file(analysis_key).decode("utf-8"))
 
+        # Plan v4: cargar contexto global para doble pasada
+        global_context_dict: dict | None = None
+        if global_context_key:
+            try:
+                global_context_dict = json.loads(
+                    minio_client.download_file(global_context_key).decode("utf-8")
+                )
+            except Exception as gc_err:
+                logger.warning(
+                    f"[correct_batch_llm] No se pudo cargar global_context ({global_context_key}): {gc_err}"
+                )
+
         profile = json.loads(profile_json) if profile_json else None
         system_prompt = build_system_prompt() if profile else None
         max_expansion = profile.get("max_expansion_ratio", 1.15) if profile else 1.15
@@ -1263,8 +1403,8 @@ def correct_batch_llm(
             for pc in analysis_data.get("paragraph_classifications", [])
         }
 
-        # Pass 2: LLM secuencial para este batch
-        patches, usage_records, last_corrected_text = correct_batch_with_llm_sync(
+        # LLM secuencial para este batch — Plan v4: doble pasada activada
+        patches, usage_records, last_corrected_text, audit_log_entries = correct_batch_with_llm_sync(
             batch_index=batch_index,
             start_para=start_para,
             end_para=end_para,
@@ -1278,6 +1418,7 @@ def correct_batch_llm(
             sections=sections,
             para_classifications=para_classifications,
             context_seed=context_seed,
+            global_context=global_context_dict,
         )
 
         # Guardar resultado en MinIO
@@ -1311,9 +1452,34 @@ def correct_batch_llm(
             db.add(LlmUsage(doc_id=doc_id, **record))
         db.commit()
 
+        # Plan v4: persistir audit log entries (RAW payloads de ambas pasadas)
+        p2_count = 0
+        for entry in audit_log_entries:
+            try:
+                db.add(LlmAuditLog(
+                    doc_id=doc_id,
+                    paragraph_index=entry.get("paragraph_index"),
+                    location=entry.get("location"),
+                    pass_number=entry.get("pass_number", 1),
+                    call_purpose=entry.get("call_purpose", "mechanical_correction"),
+                    model_used=entry.get("model_used"),
+                    request_payload=entry.get("request_payload"),
+                    response_payload=entry.get("response_payload"),
+                    prompt_tokens=entry.get("prompt_tokens"),
+                    completion_tokens=entry.get("completion_tokens"),
+                    total_tokens=entry.get("total_tokens"),
+                    latency_ms=entry.get("latency_ms"),
+                    error_text=entry.get("error_text"),
+                ))
+                if entry.get("pass_number") == 2:
+                    p2_count += 1
+            except Exception as ae:
+                logger.warning(f"[correct_batch_llm] Error guardando audit log entry: {ae}")
+        db.commit()
+
         logger.info(
             f"[correct_batch_llm] Batch {batch_index} completado: "
-            f"{len(patches)} parches → {result_key}"
+            f"{len(patches)} parches, {p2_count} auditorías P2 → {result_key}"
         )
         return result_key
 
@@ -1344,6 +1510,7 @@ def assemble_correction_results(
     analysis_key: str | None,
     enable_boundary_check: bool,
     job_id: str,
+    global_context_key: str | None = None,
 ) -> None:
     """
     Chord callback: combina todos los batch results, aplica boundary check opcional,

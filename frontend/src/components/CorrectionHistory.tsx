@@ -46,6 +46,20 @@ const ROUTE_COLORS: Record<string, { bg: string; text: string; label: string }> 
   editorial: { bg: "bg-purple-900/30", text: "text-purple-400", label: "Editorial" },
 };
 
+// Sprint 6: badges de tipo de párrafo
+const PARA_TYPE_COLORS: Record<string, { bg: string; text: string; label: string }> = {
+  narrativo:           { bg: "bg-blue-900/30",   text: "text-blue-400",   label: "narrativo" },
+  titulo:              { bg: "bg-purple-900/30",  text: "text-purple-400", label: "título" },
+  subtitulo:           { bg: "bg-violet-900/30",  text: "text-violet-400", label: "subtítulo" },
+  celda_tabla:         { bg: "bg-orange-900/30",  text: "text-orange-400", label: "tabla" },
+  pie_imagen:          { bg: "bg-green-900/30",   text: "text-green-400",  label: "pie fig." },
+  cita:                { bg: "bg-yellow-900/30",  text: "text-yellow-400", label: "cita" },
+  lista:               { bg: "bg-teal-900/30",    text: "text-teal-400",   label: "lista" },
+  explicacion_tecnica: { bg: "bg-cyan-900/30",    text: "text-cyan-400",   label: "técnico" },
+  encabezado:          { bg: "bg-gray-900/30",    text: "text-gray-400",   label: "encabez." },
+  footer:              { bg: "bg-gray-900/30",    text: "text-gray-400",   label: "footer" },
+};
+
 export function CorrectionHistory({ corrections, docId, docStatus, reviewSummary, onRefresh }: CorrectionHistoryProps) {
   const [filterSource, setFilterSource] = useState<FilterSource>("all");
   const [filterCategory, setFilterCategory] = useState<FilterCategory>("all");
@@ -475,6 +489,16 @@ function CorrectionCard({
               OVERFLOW
             </span>
           )}
+          {patch.protected_regions_snapshot && patch.protected_regions_snapshot.length > 0 && (
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-400 text-[10px] font-medium flex-shrink-0" title={`${patch.protected_regions_snapshot.length} regiones protegidas`}>
+              🔒 {patch.protected_regions_snapshot.length}
+            </span>
+          )}
+          {patch.reverted_lt_changes_json && patch.reverted_lt_changes_json.length > 0 && (
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-red-900/30 text-red-400 text-[10px] font-medium flex-shrink-0" title="LT revertido por región protegida">
+              LT⟳
+            </span>
+          )}
           {patch.cost_usd != null && patch.cost_usd > 0 && (
             <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-900/20 text-emerald-400 text-[10px] font-medium flex-shrink-0">
               ${patch.cost_usd < 0.001 ? patch.cost_usd.toFixed(6) : patch.cost_usd.toFixed(4)}
@@ -613,6 +637,34 @@ function CorrectionCard({
                   </span>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Sprint 3: Regiones protegidas y audit trail */}
+          {patch.protected_regions_snapshot && patch.protected_regions_snapshot.length > 0 && (
+            <div className="bg-amber-900/10 border border-amber-900/30 rounded-lg px-3 py-2">
+              <div className="text-[10px] uppercase tracking-wider font-semibold text-amber-400 mb-1.5">
+                Regiones protegidas ({patch.protected_regions_snapshot.length})
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {patch.protected_regions_snapshot.map((r, i) => (
+                  <span key={i} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-900/20 text-amber-300" title={`pos ${r.start}-${r.end}`}>
+                    &quot;{r.text.slice(0, 25)}{r.text.length > 25 ? "…" : ""}&quot; <span className="text-amber-500">({r.reason})</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {patch.reverted_lt_changes_json && patch.reverted_lt_changes_json.length > 0 && (
+            <div className="bg-red-900/10 border border-red-900/30 rounded-lg px-3 py-2">
+              <div className="text-[10px] uppercase tracking-wider font-semibold text-red-400 mb-1">
+                Correcciones LT revertidas por región protegida
+              </div>
+              {(patch.reverted_lt_changes_json as Array<{lt_had?: string; restored?: string; reason?: string}>).map((r, i) => (
+                <div key={i} className="text-[11px] text-bruma/60">
+                  &quot;{r.lt_had}&quot; → restaurado: &quot;{r.restored}&quot; ({r.reason})
+                </div>
+              ))}
             </div>
           )}
 

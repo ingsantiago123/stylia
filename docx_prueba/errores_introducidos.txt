@@ -1,0 +1,87 @@
+STYLIA — REGISTRO DE ERRORES INTRODUCIDOS
+Documento: stylia_test_documento_con_errores.docx
+Fecha: 2025
+Total errores: ~52 distribuidos en 8 categorías
+═══════════════════════════════════════════════════════════
+
+A. ORTOGRÁFICOS Y TIPOGRÁFICOS (10 errores)
+────────────────────────────────────────────
+A-01 | Título (H1)              | "Artifial" → "Artificial" (falta 'c')
+A-02 | Subtítulo (H2)           | "analisis" → "análisis" (falta tilde) + minúscula inicial indebida
+A-03 | Resumen, párrafo 1       | "artifial" → "artificial" (falta 'c')
+A-04 | Resumen, párrafo 1       | "editoriáles" → "editoriales" (tilde incorrecta)
+A-05 | Resumen, párrafo 1       | "latinoamerica" → "latinoamericana" (falta tilde)
+A-06 | Obj. 3 (lista numerada)  | "dia" → "día" (falta tilde)
+A-07 | Formato mixto, párrafo   | "especificamente" → "específicamente" (falta tilde)
+A-08 | Hipervínculo, párrafo    | "publicasiones" → "publicaciones" (error fonético)
+A-09 | Pág. salto, párrafo      | "analisis" → "análisis" (falta tilde)
+A-10 | Discusión, H, Marco T.   | "artifial" → "artificial" (falta 'c')
+     | Diálogo, párrafo 2       | "La Inteligencia Artificial" → mayúsculas innecesarias en oración
+
+B. GRAMATICALES (6 errores)
+────────────────────────────
+B-01 | Introducción, párrafo 1  | "Hubieron muchos cambios" → "Hubo muchos cambios" (concordancia con sujeto no contable)
+B-02 | Introducción, párrafo 3  | "Pensamos de que" → "Pensamos que" (dequeísmo)
+B-03 | Objetivos, ítem 2        | "los resultado obtenido" → "los resultados obtenidos" (concordancia número)
+B-04 | Objetivos, ítem 4        | "el herramienta más efectivo" → "la herramienta más efectiva" (concordancia género)
+B-05 | Tabla 2, celda LanguageTool fortalezas | "La dijeron que" → "Le dijeron que" (laísmo)
+B-06 | Tabla 2, celda LanguageTool limitaciones | "Se enteró que" → "Se enteró de que" (queísmo)
+
+C. ESTILO — REDUNDANCIAS Y MULETILLAS (7 errores)
+───────────────────────────────────────────────────
+C-01 | Resumen, párrafo 1       | Doble muletilla: "es importante mencionar que es necesario tener en cuenta que"
+C-02 | Objetivos, ítem 3        | "en el día de hoy" → "hoy"
+C-03 | Objetivos, ítem 5        | "llevar a cabo" → "realizar"
+C-04 | Objetivos, ítem 5        | "dado al hecho de que" → "dado que"
+C-05 | Marco Teórico, párrafo   | Muletilla: "En este sentido, cabe destacar el hecho de que...demuestran claramente que"
+C-06 | Marco Teórico, párrafo   | "cosa" comodín usado 3 veces: "es una cosa", "otra cosa importante", "estas cosas"
+C-07 | Tabla 2, celda STYLIA    | "a nivel de" usado 3 veces: "a nivel de variantes", "a nivel de corpus", "a nivel de representatividad"
+
+D. PUNTUACIÓN (7 errores)
+───────────────────────────
+D-01 | Introducción, párrafo 2  | Coma entre sujeto y predicado: "La brecha digital, ha sido..."
+D-02 | Diálogo, párrafo 3       | Falta coma antes de cita: "García Moreno «La edición...»" → "García Moreno: «La edición...»"
+D-03 | Discusión, párrafo 3     | Falta apertura de interrogación: "Qué impacto..." → "¿Qué impacto..."
+D-04 | Discusión, párrafo 3     | Puntos suspensivos con 4 puntos: "...." → "..."
+D-05 | Discusión, párrafo 3     | Punto y coma mal usado: "Hay tres factores; el primero..." → "Hay tres factores: el primero..."
+D-06 | Conclusiones, párrafo 1  | Falta coma en aposición: "La doctora Villanueva investigadora principal del proyecto presentó" → "La doctora Villanueva, investigadora principal del proyecto, presentó"
+D-07 | Conclusiones, párrafo 2  | Dos puntos incorrectos: "Los resultados fueron: positivos" → "Los resultados fueron positivos"
+
+E. ERRORES EN CELDAS DE TABLA (5 errores)
+───────────────────────────────────────────
+E-01 | Tabla 1, encabezado col.1 | "Region" → "Región" (sin tilde)
+E-02 | Tabla 1, fila México col.5 | "más o menos 60%" (registro coloquial) → "~60%" o "60% aprox."
+E-03 | Tabla 1, fila Colombia col.3 | "resultados positivo" → "resultados positivos" (concordancia)
+E-04 | Tabla 1, fila Chile col.2 | "No aplica en este caso particular del estudio..." (80 palabras) → "N/A"
+E-05 | Tabla 2, fila LanguageTool fortalezas | Laísmo (ver B-05)
+
+F. ERRORES EN CAPTIONS / PIES DE FIGURA (4 errores)
+──────────────────────────────────────────────────────
+F-01 | Caption Figura 1          | "evolución" → "Evolución" (sin mayúscula inicial tras "Figura 1.")
+F-02 | Caption Figura 1          | "latinoamerica" → "latinoamericanas" (sin tilde)
+F-03 | Caption Figura 2          | "fig 2 Mapa..." → "Fig. 2. Mapa..." (falta punto tras abreviatura y tras número)
+F-04 | Caption Figura 2          | Sin mayúscula inicial en caption
+
+G. REGISTRO Y TONO (5 errores)
+────────────────────────────────
+G-01 | Metodología, párrafo cierre | Párrafo coloquial en texto académico: "O sea, básicamente lo que pasa es que la IA está cambiando todo un montón..."
+G-02 | Metodología, párrafo cierre | "la cosa" comodín en contexto formal
+G-03 | Discusión, párrafo 2      | Cambio brusco de persona: "Los investigadores analizaron" → "Analizamos los datos"
+G-04 | Discusión, párrafo 2      | Tuteo en texto formal: "Si quieres revisar los datos..."
+G-05 | Objetivos, ítem 3 (lista) | "en el día de hoy" (ya registrado en C-02) — refuerza el registro inadecuado para el tono académico
+
+H. PÁRRAFO CON MÚLTIPLES ERRORES SIMULTÁNEOS
+──────────────────────────────────────────────
+H-01 | Discusión, párrafo 1      | Párrafo estresor con 7 errores acumulados:
+     |                            |   • "En este sentido es importante mencionar el hecho de que" → muletilla (C)
+     |                            |   • "los resultado obtenido" → concordancia número (B)
+     |                            |   • "a nivel de las editoriales" → muletilla (C)
+     |                            |   • "latinoamerica" → sin tilde (A)
+     |                            |   • "demuestran claramente que" → redundancia (C)
+     |                            |   • "la inteligencia artifial," → falta 'c' + coma incorrecta (A+D)
+     |                            |   • "en las cosa relacionadas" → comodín + concordancia (G+B)
+     |                            |   • "llevando a cabo" → muletilla (C)
+     |                            |   • "en el dia de hoy" → "hoy" + tilde faltante (C+A)
+
+═══════════════════════════════════════════════════════════
+CORRECCIÓN ESPERADA — COMPARAR CONTRA OUTPUT DE STYLIA

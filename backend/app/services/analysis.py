@@ -92,8 +92,21 @@ def classify_paragraph(
     if _LIST_PATTERN.match(stripped):
         return "lista", True
 
-    # Texto muy corto (ej. pies de imagen, etiquetas)
-    if len(stripped) < 20:
+    # Pies de figura/tabla: SOLO patrones específicos de caption (no startswith genérico).
+    # Falsos positivos a evitar: "Tabla de contenidos", "Figura retórica", "Tabla comparativa de X",
+    # cualquier oración corta legítima de < 20 chars.
+    # Match estricto: "Figura 1.", "Fig. 2:", "Tabla 3 -", "Fuente:", "Nota:", "Elaboración propia"
+    stripped_lower = stripped.lower()
+    is_caption_numbered = bool(
+        re.match(
+            r'^(?:figura|fig\.?|tabla|cuadro|imagen|gráfico|grafico|mapa|esquema|diagrama)\s+\d+\s*[\.\:\-–—]',
+            stripped_lower,
+        )
+    )
+    is_caption_attribution = bool(
+        re.match(r'^(?:fuente|nota|elaboraci[oó]n propia)\s*[\:\.\-]', stripped_lower)
+    )
+    if is_caption_numbered or is_caption_attribution:
         return "pie_imagen", True
 
     # Detectar densidad de términos técnicos
@@ -325,7 +338,7 @@ RESPONDE CON ESTE FORMATO JSON:
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            max_tokens=300,
+            max_completion_tokens=300,
             temperature=0.2,
             response_format={"type": "json_object"},
         )
@@ -425,7 +438,7 @@ RESPONDE CON ESTE FORMATO JSON:
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            max_tokens=800,
+            max_completion_tokens=800,
             temperature=0.2,
             response_format={"type": "json_object"},
         )
@@ -679,4 +692,163 @@ def analyze_document_sync(
         "paragraph_classifications": paragraph_classifications,
         "usage_records": usage_records,
         "stats": stats,
+    }
+
+
+# =============================================
+# C.6: Análisis de Contexto Global (Plan v4)
+# =============================================
+
+def analyze_global_context_sync(
+    doc_id: str,
+    all_paragraphs: list[tuple[str, str]],
+    profile: dict | None = None,
+    protected_terms: list[str] | None = None,
+) -> dict:
+    """
+    Etapa C.6: genera el "ADN editorial" del documento mediante muestreo estratificado.
+
+    Args:
+        doc_id: UUID del documento.
+        all_paragraphs: Lista de (text, location) de todos los párrafos.
+        profile: Perfil editorial (para inyectar en el prompt).
+        protected_terms: Términos ya protegidos detectados en C.4.
+
+    Returns:
+        dict con: global_summary, dominant_voice, dominant_register,
+                  key_themes_json, protected_globals_json, style_fingerprint_json,
+                  usage_record
+    """
+    logger.info(f"[Etapa C.6] Generando contexto global para {doc_id}")
+
+    # Muestreo estratificado: primeros 3, medianos 3, últimos 3
+    body_paras = [
+        (text, loc) for text, loc in all_paragraphs
+        if loc.startswith("body:") and len(text.strip()) > 30
+    ]
+    n = len(body_paras)
+
+    sample = []
+    if n > 0:
+        # Primeros
+        sample.extend(body_paras[:3])
+        # Medianos
+        if n > 6:
+            mid = n // 2
+            sample.extend(body_paras[max(0, mid - 1):mid + 2])
+        # Últimos
+        if n > 3:
+            sample.extend(body_paras[-3:])
+
+    # Deduplicar manteniendo orden
+    seen = set()
+    unique_sample = []
+    for p in sample:
+        if p[0] not in seen:
+            seen.add(p[0])
+            unique_sample.append(p)
+    sample = unique_sample[:9]  # máx 9 párrafos
+
+    if not sample:
+        logger.warning(f"[Etapa C.6] No hay párrafos de cuerpo para muestrear en {doc_id}")
+        return {
+            "global_summary": None,
+            "dominant_voice": None,
+            "dominant_register": None,
+            "key_themes_json": [],
+            "protected_globals_json": [],
+            "style_fingerprint_json": {},
+            "usage_record": None,
+        }
+
+    sample_text = "\n\n---\n\n".join(f"[{loc}]\n{text}" for text, loc in sample)
+
+    known_protected = (protected_terms or [])[:20]
+    profile_hint = ""
+    if profile:
+        genre = profile.get("genre", "")
+        register = profile.get("register", "")
+        if genre or register:
+            profile_hint = f"\nPerfil conocido: género={genre}, registro={register}."
+
+    prompt = f"""Analiza los siguientes fragmentos representativos de un documento y genera su "ADN editorial".{profile_hint}
+Términos ya detectados como protegidos: {', '.join(known_protected) if known_protected else 'ninguno aún'}.
+
+FRAGMENTOS DEL DOCUMENTO:
+{sample_text}
+
+Responde SOLO con este JSON:
+{{
+  "global_summary": "resumen global del documento en ~200 palabras",
+  "dominant_voice": "descripción de la voz y estilo del autor en ~60 palabras",
+  "dominant_register": "academico_formal|divulgativo|narrativo_literario|tecnico|periodistico|corporativo|otro",
+  "key_themes": [{{"theme": "nombre del tema", "weight": 0.0-1.0}}],
+  "protected_globals": [{{"term": "término exacto", "reason": "por qué protegerlo"}}],
+  "style_fingerprint": {{
+    "avg_sentence_length": número_aproximado_palabras,
+    "passive_voice_ratio": 0.0-1.0,
+    "uses_dashes": true|false,
+    "uses_parentheses": true|false,
+    "formality_score": 0.0-1.0
+  }}
+}}"""
+
+    system = (
+        "Eres un analista editorial experto en español. "
+        "Analizas la voz, estilo y temática de textos literarios y académicos. "
+        "Responde siempre con JSON válido."
+    )
+
+    empty_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    data, usage = openai_client.correct_with_profile(
+        system_prompt=system,
+        user_prompt=prompt,
+        max_length=None,
+        model_override=settings.openai_editorial_model,
+        max_tokens_override=settings.openai_audit_max_tokens,
+    )
+
+    if data is None:
+        logger.warning(f"[Etapa C.6] LLM no respondió para {doc_id}")
+        return {
+            "global_summary": None,
+            "dominant_voice": None,
+            "dominant_register": None,
+            "key_themes_json": [],
+            "protected_globals_json": [],
+            "style_fingerprint_json": {},
+            "usage_record": None,
+        }
+
+    usage_record = None
+    if usage.get("total_tokens", 0) > 0:
+        _cost = (
+            usage["prompt_tokens"] / 1e6 * settings.openai_pricing_input
+            + usage["completion_tokens"] / 1e6 * settings.openai_pricing_output
+        )
+        usage_record = {
+            "paragraph_index": -2,
+            "location": "analysis:global_context",
+            "call_type": "analysis_c6",
+            "model_used": settings.openai_editorial_model,
+            **usage,
+            "cost_usd": round(_cost, 8),
+        }
+
+    logger.info(
+        f"[Etapa C.6] Contexto global generado: "
+        f"register={data.get('dominant_register')}, "
+        f"términos_protegidos={len(data.get('protected_globals', []))}, "
+        f"tokens={usage.get('total_tokens', 0)}"
+    )
+
+    return {
+        "global_summary": data.get("global_summary"),
+        "dominant_voice": data.get("dominant_voice"),
+        "dominant_register": data.get("dominant_register"),
+        "key_themes_json": data.get("key_themes", []),
+        "protected_globals_json": data.get("protected_globals", []),
+        "style_fingerprint_json": data.get("style_fingerprint", {}),
+        "usage_record": usage_record,
     }

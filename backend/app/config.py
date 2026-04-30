@@ -48,16 +48,24 @@ class Settings(BaseSettings):
 
     # --- OpenAI API ---
     openai_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
-    openai_cheap_model: str = "gpt-4o-mini"
-    openai_editorial_model: str = "gpt-4o-mini"
-    openai_max_tokens: int = 500
+    openai_model: str = "gpt-5.4-mini"
+    openai_cheap_model: str = "gpt-5.4-mini"
+    openai_editorial_model: str = "gpt-5.4-mini"
+    openai_max_tokens: int = 2000
+    openai_cheap_max_tokens: int = 2000
+    openai_editorial_max_tokens: int = 4000
+    openai_audit_max_tokens: int = 6000
     openai_temperature: float = 0.3
+
+    # Plan v4: doble pasada y contexto global
+    global_context_sample_size: int = 9   # párrafos muestreados para C.6
+    pass2_rewrite_threshold: float = 0.15  # umbral mínimo para activar Pasada 2
+    pass2_enabled: bool = True             # activar/desactivar Pasada 2 globalmente
 
     # --- Precios OpenAI (USD por 1M tokens) ---
     # Actualizar cuando cambien: https://openai.com/api/pricing/
-    openai_pricing_input: float = 0.15     # gpt-4o-mini input
-    openai_pricing_output: float = 0.60    # gpt-4o-mini output
+    openai_pricing_input: float = 0.75     # gpt-5.4-mini input  ($0.75/1M)
+    openai_pricing_output: float = 4.50    # gpt-5.4-mini output ($4.50/1M)
 
     # --- LLM (llama.cpp) - Fase 2 ---
     llama_url: str = "http://localhost:8080"

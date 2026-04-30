@@ -39,6 +39,8 @@ from app.schemas.analysis import AnalysisResult, SectionSummaryItem, TermRegistr
 from app.models.section_summary import SectionSummary
 from app.models.term_registry import TermRegistry
 from app.models.correction_batch import CorrectionBatch
+from app.models.document_global_context import DocumentGlobalContext
+from app.models.llm_audit_log import LlmAuditLog
 from app.schemas.style_profile import (
     StyleProfileCreate, StyleProfileUpdate, StyleProfileResponse, PresetListItem
 )
@@ -1204,6 +1206,208 @@ async def get_document_costs(
 
 
 # =============================================
+# PLAN V4: AUDITORÍA LLM
+# =============================================
+
+@router.get("/documents/{doc_id}/llm-audit")
+async def get_llm_audit(
+    doc_id: UUID,
+    pass_number: int | None = None,
+    call_purpose: str | None = None,
+    has_error: bool | None = None,
+    skip: int = 0,
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db),
+):
+    """Lista de llamadas LLM del documento con filtros opcionales."""
+    await _get_doc_or_404(db, doc_id)
+    query = select(LlmAuditLog).where(LlmAuditLog.doc_id == doc_id)
+    if pass_number is not None:
+        query = query.where(LlmAuditLog.pass_number == pass_number)
+    if call_purpose:
+        query = query.where(LlmAuditLog.call_purpose == call_purpose)
+    if has_error is True:
+        query = query.where(LlmAuditLog.error_text.isnot(None))
+    elif has_error is False:
+        query = query.where(LlmAuditLog.error_text.is_(None))
+    query = query.order_by(LlmAuditLog.paragraph_index, LlmAuditLog.pass_number).offset(skip).limit(limit)
+    result = await db.execute(query)
+    rows = result.scalars().all()
+
+    # Stats globales
+    stats_result = await db.execute(
+        select(LlmAuditLog).where(LlmAuditLog.doc_id == doc_id)
+    )
+    all_rows = stats_result.scalars().all()
+    p2_rows = [r for r in all_rows if r.pass_number == 2]
+    reversions = 0
+    for r in p2_rows:
+        resp = r.response_payload or {}
+        choices = resp.get("choices", [])
+        if choices:
+            content = choices[0].get("message", {}).get("content", "")
+            if isinstance(content, str) and "reverted_destructions" in content:
+                try:
+                    import json as _j
+                    parsed = _j.loads(content)
+                    reversions += len(parsed.get("reverted_destructions", []))
+                except Exception:
+                    pass
+
+    return {
+        "doc_id": str(doc_id),
+        "stats": {
+            "total_calls": len(all_rows),
+            "pass1_calls": sum(1 for r in all_rows if r.pass_number == 1),
+            "pass2_calls": len(p2_rows),
+            "paragraphs_with_audit": len(set(r.paragraph_index for r in all_rows if r.paragraph_index is not None)),
+            "total_reversions_detected": reversions,
+            "errors": sum(1 for r in all_rows if r.error_text),
+        },
+        "entries": [
+            {
+                "id": str(r.id),
+                "paragraph_index": r.paragraph_index,
+                "location": r.location,
+                "pass_number": r.pass_number,
+                "call_purpose": r.call_purpose,
+                "model_used": r.model_used,
+                "prompt_tokens": r.prompt_tokens,
+                "completion_tokens": r.completion_tokens,
+                "total_tokens": r.total_tokens,
+                "latency_ms": r.latency_ms,
+                "has_error": bool(r.error_text),
+                "error_text": r.error_text,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/documents/{doc_id}/llm-audit/{paragraph_index}")
+async def get_llm_audit_paragraph(
+    doc_id: UUID,
+    paragraph_index: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Detalle de todas las llamadas LLM para un párrafo (request + response RAW)."""
+    await _get_doc_or_404(db, doc_id)
+    result = await db.execute(
+        select(LlmAuditLog)
+        .where(LlmAuditLog.doc_id == doc_id, LlmAuditLog.paragraph_index == paragraph_index)
+        .order_by(LlmAuditLog.pass_number)
+    )
+    rows = result.scalars().all()
+    if not rows:
+        raise HTTPException(404, f"Sin datos de auditoría para párrafo {paragraph_index}")
+
+    return {
+        "doc_id": str(doc_id),
+        "paragraph_index": paragraph_index,
+        "calls": [
+            {
+                "id": str(r.id),
+                "pass_number": r.pass_number,
+                "call_purpose": r.call_purpose,
+                "model_used": r.model_used,
+                "prompt_tokens": r.prompt_tokens,
+                "completion_tokens": r.completion_tokens,
+                "total_tokens": r.total_tokens,
+                "latency_ms": r.latency_ms,
+                "request_payload": r.request_payload,
+                "response_payload": r.response_payload,
+                "error_text": r.error_text,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/documents/{doc_id}/llm-audit/diff/{paragraph_index}")
+async def get_llm_audit_diff(
+    doc_id: UUID,
+    paragraph_index: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Comparativa estructurada: original / Pasada 1 / Pasada 2 con prompts de ambas pasadas."""
+    await _get_doc_or_404(db, doc_id)
+
+    # Obtener patch del párrafo
+    patch_result = await db.execute(
+        select(Patch)
+        .join(Block)
+        .join(Page)
+        .where(Page.doc_id == doc_id, Patch.paragraph_index == paragraph_index)
+        .order_by(Patch.created_at.desc())
+        .limit(1)
+    )
+    patch = patch_result.scalar_one_or_none()
+
+    # Obtener audit logs del párrafo
+    audit_result = await db.execute(
+        select(LlmAuditLog)
+        .where(LlmAuditLog.doc_id == doc_id, LlmAuditLog.paragraph_index == paragraph_index)
+        .order_by(LlmAuditLog.pass_number)
+    )
+    audit_rows = audit_result.scalars().all()
+
+    pass1_log = next((r for r in audit_rows if r.pass_number == 1), None)
+    pass2_log = next((r for r in audit_rows if r.pass_number == 2), None)
+
+    return {
+        "doc_id": str(doc_id),
+        "paragraph_index": paragraph_index,
+        "original_text": patch.original_text if patch else None,
+        "corrected_pass1_text": patch.corrected_pass1_text if patch else None,
+        "corrected_final_text": patch.corrected_text if patch else None,
+        "has_pass2": pass2_log is not None,
+        "pass2_audit": patch.pass2_audit_json if patch else None,
+        "pass1": {
+            "request_payload": pass1_log.request_payload if pass1_log else None,
+            "response_payload": pass1_log.response_payload if pass1_log else None,
+            "tokens": pass1_log.total_tokens if pass1_log else None,
+            "latency_ms": pass1_log.latency_ms if pass1_log else None,
+            "model_used": pass1_log.model_used if pass1_log else None,
+        } if pass1_log else None,
+        "pass2": {
+            "request_payload": pass2_log.request_payload if pass2_log else None,
+            "response_payload": pass2_log.response_payload if pass2_log else None,
+            "tokens": pass2_log.total_tokens if pass2_log else None,
+            "latency_ms": pass2_log.latency_ms if pass2_log else None,
+            "model_used": pass2_log.model_used if pass2_log else None,
+        } if pass2_log else None,
+    }
+
+
+@router.get("/documents/{doc_id}/global-context")
+async def get_document_global_context(
+    doc_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Retorna el contexto global (ADN editorial) generado por C.6."""
+    await _get_doc_or_404(db, doc_id)
+    result = await db.execute(
+        select(DocumentGlobalContext).where(DocumentGlobalContext.doc_id == doc_id)
+    )
+    gc = result.scalar_one_or_none()
+    if not gc:
+        raise HTTPException(404, "Contexto global no disponible para este documento")
+    return {
+        "doc_id": str(doc_id),
+        "global_summary": gc.global_summary,
+        "dominant_voice": gc.dominant_voice,
+        "dominant_register": gc.dominant_register,
+        "key_themes": gc.key_themes_json or [],
+        "protected_globals": gc.protected_globals_json or [],
+        "style_fingerprint": gc.style_fingerprint_json or {},
+        "total_paragraphs": gc.total_paragraphs,
+        "created_at": gc.created_at.isoformat() if gc.created_at else None,
+    }
+
+
+# =============================================
 # HELPERS
 # =============================================
 
@@ -1549,3 +1753,146 @@ async def get_correction_batches(doc_id: UUID, db: AsyncSession = Depends(get_db
     )
     batches = result.scalars().all()
     return [CorrectionBatchStatus.model_validate(b) for b in batches]
+
+
+# =============================================
+# SPRINT 6: STRUCTURAL MAP + HEALTH CHECKS
+# =============================================
+
+@router.get("/documents/{doc_id}/structural-map")
+async def get_structural_map(doc_id: UUID, db: AsyncSession = Depends(get_db)):
+    """
+    Mapa canónico paragraph_index → página/posición para un documento.
+    Retorna todos los registros de paragraph_locations ordenados por índice.
+    """
+    from app.models.paragraph_location import ParagraphLocation
+    await _get_doc_or_404(db, doc_id)
+    result = await db.execute(
+        select(ParagraphLocation)
+        .where(ParagraphLocation.doc_id == doc_id)
+        .order_by(ParagraphLocation.paragraph_index)
+    )
+    locations = result.scalars().all()
+    return [
+        {
+            "paragraph_index": loc.paragraph_index,
+            "location": loc.location,
+            "page_start": loc.page_start,
+            "page_end": loc.page_end,
+            "position_in_page": loc.position_in_page,
+            "has_internal_page_break": loc.has_internal_page_break,
+            "is_continuation_from_prev_page": loc.is_continuation_from_prev_page,
+            "paragraph_type": loc.paragraph_type,
+        }
+        for loc in locations
+    ]
+
+
+@router.get("/documents/{doc_id}/cross-page-paragraphs")
+async def get_cross_page_paragraphs(doc_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Lista párrafos que cruzan páginas (tienen salto de página interno)."""
+    from app.models.paragraph_location import ParagraphLocation
+    await _get_doc_or_404(db, doc_id)
+    result = await db.execute(
+        select(ParagraphLocation)
+        .where(
+            ParagraphLocation.doc_id == doc_id,
+            ParagraphLocation.has_internal_page_break == True,  # noqa: E712
+        )
+        .order_by(ParagraphLocation.paragraph_index)
+    )
+    locations = result.scalars().all()
+    return [
+        {
+            "paragraph_index": loc.paragraph_index,
+            "location": loc.location,
+            "page_start": loc.page_start,
+            "page_end": loc.page_end,
+            "paragraph_type": loc.paragraph_type,
+        }
+        for loc in locations
+    ]
+
+
+@router.get("/health/llm")
+async def health_llm():
+    """
+    Test de conectividad con el proveedor LLM (OpenAI).
+    Retorna modelo configurado, estado y latencia aproximada.
+    """
+    import time
+    import httpx
+    model = settings.openai_model
+    t0 = time.time()
+    status = "ok"
+    error = None
+    latency_ms = None
+
+    if not settings.openai_api_key or settings.openai_api_key == "dummy":
+        status = "simulation_mode"
+        latency_ms = 0
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                )
+                latency_ms = round((time.time() - t0) * 1000)
+                if resp.status_code == 200:
+                    status = "ok"
+                else:
+                    status = "error"
+                    error = f"HTTP {resp.status_code}"
+        except Exception as e:
+            status = "unreachable"
+            error = str(e)
+            latency_ms = round((time.time() - t0) * 1000)
+
+    return {
+        "status": status,
+        "model": model,
+        "cheap_model": settings.openai_cheap_model,
+        "editorial_model": settings.openai_editorial_model,
+        "latency_ms": latency_ms,
+        "error": error,
+    }
+
+
+@router.get("/health/languagetool")
+async def health_languagetool():
+    """
+    Test de conectividad con LanguageTool.
+    Retorna estado y latencia aproximada.
+    """
+    import time
+    import httpx
+    t0 = time.time()
+    status = "ok"
+    error = None
+    latency_ms = None
+    version = None
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{settings.languagetool_url}/v2/languages")
+            latency_ms = round((time.time() - t0) * 1000)
+            if resp.status_code == 200:
+                status = "ok"
+                data = resp.json()
+                version = f"{len(data)} idiomas disponibles" if isinstance(data, list) else "ok"
+            else:
+                status = "error"
+                error = f"HTTP {resp.status_code}"
+    except Exception as e:
+        status = "unreachable"
+        error = str(e)
+        latency_ms = round((time.time() - t0) * 1000)
+
+    return {
+        "status": status,
+        "url": settings.languagetool_url,
+        "latency_ms": latency_ms,
+        "version": version,
+        "error": error,
+    }

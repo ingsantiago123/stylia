@@ -55,6 +55,11 @@ class PatchListItem(BaseModel):
     edited_text: str | None = None
     edited_at: datetime | None = None
     recorrection_count: int = 0
+    # Sprint 3: Audit trail dual-engine
+    lt_corrections_json: list[dict] | None = None
+    llm_change_log_json: list[dict] | None = None
+    reverted_lt_changes_json: list[dict] | None = None
+    protected_regions_snapshot: list[dict] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -94,6 +99,11 @@ class PatchDetail(BaseModel):
     edited_text: str | None = None
     edited_at: datetime | None = None
     recorrection_count: int = 0
+    # Sprint 3: Audit trail dual-engine
+    lt_corrections_json: list[dict] | None = None
+    llm_change_log_json: list[dict] | None = None
+    reverted_lt_changes_json: list[dict] | None = None
+    protected_regions_snapshot: list[dict] | None = None
 
     model_config = {"from_attributes": True}
 
