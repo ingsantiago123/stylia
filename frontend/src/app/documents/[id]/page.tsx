@@ -13,6 +13,7 @@ import {
   getPagePreviewUrl,
   downloadPdf,
   downloadDocx,
+  recorrectMacro,
   DocumentDetail,
   PatchListItem,
   PageListItem,
@@ -27,6 +28,7 @@ import { CorrectionFlowViewer } from "@/components/CorrectionFlowViewer";
 import { DiffCompareView } from "@/components/DiffCompareView";
 import { AnalysisView } from "@/components/AnalysisView";
 import { EditorialProfilePanel } from "@/components/EditorialProfilePanel";
+import { MacroCorrectionView } from "@/components/MacroCorrectionView";
 type Tab = "pipeline" | "analysis" | "corrections" | "adn" | "pages" | "api-flow";
 
 export default function DocumentDetailPage() {
@@ -366,17 +368,18 @@ export default function DocumentDetailPage() {
         )}
 
         {activeTab === "corrections" && (
-          <CorrectionHistory
+          <CorrectionsTabContent
             corrections={corrections}
             docId={docId}
             docStatus={doc.status}
             reviewSummary={reviewSummary}
             onRefresh={fetchData}
+            profile={profile}
           />
         )}
 
         {activeTab === "adn" && (
-          <EditorialProfilePanel docId={docId} />
+          <MacroADNTab docId={docId} docStatus={doc.status} onRefresh={fetchData} />
         )}
 
         {activeTab === "api-flow" && (
@@ -499,6 +502,128 @@ const INTERVENTION_LABELS: Record<string, { label: string; color: string }> = {
   moderada: { label: "Moderada", color: "bg-yellow-500/15 text-yellow-400" },
   agresiva: { label: "Agresiva", color: "bg-red-500/15 text-red-400" },
 };
+
+function MacroADNTab({ docId, docStatus, onRefresh }: { docId: string; docStatus: string; onRefresh: () => void }) {
+  const [macroRunning, setMacroRunning] = useState(false);
+  const [macroError, setMacroError] = useState<string | null>(null);
+  const [macroSuccess, setMacroSuccess] = useState(false);
+
+  const launchMacro = async () => {
+    setMacroRunning(true);
+    setMacroError(null);
+    setMacroSuccess(false);
+    try {
+      await recorrectMacro(docId);
+      setMacroSuccess(true);
+      setTimeout(onRefresh, 2000);
+    } catch (e: unknown) {
+      setMacroError(e instanceof Error ? e.message : "Error al lanzar el pase macro");
+    } finally {
+      setMacroRunning(false);
+    }
+  };
+
+  const canRunMacro = docStatus === "candidate_ready";
+
+  return (
+    <div className="space-y-4">
+      {canRunMacro && (
+        <div className="glass-card rounded-xl p-4 border border-teal-700/20">
+          <div className="flex items-start gap-3">
+            <div className="w-8 h-8 rounded-lg bg-teal-900/30 flex items-center justify-center shrink-0">
+              <svg className="w-4 h-4 text-teal-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5" />
+              </svg>
+            </div>
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold text-bruma mb-1">Pase macro de corrección</h3>
+              <p className="text-xs text-plomo mb-3">
+                Revisa la coherencia y fluidez entre secciones del documento completo.
+                Requiere macro_correction_level = "light" o "full" en el perfil editorial.
+              </p>
+              {macroSuccess && (
+                <p className="text-xs text-teal-300 mb-2">Pase macro lanzado. Las correcciones aparecerán en el tab Correcciones.</p>
+              )}
+              {macroError && (
+                <p className="text-xs text-red-400 mb-2">{macroError}</p>
+              )}
+              <button
+                onClick={launchMacro}
+                disabled={macroRunning}
+                className="px-4 py-2 bg-teal-700/80 hover:bg-teal-700 text-white text-xs font-semibold rounded-lg disabled:opacity-50 transition-colors flex items-center gap-2"
+              >
+                {macroRunning ? (
+                  <>
+                    <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Lanzando...
+                  </>
+                ) : "Lanzar pase macro"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <EditorialProfilePanel docId={docId} />
+    </div>
+  );
+}
+
+function CorrectionsTabContent({ corrections, docId, docStatus, reviewSummary, onRefresh, profile }: {
+  corrections: PatchListItem[];
+  docId: string;
+  docStatus: string;
+  reviewSummary: ReviewSummary | null;
+  onRefresh: () => void;
+  profile: StyleProfile | null;
+}) {
+  const [viewMode, setViewMode] = useState<"review" | "phases">("review");
+  const hasMacroPhase = corrections.some((c) => c.correction_phase === "llm_macro");
+  const hasPhaseData = corrections.some((c) => c.correction_phase != null);
+
+  return (
+    <div>
+      {hasPhaseData && (
+        <div className="flex gap-2 mb-4">
+          <button
+            onClick={() => setViewMode("review")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              viewMode === "review" ? "bg-krypton text-carbon" : "bg-surface-elevated text-plomo hover:text-bruma"
+            }`}
+          >
+            Vista revisión
+          </button>
+          <button
+            onClick={() => setViewMode("phases")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              viewMode === "phases" ? "bg-krypton text-carbon" : "bg-surface-elevated text-plomo hover:text-bruma"
+            }`}
+          >
+            Vista por fase
+            {hasMacroPhase && (
+              <span className="ml-1.5 px-1.5 py-0.5 bg-teal-900/40 text-teal-300 rounded text-[10px]">MACRO</span>
+            )}
+          </button>
+        </div>
+      )}
+
+      {viewMode === "review" && (
+        <CorrectionHistory
+          corrections={corrections}
+          docId={docId}
+          docStatus={docStatus}
+          reviewSummary={reviewSummary}
+          onRefresh={onRefresh}
+        />
+      )}
+      {viewMode === "phases" && (
+        <MacroCorrectionView corrections={corrections} />
+      )}
+    </div>
+  );
+}
 
 function SummaryTab({ doc, corrections, pages, isProcessing, profile }: {
   doc: DocumentDetail;

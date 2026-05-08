@@ -242,6 +242,15 @@ async def lifespan(app: FastAPI):
             await conn.execute(text(sql))
         logger.info("Renovación S0: columnas document_profiles + patches verificadas/creadas")
 
+    # Renovación S5: phase column for llm_usage
+    async with engine.begin() as conn:
+        renov_s5_migrations = [
+            "ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS phase VARCHAR(20) DEFAULT 'micro'",
+        ]
+        for sql in renov_s5_migrations:
+            await conn.execute(text(sql))
+        logger.info("Renovación S5: llm_usage.phase verificada/creada")
+
     # Inicializar bucket de MinIO
     from app.utils.minio_client import ensure_bucket
     await ensure_bucket()

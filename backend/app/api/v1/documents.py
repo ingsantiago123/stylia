@@ -1040,6 +1040,49 @@ async def reopen_document(
     }
 
 
+@router.post("/documents/{doc_id}/recorrect-macro")
+async def recorrect_macro(
+    doc_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Lanza el pase de corrección macro (S5) sobre el documento completo.
+    Solo disponible en estado candidate_ready.
+    Requiere que el perfil tenga macro_correction_level != 'none'.
+    """
+    from app.workers.tasks_pipeline import correct_macro_pass
+
+    doc = await _get_doc_or_404(db, doc_id)
+    if doc.status not in ("candidate_ready",):
+        raise HTTPException(
+            400,
+            f"La corrección macro requiere estado candidate_ready. Status actual: {doc.status}"
+        )
+
+    result_profile = await db.execute(
+        select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+    )
+    profile_obj = result_profile.scalar_one_or_none()
+    if not profile_obj:
+        raise HTTPException(404, "El documento no tiene perfil editorial.")
+
+    macro_level = getattr(profile_obj, "macro_correction_level", "none") or "none"
+    if macro_level == "none":
+        raise HTTPException(
+            409,
+            "El perfil tiene macro_correction_level='none'. "
+            "Actualiza el perfil a 'light' o 'full' antes de lanzar la corrección macro."
+        )
+
+    task = correct_macro_pass.delay(str(doc_id))
+    logger.info(f"Pase macro iniciado: doc={doc_id}, task={task.id}, nivel={macro_level}")
+    return {
+        "message": f"Pase macro iniciado (nivel={macro_level})",
+        "task_id": task.id,
+        "macro_correction_level": macro_level,
+    }
+
+
 @router.post("/documents/{doc_id}/rerender-preview")
 async def rerender_preview(
     doc_id: UUID,

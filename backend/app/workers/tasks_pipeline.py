@@ -1942,3 +1942,121 @@ def rerender_candidate_preview(self, doc_id: str):
 
     finally:
         db.close()
+
+
+# =====================================================================
+# TAREA CELERY: CORRECCIÓN MACRO (S5 — opt-in)
+# =====================================================================
+
+@celery_app.task(bind=True, max_retries=2, name="tasks_pipeline.correct_macro_pass")
+def correct_macro_pass(self, doc_id: str):
+    """
+    Pase de corrección macro post-merge (S5).
+    Solo activo cuando document_profile.macro_correction_level != 'none'.
+    """
+    from app.services.macro_correction import run_macro_pass_sync
+    from app.schemas.style_profile import StyleProfileResponse
+
+    db = _get_sync_session()
+    try:
+        doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one()
+
+        if doc.status not in ("candidate_ready", "correcting"):
+            logger.warning(
+                f"[macro_pass] Doc {doc_id} status={doc.status}, abortando"
+            )
+            return
+
+        profile_obj = db.execute(
+            select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+        ).scalar_one_or_none()
+
+        if not profile_obj:
+            logger.warning(f"[macro_pass] Sin perfil para {doc_id}")
+            return
+
+        profile_dict = StyleProfileResponse.model_validate(profile_obj).model_dump()
+        macro_level = profile_dict.get("macro_correction_level", "none")
+        if macro_level == "none":
+            logger.info(f"[macro_pass] macro_correction_level=none, omitiendo")
+            return
+
+        logger.info(f"=== PASE MACRO: {doc.filename} (nivel={macro_level}) ===")
+
+        patch_key = f"docx/{doc_id}/patches_docx.json"
+        existing_patches = json.loads(minio_client.download_file(patch_key).decode("utf-8"))
+
+        all_paragraphs_key = f"correction/{doc_id}/all_paragraphs.json"
+        all_paragraphs = [
+            tuple(p)
+            for p in json.loads(minio_client.download_file(all_paragraphs_key).decode("utf-8"))
+        ]
+
+        analysis_data: dict = {}
+        try:
+            analysis_data = json.loads(
+                minio_client.download_file(f"correction/{doc_id}/analysis.json").decode("utf-8")
+            )
+        except Exception:
+            pass
+
+        global_context_dict: dict | None = None
+        try:
+            global_context_dict = json.loads(
+                minio_client.download_file(f"correction/{doc_id}/global_context.json").decode("utf-8")
+            )
+        except Exception:
+            pass
+
+        corrected_texts: dict[int, str] = {i: p[0] for i, p in enumerate(all_paragraphs)}
+        for patch in existing_patches:
+            pidx = patch.get("paragraph_index")
+            if pidx is not None:
+                corrected_texts[pidx] = patch.get("corrected_text", corrected_texts.get(pidx, ""))
+
+        macro_patches, usage_records = run_macro_pass_sync(
+            doc_id=doc_id,
+            all_paragraphs=all_paragraphs,
+            corrected_texts=corrected_texts,
+            sections=analysis_data.get("sections", []),
+            global_context=global_context_dict,
+            profile=profile_dict,
+            level=macro_level,
+        )
+
+        if not macro_patches:
+            logger.info(f"[macro_pass] Sin correcciones macro para {doc_id}")
+            return
+
+        _persist_patches(db, doc_id, macro_patches)
+
+        all_patches_updated = existing_patches + macro_patches
+        all_patches_updated.sort(key=lambda p: p.get("paragraph_index", 0))
+        minio_client.upload_file(
+            patch_key,
+            json.dumps(all_patches_updated, ensure_ascii=False, indent=2).encode("utf-8"),
+            content_type="application/json",
+        )
+
+        for record in usage_records:
+            record_data = {k: v for k, v in record.items() if k != "doc_id"}
+            db.add(LlmUsage(doc_id=doc_id, **record_data))
+        db.commit()
+
+        _run_candidate_render(db, doc_id)
+
+        logger.info(
+            f"=== PASE MACRO COMPLETADO: {doc.filename} — "
+            f"{len(macro_patches)} patches macro ==="
+        )
+
+    except Exception as e:
+        logger.exception(f"[macro_pass] Error para {doc_id}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        self.retry(exc=e, countdown=30)
+
+    finally:
+        db.close()
