@@ -640,17 +640,22 @@ def correct_docx_sync(
         if not text or len(text) < 3:
             continue
 
-        # Contexto previo enriquecido con metadata estructural
-        context_prev: dict | None = None
+        # S3: Contexto previo enriquecido — ventana de hasta N párrafos
+        context_prev: list | dict | None = None
         if corrected_meta:
-            last = corrected_meta[-1]
-            last_text = last["text"]
-            context_prev = {
-                "text": last_text,
-                "type": last.get("type", ""),
-                "ends_abruptly": bool(last_text) and last_text[-1] not in '.?!:)"»\n',
-                "location_type": last.get("location", "body:").split(":")[0],
-            }
+            # Usar ventana de N párrafos cuando hay más de 1 disponible
+            window = corrected_meta[-settings.context_window_size:]
+            if len(window) > 1:
+                context_prev = window  # lista de dicts con text/type/location
+            else:
+                last = window[-1]
+                last_text = last["text"]
+                context_prev = {
+                    "text": last_text,
+                    "type": last.get("type", ""),
+                    "ends_abruptly": bool(last_text) and last_text[-1] not in '.?!:)"»\n',
+                    "location_type": last.get("location", "body:").split(":")[0],
+                }
 
         # Lookahead: tipo del párrafo siguiente
         next_para_type: str | None = None
@@ -689,7 +694,7 @@ def correct_docx_sync(
             sections=sections,
             para_classifications=para_classifications,
             context_prev=context_prev,
-            context_window=corrected_context[-3:],
+            context_window=corrected_context[-settings.context_window_size:],
             precomputed_lt=precomputed_lt,
             next_paragraph_type=next_para_type,
             table_context=table_ctx,
@@ -727,7 +732,7 @@ def correct_docx_sync(
                 original_text=text,
                 corrected_pass1=corrected_pass1,
                 global_context=global_context,
-                context_window=corrected_context[-3:],
+                context_window=corrected_context[-settings.context_window_size:],
                 paragraph_type=paragraph_type,
                 location=location,
                 on_audit_log=_p2_audit_cb,
@@ -1007,6 +1012,7 @@ def correct_batch_with_llm_sync(
     context_seed: str | None,
     global_context: dict | None = None,
     term_registry: list | None = None,
+    context_seed_window: list[str] | None = None,
 ) -> tuple[list[dict], list[dict], str, list[dict]]:
     """
     Pass 1 LLM + Pass 2 auditoría para el rango [start_para..end_para] (inclusive).
@@ -1016,6 +1022,8 @@ def correct_batch_with_llm_sync(
         lt_results: Lista de resultados LT para todos los párrafos (indexada globalmente).
         context_seed: Texto del último párrafo corregido del batch anterior (aprox.).
         global_context: ADN editorial del documento (Plan v4). Si None, no hay Pasada 2.
+        context_seed_window: S3 — lista de los últimos N párrafos (en lugar de solo 1 seed).
+            Si se provee, inicializa corrected_context con esta ventana.
 
     Returns:
         (patches, usage_records, last_corrected_text, audit_log_entries)
@@ -1025,7 +1033,13 @@ def correct_batch_with_llm_sync(
     patches: list[dict] = []
     usage_records: list[dict] = []
     audit_log_entries: list[dict] = []
-    corrected_context: list[str] = [context_seed] if context_seed else []
+    # S3: Inicializar con ventana N si se provee, sino con seed único (retrocompat)
+    if context_seed_window:
+        corrected_context: list[str] = list(context_seed_window)
+    elif context_seed:
+        corrected_context = [context_seed]
+    else:
+        corrected_context = []
     last_corrected_text: str = context_seed or ""
 
     intervention_level = (profile or {}).get("intervention_level")
@@ -1051,7 +1065,7 @@ def correct_batch_with_llm_sync(
             sections=sections,
             para_classifications=para_classifications,
             context_prev=context_prev,
-            context_window=corrected_context[-3:],
+            context_window=corrected_context[-settings.context_window_size:],
             precomputed_lt=precomputed_lt,
             has_page_break=para_has_pb,
             audit_log_collector=audit_log_entries,
@@ -1087,7 +1101,7 @@ def correct_batch_with_llm_sync(
                 original_text=text,
                 corrected_pass1=corrected_pass1,
                 global_context=global_context,
-                context_window=corrected_context[-3:],
+                context_window=corrected_context[-settings.context_window_size:],
                 paragraph_type=paragraph_type,
                 location=location,
                 on_audit_log=_p2_audit_cb,

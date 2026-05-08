@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     pass2_rewrite_threshold: float = 0.15  # umbral mínimo para activar Pasada 2
     pass2_enabled: bool = True             # activar/desactivar Pasada 2 globalmente
 
+    # Renovación S3: ventana de contexto enriquecida
+    context_window_size: int = 5          # párrafos previos para contexto en LLM (era fijo en 3)
+
     # --- Precios OpenAI (USD por 1M tokens) ---
     # Actualizar cuando cambien: https://openai.com/api/pricing/
     openai_pricing_input: float = 0.75     # gpt-5.4-mini input  ($0.75/1M)

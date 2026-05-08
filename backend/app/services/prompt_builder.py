@@ -245,8 +245,27 @@ def build_user_prompt(
         parts.extend(ubicacion_lines)
 
     # ═══ BLOQUE 3: CONTEXTO PREVIO ══════════════════════════════════════
+    # S3: soporta context_prev como dict (último párrafo enriquecido) o
+    # como lista de strings (ventana de N párrafos del context_window)
     if context_prev:
-        if isinstance(context_prev, dict):
+        if isinstance(context_prev, list):
+            # Ventana de N párrafos: mostrar comprimidos (S3)
+            ctx_lines = []
+            for i, cp in enumerate(context_prev):
+                if isinstance(cp, dict):
+                    cp_text = cp.get("text", "")
+                    cp_type = cp.get("type", "")
+                    label = f"[{cp_type}] " if cp_type else ""
+                else:
+                    cp_text = str(cp)
+                    label = ""
+                truncated = cp_text[:200] + "…" if len(cp_text) > 200 else cp_text
+                ctx_lines.append(f"  [{i+1}] {label}{truncated}")
+            parts.append(
+                f"\n── CONTEXTO PREVIO ({len(context_prev)} párrafos) ──\n"
+                + "\n".join(ctx_lines)
+            )
+        elif isinstance(context_prev, dict):
             ctx_text = context_prev.get("text", "")
             ctx_type = context_prev.get("type", "")
             ctx_ends_abruptly = context_prev.get("ends_abruptly", False)

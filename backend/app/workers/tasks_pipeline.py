@@ -764,16 +764,22 @@ def _dispatch_parallel_correction(
         )
 
     # Context seeds: texto post-LT del último párrafo no-vacío del batch anterior
+    # seed_windows: ventana de N párrafos previos (configurable context_window_size)
     seeds: list[str | None] = [None]
+    seed_windows: list[list[str] | None] = [None]
     for b_idx in range(1, len(batch_boundaries)):
         prev_end = batch_boundaries[b_idx - 1][1]
-        seed_text = ""
-        for k in range(prev_end, max(-1, prev_end - 5), -1):
+        window_texts: list[str] = []
+        scan_back = settings.context_window_size * 3  # scan wider to find N non-empty
+        for k in range(prev_end, max(-1, prev_end - scan_back), -1):
             lt_r = lt_results[k] if k < len(lt_results) else None
-            if lt_r and not lt_r.get("skip"):
-                seed_text = lt_r["corrected_text"][:200]
-                break
+            if lt_r and not lt_r.get("skip") and lt_r.get("corrected_text", "").strip():
+                window_texts.insert(0, lt_r["corrected_text"][:200])
+                if len(window_texts) >= settings.context_window_size:
+                    break
+        seed_text = window_texts[-1] if window_texts else ""
         seeds.append(seed_text or None)
+        seed_windows.append(window_texts if window_texts else None)
 
     # Crear CorrectionBatch records en BD (limpiar anteriores si re-procesamiento)
     db.execute(delete(CorrectionBatch).where(CorrectionBatch.doc_id == doc_id))
@@ -802,6 +808,7 @@ def _dispatch_parallel_correction(
             end_para=end,
             lt_results_key=lt_results_key,
             context_seed=seeds[b_idx],
+            context_seed_window=seed_windows[b_idx],
             all_paragraphs_key=all_paragraphs_key,
             profile_json=profile_json,
             analysis_key=analysis_key,
@@ -1345,6 +1352,7 @@ def correct_batch_llm(
     language: str,
     disabled_rules: list[str],
     global_context_key: str | None = None,
+    context_seed_window: list | None = None,
 ) -> str:
     """
     Tarea Celery: Pass 2 (LLM) para un batch de párrafos [start_para..end_para].
@@ -1421,6 +1429,7 @@ def correct_batch_llm(
             sections=sections,
             para_classifications=para_classifications,
             context_seed=context_seed,
+            context_seed_window=context_seed_window,
             global_context=global_context_dict,
             term_registry=term_registry_list,
         )
