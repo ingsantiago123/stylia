@@ -272,6 +272,256 @@ async def update_profile(
 
 
 # =============================================
+# Renovación S2: Ficha Editorial Dinámica
+# =============================================
+
+_LOCKED_STATUSES = {"correcting", "candidate_rendering", "finalizing", "completed"}
+
+
+@router.get("/documents/{doc_id}/editorial-profile")
+async def get_editorial_profile(
+    doc_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Devuelve la ficha editorial completa: perfil + ADN auto-detectado."""
+    doc = await _get_doc_or_404(db, doc_id)
+
+    result_profile = await db.execute(
+        select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+    )
+    profile_obj = result_profile.scalar_one_or_none()
+
+    result_ctx = await db.execute(
+        select(DocumentGlobalContext).where(DocumentGlobalContext.doc_id == doc_id)
+    )
+    ctx_obj = result_ctx.scalar_one_or_none()
+
+    if not profile_obj:
+        raise HTTPException(404, "El documento no tiene perfil editorial configurado.")
+    if not ctx_obj:
+        raise HTTPException(409, "El análisis editorial aún no terminó. Vuelve cuando el documento esté en estado 'candidate_ready' o superior.")
+
+    is_locked = doc.status in _LOCKED_STATUSES
+
+    profile_data = StyleProfileResponse.model_validate(profile_obj).model_dump()
+
+    auto_detected = {
+        "global_summary": ctx_obj.global_summary,
+        "dominant_voice": ctx_obj.dominant_voice,
+        "dominant_register": ctx_obj.dominant_register,
+        "key_themes": ctx_obj.key_themes_json or [],
+        "protected_globals": ctx_obj.protected_globals_json or [],
+        "style_fingerprint": ctx_obj.style_fingerprint_json or {},
+    }
+
+    return {
+        "doc_id": str(doc_id),
+        "profile": profile_data,
+        "auto_detected": auto_detected,
+        "is_locked": is_locked,
+    }
+
+
+@router.patch("/documents/{doc_id}/editorial-profile")
+async def patch_editorial_profile(
+    doc_id: UUID,
+    body: StyleProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Actualiza la ficha editorial. Bloqueado si el documento ya está en corrección."""
+    doc = await _get_doc_or_404(db, doc_id)
+
+    if doc.status in _LOCKED_STATUSES:
+        raise HTTPException(
+            409,
+            f"El documento está en estado '{doc.status}'. Usa /reopen antes de editar el perfil."
+        )
+
+    result = await db.execute(
+        select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(404, "El documento no tiene perfil editorial configurado.")
+
+    updates = body.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        if value is not None:
+            setattr(profile, key, value)
+    profile.source = "user"
+    await db.commit()
+    await db.refresh(profile)
+
+    return await get_editorial_profile(doc_id, db)
+
+
+@router.post("/documents/{doc_id}/editorial-profile/rules", status_code=201)
+async def add_editorial_rule(
+    doc_id: UUID,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Agrega una regla individual (substitution, normalization o idiolect) al perfil."""
+    import uuid as _uuid
+    doc = await _get_doc_or_404(db, doc_id)
+    if doc.status in _LOCKED_STATUSES:
+        raise HTTPException(409, f"Documento en estado '{doc.status}': usa /reopen primero.")
+
+    result = await db.execute(select(DocumentProfile).where(DocumentProfile.doc_id == doc_id))
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(404, "Perfil no encontrado.")
+
+    rule_type = body.get("type")
+    rule_data = body.get("rule", {})
+    if not rule_type or rule_type not in ("substitution", "normalization", "idiolect"):
+        raise HTTPException(400, "type debe ser 'substitution', 'normalization' o 'idiolect'.")
+
+    rule_id = str(_uuid.uuid4())
+    rule_data["id"] = rule_id
+    rule_data.setdefault("enabled", True)
+
+    if rule_type == "substitution":
+        # Validar regex si es_regex
+        if rule_data.get("is_regex"):
+            import re
+            try:
+                re.compile(rule_data.get("find", ""))
+            except re.error as e:
+                raise HTTPException(400, f"Regex inválido: {e}")
+        rules = list(profile.substitution_rules or [])
+        rules.append(rule_data)
+        profile.substitution_rules = rules
+    elif rule_type == "normalization":
+        norms = list(profile.entity_normalizations or [])
+        norms.append(rule_data)
+        profile.entity_normalizations = norms
+    else:
+        idiolects = list(profile.idiolect_protections or [])
+        idiolects.append(rule_data)
+        profile.idiolect_protections = idiolects
+
+    await db.commit()
+    return {"id": rule_id, "type": rule_type, "rule": rule_data}
+
+
+@router.delete("/documents/{doc_id}/editorial-profile/rules/{rule_id}", status_code=200)
+async def delete_editorial_rule(
+    doc_id: UUID,
+    rule_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Elimina una regla por ID. Idempotente."""
+    await _get_doc_or_404(db, doc_id)
+    result = await db.execute(select(DocumentProfile).where(DocumentProfile.doc_id == doc_id))
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(404, "Perfil no encontrado.")
+
+    changed = False
+    for field_name in ("substitution_rules", "entity_normalizations", "idiolect_protections"):
+        lst = list(getattr(profile, field_name) or [])
+        new_lst = [r for r in lst if r.get("id") != rule_id]
+        if len(new_lst) != len(lst):
+            setattr(profile, field_name, new_lst)
+            changed = True
+
+    if changed:
+        await db.commit()
+    return {"deleted": rule_id, "changed": changed}
+
+
+@router.post("/documents/{doc_id}/simulate-impact")
+async def simulate_impact(
+    doc_id: UUID,
+    body: dict | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Estima el impacto del perfil actual sin lanzar el pipeline."""
+    from app.services.substitution_engine import count_substitution_matches
+    from app.config import settings as _settings
+
+    doc = await _get_doc_or_404(db, doc_id)
+    if doc.status not in {"analyzing", "candidate_ready", "uploaded", "correcting", "completed", "extracting"}:
+        if doc.status == "uploaded":
+            raise HTTPException(409, "La extracción de texto aún no terminó.")
+
+    result = await db.execute(select(DocumentProfile).where(DocumentProfile.doc_id == doc_id))
+    profile_obj = result.scalar_one_or_none()
+    if not profile_obj:
+        raise HTTPException(404, "Perfil no encontrado.")
+
+    profile_dict = StyleProfileResponse.model_validate(profile_obj).model_dump()
+    # Aplicar override si se provee
+    if body and body.get("profile_override"):
+        profile_dict.update(body["profile_override"])
+
+    # Leer todos los textos del documento de MinIO (text files por página)
+    result_pages = await db.execute(
+        select(Page).where(Page.doc_id == doc_id).order_by(Page.page_no)
+    )
+    pages = result_pages.scalars().all()
+
+    total_substitutions = 0
+    total_paragraphs = 0
+    routing_skip = routing_micro = routing_macro = 0
+    warnings: list[str] = []
+
+    for page in pages:
+        if not page.text_uri:
+            continue
+        try:
+            text_bytes = minio_client.download_file(page.text_uri)
+            page_text = text_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        paragraphs = [p.strip() for p in page_text.split("\n") if p.strip() and len(p.strip()) > 3]
+        for para in paragraphs:
+            total_paragraphs += 1
+            total_substitutions += count_substitution_matches(para, profile_dict)
+            # Routing estimate simple
+            if len(para) < 50:
+                routing_skip += 1
+            elif len(para) < 300:
+                routing_micro += 1
+            else:
+                routing_macro += 1
+
+    # Estimaciones de tokens y costo (heurístico)
+    avg_tokens_per_para = 80
+    estimated_tokens_input = total_paragraphs * avg_tokens_per_para
+    estimated_tokens_output = int(estimated_tokens_input * 0.4)
+    cost_input = estimated_tokens_input / 1e6 * _settings.openai_pricing_input
+    cost_output = estimated_tokens_output / 1e6 * _settings.openai_pricing_output
+    estimated_cost = round(cost_input + cost_output, 4)
+
+    # Validar reglas con 0 coincidencias
+    for rule in (profile_dict.get("substitution_rules") or []):
+        if rule.get("enabled", True):
+            find = rule.get("find", "")
+            # No tenemos el texto completo aquí, solo advertimos si find está vacío
+            if not find:
+                warnings.append(f"Regla de sustitución con 'find' vacío — no aplicará.")
+
+    return {
+        "substitution_matches": total_substitutions,
+        "entity_normalization_matches": 0,
+        "paragraph_routing": {
+            "skip": routing_skip,
+            "micro": routing_micro,
+            "macro": routing_macro,
+            "total": total_paragraphs,
+        },
+        "estimated_tokens_input": estimated_tokens_input,
+        "estimated_tokens_output": estimated_tokens_output,
+        "estimated_cost_usd": estimated_cost,
+        "estimated_duration_seconds": max(30, total_paragraphs * 2),
+        "warnings": warnings,
+    }
+
+
+# =============================================
 # LISTADO (Dashboard)
 # =============================================
 

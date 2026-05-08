@@ -110,6 +110,7 @@ def build_user_prompt(
     page_no: int | None = None,
     total_pages: int | None = None,
     global_context: dict | None = None,
+    substitution_patches: list[dict] | None = None,
 ) -> str:
     """
     User prompt dinámico por párrafo.
@@ -266,10 +267,48 @@ def build_user_prompt(
     else:
         parts.append("\n── CONTEXTO PREVIO ──\nInicio de documento")
 
-    # ═══ BLOQUE 4: TEXTO A CORREGIR ════════════════════════════════════
+    # ═══ BLOQUE 4: REGLAS DEL USUARIO YA APLICADAS (S2) ═════════════════
+    if substitution_patches:
+        from app.services.substitution_engine import build_substitutions_prompt_block
+        subs_block = build_substitutions_prompt_block(substitution_patches)
+        if subs_block:
+            parts.append(f"\n{subs_block}")
+
+    # ═══ BLOQUE 5: RESTRICCIONES DE REGISTRO (S2) ════════════════════════
+    if profile:
+        register_constraints: list[str] = profile.get("register_constraints") or []
+        if register_constraints:
+            rc_lines = ["── RESTRICCIONES DE REGISTRO ──"]
+            rc_labels = {
+                "lenguaje_inclusivo": "usa formas inclusivas; cuando una sustitución ya esté aplicada, mantenla",
+                "sin_anglicismos": "prefiere términos en español (ej: \"correo\" no \"email\")",
+                "tuteo_exclusivo": "nunca usar \"usted\"",
+                "sin_imperativo": "evita el modo imperativo; usa infinitivo o construcciones impersonales",
+                "voseo_rioplatense": "usa formas de voseo rioplatense (vos/tenés/podés)",
+            }
+            for constraint in register_constraints:
+                label = rc_labels.get(constraint, constraint)
+                rc_lines.append(f"- {constraint}: {label}")
+            parts.append("\n" + "\n".join(rc_lines))
+
+        # ═══ BLOQUE 6: IDIOLECTOS PROTEGIDOS (S2) ════════════════════════
+        idiolect_protections: list[dict] = profile.get("idiolect_protections") or []
+        active_idiolects = [ip for ip in idiolect_protections if ip.get("enabled", True)]
+        if active_idiolects:
+            id_lines = ["── IDIOLECTOS PROTEGIDOS ──"]
+            for idiolect in active_idiolects:
+                scope = idiolect.get("scope", "")
+                desc = idiolect.get("description", "")
+                examples = idiolect.get("examples", [])
+                ex_str = f' (ej: {", ".join(repr(e) for e in examples[:3])})' if examples else ""
+                id_lines.append(f"- {scope}: {desc}{ex_str}")
+            id_lines.append("Si detectas estos patrones, NO los corrijas aunque parezcan incorrectos.")
+            parts.append("\n" + "\n".join(id_lines))
+
+    # ═══ BLOQUE 7: TEXTO A CORREGIR ════════════════════════════════════
     parts.append(f"\n── PÁRRAFO A CORREGIR ──\n{text}")
 
-    # ═══ BLOQUE 5: REGIONES PROTEGIDAS (si existen) ════════════════════
+    # ═══ BLOQUE 8: REGIONES PROTEGIDAS (si existen) ════════════════════
     if protected_regions_text:
         parts.append(f"\n{protected_regions_text}")
 
@@ -330,6 +369,12 @@ REGLAS DE AUDITORÍA:
 4. Aplica mejoras de estilo coherentes con la VOZ DEL AUTOR y el REGISTRO BASE
 5. Si no hay problemas en la Pasada 1, solo mejora el estilo final
 6. Los TÉRMINOS TÉCNICOS PROTEGIDOS GLOBALMENTE nunca deben modificarse
+7. Las REGLAS DEL USUARIO (substitution_rules, entity_normalizations) ya fueron aplicadas
+   en una fase previa. NO las reviertas — son decisiones del editor humano.
+8. Los IDIOLECTOS PROTEGIDOS deben preservarse exactamente como están, incluso si parecen
+   no estándar. Forman parte de la voz autoral o de personajes.
+9. Las RESTRICCIONES DE REGISTRO son obligatorias. Si la Pasada 1 introdujo un anglicismo
+   y register_constraints incluye "sin_anglicismos", revierte ese cambio.
 
 FORMATO DE RESPUESTA (JSON estricto):
 {

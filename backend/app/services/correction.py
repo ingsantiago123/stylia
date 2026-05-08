@@ -257,6 +257,13 @@ def _correct_single_paragraph(
         route_taken siempre se retorna para acumulación de estadísticas.
     """
     text = para_text.strip()
+    original_text_raw = text  # guarda el original PRE-sustitución para patch_data
+
+    # === Fase 0 (S2): Sustituciones del usuario antes de LT ===
+    substitution_patches: list[dict] = []
+    if profile and (profile.get("substitution_rules") or profile.get("entity_normalizations")):
+        from app.services.substitution_engine import apply_substitutions
+        text, substitution_patches = apply_substitutions(text, profile)
 
     # === Lote 4: Clasificación — necesaria antes de engines para las reglas de decisión ===
     classification = para_classifications.get(idx, {})
@@ -364,6 +371,7 @@ def _correct_single_paragraph(
             has_page_break=has_page_break,
             protected_regions_text=protected_regions_text,
             global_context=global_context,
+            substitution_patches=substitution_patches,
         )
 
         if route_decision.route == CorrectionRoute.EDITORIAL:
@@ -490,24 +498,52 @@ def _correct_single_paragraph(
                 f"Párrafo {idx}: gates no-críticos fallaron → manual_review: {reasons}"
             )
 
-    # Construir patch_data solo si hay cambios
+    # Construir patch_data si hay cualquier cambio (incluyendo solo sustituciones)
     patch_data = None
-    if final_text != text:
+    has_substitution_only = bool(substitution_patches) and final_text == text and final_text != original_text_raw
+    if final_text != original_text_raw:
+        # Determinar correction_phase: "substitution" si no hubo LT/LLM, sino la ruta activa
+        if has_substitution_only:
+            effective_phase = "substitution"
+            effective_source = "substitution_rule"
+            effective_model = None
+        else:
+            effective_phase = route_taken  # lt / cheap / editorial
+            effective_source = source
+            effective_model = model_used_actual if "chatgpt" in source else "languagetool"
+
+        # Mezclar cambios de sustitución en la lista de changes para trazabilidad
+        sub_changes = [
+            {
+                "original_fragment": p.get("original_fragment", ""),
+                "corrected_fragment": p.get("replacement", ""),
+                "category": "sustitución",
+                "severity": "importante",
+                "explanation": f"Regla de usuario: '{p.get('original_fragment')}' → '{p.get('replacement')}'",
+            }
+            for p in substitution_patches
+        ]
+        all_changes = sub_changes + llm_changes
+
+        first_rule_id = substitution_patches[0]["substitution_rule_id"] if substitution_patches else None
+
         patch_data = {
             "paragraph_index": idx,
             "location": location,
-            "original_text": text,
+            "original_text": original_text_raw,
             "corrected_text": final_text,
             "lt_operations": lt_operations,
-            "source": source,
-            "changes": llm_changes,
+            "source": effective_source,
+            "changes": all_changes,
             "confidence": llm_confidence,
             "rewrite_ratio": llm_rewrite_ratio,
-            "model_used": model_used_actual if "chatgpt" in source else "languagetool",
+            "model_used": effective_model,
             "route_taken": route_taken,
             "review_status": review_status,
             "review_reason": review_reason,
             "gate_results": gate_results_data,
+            "correction_phase": effective_phase,
+            "substitution_rule_id": first_rule_id,
             # Sprint 3: Audit trail dual-engine
             "lt_corrections_json": lt_operations if lt_operations else None,
             "llm_change_log_json": llm_changes if llm_changes else None,
