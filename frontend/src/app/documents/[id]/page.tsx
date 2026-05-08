@@ -26,7 +26,8 @@ import { CorrectionHistory } from "@/components/CorrectionHistory";
 import { CorrectionFlowViewer } from "@/components/CorrectionFlowViewer";
 import { DiffCompareView } from "@/components/DiffCompareView";
 import { AnalysisView } from "@/components/AnalysisView";
-type Tab = "pipeline" | "analysis" | "corrections" | "pages" | "api-flow";
+import { EditorialProfilePanel } from "@/components/EditorialProfilePanel";
+type Tab = "pipeline" | "analysis" | "corrections" | "adn" | "pages" | "api-flow";
 
 export default function DocumentDetailPage() {
   const params = useParams();
@@ -147,6 +148,7 @@ export default function DocumentDetailPage() {
     { key: "pipeline", label: "Resumen" },
     { key: "analysis", label: "Analisis", count: analysis?.sections?.length },
     { key: "corrections", label: "Correcciones", count: corrections.length },
+    { key: "adn", label: "ADN Editorial" },
     { key: "api-flow", label: "Flujo API" },
     { key: "pages", label: "Comparar", count: corrections.length },
   ];
@@ -371,6 +373,10 @@ export default function DocumentDetailPage() {
             reviewSummary={reviewSummary}
             onRefresh={fetchData}
           />
+        )}
+
+        {activeTab === "adn" && (
+          <EditorialProfilePanel docId={docId} />
         )}
 
         {activeTab === "api-flow" && (

@@ -859,3 +859,106 @@ export async function getGlobalContext(docId: string): Promise<GlobalDocumentCon
   if (!res.ok) throw new Error(`Error ${res.status}`);
   return res.json();
 }
+
+// =============================================
+// Renovación S4: ADN editorial + reglas
+// =============================================
+
+export interface EditorialProfileFull {
+  doc_id: string;
+  profile: StyleProfile;
+  auto_detected: {
+    global_summary: string | null;
+    dominant_voice: string | null;
+    dominant_register: string | null;
+    key_themes: Array<{ theme: string; weight: number }>;
+    protected_globals: Array<{ term: string; reason: string }>;
+    style_fingerprint: Record<string, unknown>;
+  };
+  is_locked: boolean;
+}
+
+export interface SimulateImpactResult {
+  substitution_matches: number;
+  entity_normalization_matches: number;
+  paragraph_routing: {
+    skip: number;
+    micro: number;
+    macro: number;
+    total: number;
+  };
+  estimated_tokens_input: number;
+  estimated_tokens_output: number;
+  estimated_cost_usd: number;
+  estimated_duration_seconds: number;
+  warnings: string[];
+}
+
+export async function getEditorialProfile(docId: string): Promise<EditorialProfileFull> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/editorial-profile`);
+  if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}
+
+export async function patchEditorialProfile(
+  docId: string,
+  updates: Partial<StyleProfileCreate>
+): Promise<EditorialProfileFull> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/editorial-profile`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function addEditorialRule(
+  docId: string,
+  type: "substitution" | "normalization" | "idiolect",
+  rule: Record<string, unknown>
+): Promise<{ id: string; type: string; rule: Record<string, unknown> }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/editorial-profile/rules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type, rule }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteEditorialRule(
+  docId: string,
+  ruleId: string
+): Promise<{ deleted: string; changed: boolean }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/editorial-profile/rules/${ruleId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function simulateImpact(
+  docId: string,
+  profileOverride?: Partial<StyleProfileCreate>
+): Promise<SimulateImpactResult> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/simulate-impact`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(profileOverride ? { profile_override: profileOverride } : {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Error desconocido" }));
+    throw new Error(err.detail || `Error ${res.status}`);
+  }
+  return res.json();
+}
