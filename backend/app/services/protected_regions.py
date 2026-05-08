@@ -60,6 +60,7 @@ def detect_protected_regions(
     text: str,
     profile: dict | None = None,
     term_registry: list | None = None,
+    global_protected_terms: list | None = None,
 ) -> list[ProtectedRegion]:
     """
     Detecta todas las regiones del texto que no deben ser modificadas.
@@ -68,6 +69,8 @@ def detect_protected_regions(
         text: Texto del párrafo.
         profile: Perfil editorial con campo 'protected_terms' (lista de strings).
         term_registry: Lista de objetos con atributos 'term' e 'is_protected'.
+        global_protected_terms: Términos de DocumentGlobalContext.protected_globals_json
+            — formato [{term: str, reason: str}]. Siempre se protegen.
 
     Returns:
         Lista de ProtectedRegion ordenadas por posición de inicio.
@@ -128,6 +131,18 @@ def detect_protected_regions(
             try:
                 for m in re.finditer(re.escape(term), text, re.IGNORECASE):
                     _add(m, "glossary_term")
+            except re.error:
+                pass
+
+    # Términos globales del documento (DocumentGlobalContext.protected_globals_json)
+    if global_protected_terms:
+        for entry in global_protected_terms:
+            term = entry.get("term", "") if isinstance(entry, dict) else str(entry)
+            if not term:
+                continue
+            try:
+                for m in re.finditer(re.escape(term), text, re.IGNORECASE):
+                    _add(m, "global_term")
             except re.error:
                 pass
 

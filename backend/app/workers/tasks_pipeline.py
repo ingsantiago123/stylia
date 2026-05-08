@@ -1403,6 +1403,9 @@ def correct_batch_llm(
             for pc in analysis_data.get("paragraph_classifications", [])
         }
 
+        # S1: Extraer term_registry del analysis_data para proteger términos en LT/LLM
+        term_registry_list = analysis_data.get("terms", [])
+
         # LLM secuencial para este batch — Plan v4: doble pasada activada
         patches, usage_records, last_corrected_text, audit_log_entries = correct_batch_with_llm_sync(
             batch_index=batch_index,
@@ -1419,6 +1422,7 @@ def correct_batch_llm(
             para_classifications=para_classifications,
             context_seed=context_seed,
             global_context=global_context_dict,
+            term_registry=term_registry_list,
         )
 
         # Guardar resultado en MinIO

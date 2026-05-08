@@ -54,6 +54,7 @@ def decide_engines(
     paragraph_type: str | None = None,
     profile: dict | None = None,
     term_registry: list | None = None,
+    global_protected_terms: list | None = None,
     base_disabled_rules: list[str] | None = None,
 ) -> EngineDecision:
     """
@@ -64,6 +65,7 @@ def decide_engines(
         paragraph_type: Tipo del párrafo (titulo, celda_tabla, cita, etc.).
         profile: Perfil editorial con protected_terms.
         term_registry: Glosario de términos (con is_protected).
+        global_protected_terms: Términos globales del ADN editorial [{term, reason}].
         base_disabled_rules: Reglas ya desactivadas en la configuración base.
 
     Returns:
@@ -73,9 +75,12 @@ def decide_engines(
         lt_disabled_rules=list(base_disabled_rules or []) + _LT_STYLE_RULES_TO_DISABLE,
     )
 
-    # Detectar regiones protegidas siempre
+    # Detectar regiones protegidas siempre (incluye términos globales del ADN)
     decision.protected_regions = detect_protected_regions(
-        text=text, profile=profile, term_registry=term_registry,
+        text=text,
+        profile=profile,
+        term_registry=term_registry,
+        global_protected_terms=global_protected_terms,
     )
 
     # Citas textuales: ni LT ni LLM modifican el contenido

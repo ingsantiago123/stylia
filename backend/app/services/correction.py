@@ -235,6 +235,8 @@ def _correct_single_paragraph(
     table_context: dict | None = None,
     has_page_break: bool = False,
     audit_log_collector: list | None = None,
+    term_registry: list | None = None,
+    global_context: dict | None = None,
 ) -> tuple[dict | None, dict | None, str, str]:
     """
     Corrige un párrafo individual.
@@ -270,10 +272,14 @@ def _correct_single_paragraph(
             paragraph_type = "celda_tabla"
 
     # === Sprint 3: Engine Router — detectar regiones protegidas y reglas de colisión ===
+    # S1: pasar term_registry y global_protected_terms para proteger términos técnicos
+    global_protected_terms = (global_context or {}).get("protected_globals_json") or []
     engine_decision = decide_engines(
         text=text,
         paragraph_type=paragraph_type,
         profile=profile,
+        term_registry=term_registry,
+        global_protected_terms=global_protected_terms,
         base_disabled_rules=disabled_rules,
     )
     protected_regions = engine_decision.protected_regions
@@ -357,6 +363,7 @@ def _correct_single_paragraph(
             table_context=table_context,
             has_page_break=has_page_break,
             protected_regions_text=protected_regions_text,
+            global_context=global_context,
         )
 
         if route_decision.route == CorrectionRoute.EDITORIAL:
@@ -570,6 +577,9 @@ def correct_docx_sync(
     for pc in (analysis_data or {}).get("paragraph_classifications", []):
         para_classifications[pc["paragraph_index"]] = pc
 
+    # S1: Extraer term_registry del análisis para proteger términos en LT y LLM
+    term_registry_list = (analysis_data or {}).get("terms", [])
+
     # Construir mapa de contexto de tabla para corrección table-aware
     table_context_map = _build_table_context_map(doc)
 
@@ -649,6 +659,8 @@ def correct_docx_sync(
             table_context=table_ctx,
             has_page_break=para_has_pb,
             audit_log_collector=audit_log_entries,
+            term_registry=term_registry_list,
+            global_context=global_context,
         )
 
         # ── Plan v4: PASADA 2 — Auditoría Contextual ────────────────────
@@ -958,6 +970,7 @@ def correct_batch_with_llm_sync(
     para_classifications: dict[int, dict],
     context_seed: str | None,
     global_context: dict | None = None,
+    term_registry: list | None = None,
 ) -> tuple[list[dict], list[dict], str, list[dict]]:
     """
     Pass 1 LLM + Pass 2 auditoría para el rango [start_para..end_para] (inclusive).
@@ -1006,6 +1019,8 @@ def correct_batch_with_llm_sync(
             precomputed_lt=precomputed_lt,
             has_page_break=para_has_pb,
             audit_log_collector=audit_log_entries,
+            term_registry=term_registry,
+            global_context=global_context,
         )
 
         # ── Plan v4: PASADA 2 — Auditoría Contextual ────────────────────

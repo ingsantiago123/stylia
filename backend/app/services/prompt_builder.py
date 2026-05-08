@@ -109,13 +109,15 @@ def build_user_prompt(
     protected_regions_text: str | None = None,
     page_no: int | None = None,
     total_pages: int | None = None,
+    global_context: dict | None = None,
 ) -> str:
     """
     User prompt dinámico por párrafo.
 
     Estructura del prompt (Sprint 4 — bloques explícitos):
+      [CONTEXTO GLOBAL]         ← S1: inyectado en Pasada 1 (antes solo en Pasada 2)
       [PERFIL EDITORIAL]
-      [UBICACIÓN ESTRUCTURAL]   ← nuevo bloque explícito
+      [UBICACIÓN ESTRUCTURAL]
       [CONTEXTO PREVIO]
       [TEXTO A CORREGIR]
       [REGIONES PROTEGIDAS]     ← si existen
@@ -135,8 +137,17 @@ def build_user_prompt(
         protected_regions_text: Texto formateado de regiones protegidas (de protected_regions.py)
         page_no: Número de página del párrafo (1-based, si está disponible)
         total_pages: Total de páginas del documento
+        global_context: ADN editorial del documento (DocumentGlobalContext). S1: ahora
+            también se inyecta en Pasada 1 para que el LLM vea los términos globales.
     """
     parts = []
+
+    # ═══ BLOQUE 0: CONTEXTO GLOBAL DEL DOCUMENTO (S1) ══════════════════
+    # Inyectado en Pasada 1 para que el LLM respete términos técnicos globales
+    if global_context:
+        global_block = build_global_context_block(global_context)
+        if global_block:
+            parts.append(global_block)
 
     # ═══ BLOQUE 1: PERFIL EDITORIAL ════════════════════════════════════
     if profile:
