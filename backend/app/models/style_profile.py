@@ -100,6 +100,32 @@ class DocumentProfile(Base):
         comment="Reglas de LanguageTool deshabilitadas"
     )
 
+    # Renovación S0: reglas personalizadas y fases de corrección
+    substitution_rules: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list,
+        comment='[{"id":"uuid","find":"...","replace":"...","case_sensitive":false,"is_regex":false,"scope":"all","enabled":true}]'
+    )
+    entity_normalizations: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list,
+        comment='[{"id":"uuid","generic":"...","canonical":"...","aliases":[],"enabled":true}]'
+    )
+    idiolect_protections: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list,
+        comment='[{"id":"uuid","scope":"character:Juan|author_voice|fragment","description":"...","examples":[],"enabled":true}]'
+    )
+    register_constraints: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list,
+        comment='["lenguaje_inclusivo","sin_anglicismos","tuteo_exclusivo","sin_imperativo","voseo_rioplatense"]'
+    )
+    macro_correction_level: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="none",
+        comment="none | light | full"
+    )
+    correction_phases: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=lambda: ["lt", "llm_micro", "audit"],
+        comment='Fases activas: ["substitutions","lt","llm_micro","llm_macro","audit"]'
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

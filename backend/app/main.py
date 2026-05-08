@@ -224,6 +224,24 @@ async def lifespan(app: FastAPI):
         ))
         logger.info("Plan v4: tablas document_global_context y llm_audit_log verificadas/creadas")
 
+    # Renovación S0: columnas en document_profiles y patches
+    async with engine.begin() as conn:
+        renov_s0_migrations = [
+            "ALTER TABLE document_profiles ADD COLUMN IF NOT EXISTS substitution_rules JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE document_profiles ADD COLUMN IF NOT EXISTS entity_normalizations JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE document_profiles ADD COLUMN IF NOT EXISTS idiolect_protections JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE document_profiles ADD COLUMN IF NOT EXISTS register_constraints JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE document_profiles ADD COLUMN IF NOT EXISTS macro_correction_level VARCHAR(10) DEFAULT 'none'",
+            "ALTER TABLE document_profiles ADD COLUMN IF NOT EXISTS correction_phases JSONB DEFAULT '[\"lt\", \"llm_micro\", \"audit\"]'::jsonb",
+            "CREATE INDEX IF NOT EXISTS ix_document_profiles_macro_level ON document_profiles(macro_correction_level)",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS correction_phase VARCHAR(20)",
+            "ALTER TABLE patches ADD COLUMN IF NOT EXISTS substitution_rule_id VARCHAR(36)",
+            "CREATE INDEX IF NOT EXISTS ix_patches_correction_phase ON patches(correction_phase)",
+        ]
+        for sql in renov_s0_migrations:
+            await conn.execute(text(sql))
+        logger.info("Renovación S0: columnas document_profiles + patches verificadas/creadas")
+
     # Inicializar bucket de MinIO
     from app.utils.minio_client import ensure_bucket
     await ensure_bucket()

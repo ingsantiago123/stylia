@@ -60,6 +60,9 @@ class PatchListItem(BaseModel):
     llm_change_log_json: list[dict] | None = None
     reverted_lt_changes_json: list[dict] | None = None
     protected_regions_snapshot: list[dict] | None = None
+    # Renovación S0
+    correction_phase: str | None = None
+    substitution_rule_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -104,6 +107,9 @@ class PatchDetail(BaseModel):
     llm_change_log_json: list[dict] | None = None
     reverted_lt_changes_json: list[dict] | None = None
     protected_regions_snapshot: list[dict] | None = None
+    # Renovación S0
+    correction_phase: str | None = None
+    substitution_rule_id: str | None = None
 
     model_config = {"from_attributes": True}
 

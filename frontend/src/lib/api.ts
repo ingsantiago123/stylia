@@ -121,6 +121,9 @@ export interface PatchListItem {
   llm_change_log_json: Array<Record<string, unknown>> | null;
   reverted_lt_changes_json: Array<Record<string, unknown>> | null;
   protected_regions_snapshot: Array<{start: number; end: number; reason: string; text: string}> | null;
+  // Renovación S0
+  correction_phase: string | null;
+  substitution_rule_id: string | null;
 }
 
 // Sprint 6: Structural map
@@ -166,6 +169,42 @@ export interface PresetInfo {
   register: string;
 }
 
+// Renovación S0: tipos para reglas personalizadas
+export interface SubstitutionRule {
+  id: string;
+  find: string;
+  replace: string;
+  case_sensitive: boolean;
+  is_regex: boolean;
+  scope: "all" | "narrative" | "dialogue";
+  enabled: boolean;
+}
+
+export interface EntityNormalization {
+  id: string;
+  generic: string;
+  canonical: string;
+  aliases: string[];
+  enabled: boolean;
+}
+
+export interface IdiolectProtection {
+  id: string;
+  scope: string;
+  description: string;
+  examples: string[];
+  enabled: boolean;
+}
+
+export type RegisterConstraint =
+  | "lenguaje_inclusivo"
+  | "sin_anglicismos"
+  | "tuteo_exclusivo"
+  | "sin_imperativo"
+  | "voseo_rioplatense";
+
+export type MacroCorrectionLevel = "none" | "light" | "full";
+
 export interface StyleProfile {
   id: string;
   doc_id: string;
@@ -188,6 +227,13 @@ export interface StyleProfile {
   protected_terms: string[];
   forbidden_changes: string[];
   lt_disabled_rules: string[];
+  // Renovación S0
+  substitution_rules: SubstitutionRule[];
+  entity_normalizations: EntityNormalization[];
+  idiolect_protections: IdiolectProtection[];
+  register_constraints: RegisterConstraint[];
+  macro_correction_level: MacroCorrectionLevel;
+  correction_phases: string[];
   created_at: string;
   updated_at: string;
 }
@@ -211,6 +257,13 @@ export interface StyleProfileCreate {
   protected_terms?: string[] | null;
   forbidden_changes?: string[] | null;
   lt_disabled_rules?: string[] | null;
+  // Renovación S0
+  substitution_rules?: SubstitutionRule[] | null;
+  entity_normalizations?: EntityNormalization[] | null;
+  idiolect_protections?: IdiolectProtection[] | null;
+  register_constraints?: RegisterConstraint[] | null;
+  macro_correction_level?: MacroCorrectionLevel | null;
+  correction_phases?: string[] | null;
 }
 
 // =============================================

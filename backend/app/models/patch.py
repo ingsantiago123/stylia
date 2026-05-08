@@ -131,6 +131,16 @@ class Patch(Base):
         comment="Resultado auditoría Pasada 2: {reverted_destructions, style_improvements, confidence, pass1_quality}"
     )
 
+    # Renovación S0: fase de corrección y regla aplicada
+    correction_phase: Mapped[str | None] = mapped_column(
+        String(20), nullable=True,
+        comment="substitution|lt|llm_micro|llm_macro|audit|manual"
+    )
+    substitution_rule_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True,
+        comment="UUID de la substitution_rule que generó este patch"
+    )
+
     # Sprint 3: Audit trail dual-engine
     lt_corrections_json: Mapped[dict | None] = mapped_column(
         JSONB, nullable=True,

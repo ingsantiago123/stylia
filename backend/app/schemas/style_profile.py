@@ -29,6 +29,13 @@ class StyleProfileCreate(BaseModel):
     protected_terms: list[str] | None = None
     forbidden_changes: list[str] | None = None
     lt_disabled_rules: list[str] | None = None
+    # Renovación S0
+    substitution_rules: list[dict] | None = None
+    entity_normalizations: list[dict] | None = None
+    idiolect_protections: list[dict] | None = None
+    register_constraints: list[str] | None = None
+    macro_correction_level: str | None = Field(None, pattern="^(none|light|full)$")
+    correction_phases: list[str] | None = None
 
 
 class StyleProfileUpdate(BaseModel):
@@ -50,6 +57,13 @@ class StyleProfileUpdate(BaseModel):
     protected_terms: list[str] | None = None
     forbidden_changes: list[str] | None = None
     lt_disabled_rules: list[str] | None = None
+    # Renovación S0
+    substitution_rules: list[dict] | None = None
+    entity_normalizations: list[dict] | None = None
+    idiolect_protections: list[dict] | None = None
+    register_constraints: list[str] | None = None
+    macro_correction_level: str | None = Field(None, pattern="^(none|light|full)$")
+    correction_phases: list[str] | None = None
 
 
 class StyleProfileResponse(BaseModel):
@@ -71,10 +85,17 @@ class StyleProfileResponse(BaseModel):
     max_expansion_ratio: float = 1.10
     target_inflesz_min: int | None = None
     target_inflesz_max: int | None = None
-    style_priorities: list[str] = []
-    protected_terms: list[str] = []
-    forbidden_changes: list[str] = []
-    lt_disabled_rules: list[str] = []
+    style_priorities: list[str] = Field(default_factory=list)
+    protected_terms: list[str] = Field(default_factory=list)
+    forbidden_changes: list[str] = Field(default_factory=list)
+    lt_disabled_rules: list[str] = Field(default_factory=list)
+    # Renovación S0
+    substitution_rules: list[dict] = Field(default_factory=list)
+    entity_normalizations: list[dict] = Field(default_factory=list)
+    idiolect_protections: list[dict] = Field(default_factory=list)
+    register_constraints: list[str] = Field(default_factory=list)
+    macro_correction_level: str = "none"
+    correction_phases: list[str] = Field(default_factory=lambda: ["lt", "llm_micro", "audit"])
     created_at: datetime
     updated_at: datetime
 
