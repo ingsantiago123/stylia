@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { PresetInfo } from "@/lib/api";
+import { PresetInfo, PromptBlocksConfig, PromptBlockKey } from "@/lib/api";
 
 interface ProfileEditorProps {
   presetKey: string | null;
@@ -47,6 +47,19 @@ const STYLE_PRIORITY_OPTIONS = [
   "claridad", "fluidez", "cohesion", "precision_lexica", "ritmo",
 ];
 
+// Bloques del prompt — qué se envía al LLM en cada corrección
+const PROMPT_BLOCK_DEFS: { key: PromptBlockKey; label: string; description: string }[] = [
+  { key: "global_context",       label: "Contexto global", description: "ADN del documento: tema, voz, registro base, términos técnicos." },
+  { key: "profile_header",       label: "Cabecera de perfil", description: "Resumen del perfil que va al LLM (registro, prioridades, tono)." },
+  { key: "ubicacion",            label: "Ubicación estructural", description: "Sección, página, vecinos del párrafo." },
+  { key: "structural_rules",     label: "Reglas por tipo", description: "Reglas específicas para títulos, listas, celdas, citas, pies de figura." },
+  { key: "context_prev",         label: "Ventana de contexto previo", description: "Los N párrafos ya corregidos antes del actual." },
+  { key: "substitution_rules",   label: "Reglas de sustitución", description: "Cambios del usuario ya aplicados antes del LLM." },
+  { key: "register_constraints", label: "Restricciones de registro", description: "Lenguaje inclusivo, sin anglicismos, voseo, etc." },
+  { key: "idiolect_protections", label: "Idiolectos protegidos", description: "Patrones del autor o personajes que no deben tocarse." },
+  { key: "protected_regions",    label: "Regiones protegidas", description: "Citas, fórmulas, código y fragmentos marcados." },
+];
+
 export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, error }: ProfileEditorProps) {
   const selectedPreset = presets.find((p) => p.key === presetKey);
 
@@ -62,6 +75,8 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
   const [protectedTermsInput, setProtectedTermsInput] = useState("");
   const [protectedTerms, setProtectedTerms] = useState<string[]>([]);
   const [priorities, setPriorities] = useState<string[]>(["claridad", "fluidez", "cohesion", "precision_lexica"]);
+  const [promptBlocks, setPromptBlocks] = useState<PromptBlocksConfig>({});
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const addProtectedTerm = () => {
     const term = protectedTermsInput.trim();
@@ -83,8 +98,22 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
     }
   };
 
+  const togglePromptBlock = (key: PromptBlockKey) => {
+    setPromptBlocks(pb => {
+      const next = { ...pb };
+      const cur = pb[key] === undefined ? true : pb[key];
+      next[key] = !cur;
+      return next;
+    });
+  };
+
+  const enabledBlocksCount = PROMPT_BLOCK_DEFS.filter(b => {
+    const v = promptBlocks[b.key];
+    return v === undefined ? true : v;
+  }).length;
+
   const handleSave = () => {
-    onSave({
+    const payload: Record<string, unknown> = {
       register,
       tone,
       intervention_level: interventionLevel,
@@ -94,7 +123,12 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
       max_expansion_ratio: maxExpansionRatio,
       protected_terms: protectedTerms,
       style_priorities: priorities,
-    });
+    };
+    // Solo enviamos prompt_blocks si el usuario tocó el panel avanzado
+    if (Object.keys(promptBlocks).length > 0) {
+      payload.prompt_blocks = promptBlocks;
+    }
+    onSave(payload);
   };
 
   return (
@@ -321,6 +355,64 @@ export function ProfileEditor({ presetKey, presets, onSave, onBack, processing, 
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Configuración avanzada del prompt — colapsable */}
+      <div className="border-t border-border pt-4">
+        <button
+          type="button"
+          onClick={() => setShowAdvanced(s => !s)}
+          className="w-full flex items-center justify-between text-left group"
+        >
+          <div>
+            <div className="text-sm font-semibold text-bruma flex items-center gap-2">
+              <svg
+                className={`w-4 h-4 text-plomo transition-transform ${showAdvanced ? "rotate-90" : ""}`}
+                fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+              </svg>
+              Configuración avanzada del prompt
+            </div>
+            <div className="text-xs text-plomo mt-0.5 ml-6">
+              Decide qué bloques de información se envían al LLM en cada corrección.
+            </div>
+          </div>
+          <span className="text-xs text-plomo">
+            {enabledBlocksCount}/{PROMPT_BLOCK_DEFS.length} bloques activos
+          </span>
+        </button>
+
+        {showAdvanced && (
+          <div className="mt-4 space-y-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+            {PROMPT_BLOCK_DEFS.map(b => {
+              const v = promptBlocks[b.key];
+              const on = v === undefined ? true : v;
+              return (
+                <button
+                  key={b.key}
+                  type="button"
+                  onClick={() => togglePromptBlock(b.key)}
+                  className={`text-left p-3 rounded-lg border transition-all cursor-pointer
+                    ${on
+                      ? "bg-krypton/5 border-krypton/30 hover:border-krypton/50"
+                      : "bg-surface border-border hover:border-carbon-200"}
+                  `}
+                >
+                  <div className="flex items-start gap-3">
+                    <span className={`mt-0.5 flex-shrink-0 w-10 h-5 rounded-full relative transition-colors ${on ? "bg-krypton" : "bg-carbon-200"}`}>
+                      <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-carbon transition-all ${on ? "left-5" : "left-0.5"}`} />
+                    </span>
+                    <div className="min-w-0">
+                      <div className={`text-xs font-semibold ${on ? "text-bruma" : "text-plomo"}`}>{b.label}</div>
+                      <div className="text-[11px] text-plomo mt-1 leading-snug">{b.description}</div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Actions */}

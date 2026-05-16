@@ -52,6 +52,43 @@ class Block(Base):
         nullable=True,
     )
 
+    # === Sub-etapa B.5 extraction_docx — Conciencia estructural (Nivel 2/3) ===
+    # Todos nullable: retrocompatible con documentos viejos.
+    docx_location: Mapped[str | None] = mapped_column(
+        String(80), nullable=True,
+        comment="Location DOCX nativa (body:N | table:T:R:C:P | header:S:P | footer:S:P)",
+    )
+    style_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    style_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Listas
+    list_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    list_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    list_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    list_format_type: Mapped[str | None] = mapped_column(
+        String(20), nullable=True,
+        comment="bullet|decimal|lowerLetter|upperLetter|lowerRoman|upperRoman|mixed",
+    )
+    list_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Tablas
+    table_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    row_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    column_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    row_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    col_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    table_cell_role: Mapped[str | None] = mapped_column(
+        String(15), nullable=True,
+        comment="header|data|total|caption_row",
+    )
+
+    # FK opcional al ElementGroup (definido en element_group.py).
+    # No declaramos ForeignKey aquí para evitar dependencias circulares al
+    # importar el modelo; la integridad referencial se mantiene a nivel app.
+    element_group_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -66,6 +103,10 @@ class Block(Base):
     __table_args__ = (
         UniqueConstraint("page_id", "block_no", name="uq_blocks_page_block"),
         Index("idx_blocks_page", "page_id"),
+        Index("idx_blocks_list", "list_id"),
+        Index("idx_blocks_table", "table_id"),
+        Index("idx_blocks_group", "element_group_id"),
+        Index("idx_blocks_style", "style_name"),
     )
 
     def __repr__(self) -> str:

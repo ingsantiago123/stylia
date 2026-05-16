@@ -1,16 +1,16 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { DocumentUploader } from "@/components/DocumentUploader";
+import Link from "next/link";
 import { DocumentList } from "@/components/DocumentList";
-import { ProfileSelector } from "@/components/ProfileSelector";
+import { DocumentWizard } from "@/components/wizard/DocumentWizard";
 import { listDocuments, DocumentListItem } from "@/lib/api";
 
 export default function HomePage() {
   const [documents, setDocuments] = useState<DocumentListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pendingDoc, setPendingDoc] = useState<{ id: string; filename: string } | null>(null);
+  const [showWizard, setShowWizard] = useState(false);
 
   const fetchDocuments = useCallback(async () => {
     try {
@@ -26,13 +26,13 @@ export default function HomePage() {
 
   useEffect(() => {
     fetchDocuments();
+    let timer: ReturnType<typeof setTimeout>;
     const getInterval = () => {
       const anyProcessing = documents.some(
         (d) => !["completed", "failed", "uploaded", "pending_review", "candidate_ready"].includes(d.status)
       );
       return anyProcessing ? 3000 : 15000;
     };
-    let timer: ReturnType<typeof setTimeout>;
     const tick = () => {
       timer = setTimeout(async () => {
         await fetchDocuments();
@@ -43,20 +43,17 @@ export default function HomePage() {
     return () => clearTimeout(timer);
   }, [fetchDocuments, documents]);
 
-  const handleUploadSuccess = () => fetchDocuments();
-  const handleDocUploaded = (docId: string, filename: string) => {
-    setPendingDoc({ id: docId, filename });
-    fetchDocuments();
-  };
-  const handleProcessStarted = () => { setPendingDoc(null); fetchDocuments(); };
-  const handleCancelProfile = () => { setPendingDoc(null); fetchDocuments(); };
-
   const processingCount = documents.filter(
     (d) => !["completed", "failed", "uploaded", "pending_review", "candidate_ready"].includes(d.status)
   ).length;
   const completedCount = documents.filter((d) => d.status === "completed").length;
   const failedCount = documents.filter((d) => d.status === "failed").length;
   const totalPages = documents.reduce((sum, d) => sum + (d.total_pages || 0), 0);
+
+  const handleProcessStarted = () => {
+    setShowWizard(false);
+    fetchDocuments();
+  };
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -72,7 +69,7 @@ export default function HomePage() {
             </div>
           </div>
           <div className="text-2xl font-bold text-bruma">{documents.length}</div>
-          <div className="text-xs text-plomo-dark mt-0.5">{totalPages} paginas total</div>
+          <div className="text-xs text-plomo-dark mt-0.5">{totalPages} páginas total</div>
         </div>
 
         <div className="glass-card rounded-xl p-4 stat-card">
@@ -115,30 +112,51 @@ export default function HomePage() {
             )}
           </div>
           <div className={`text-2xl font-bold ${failedCount > 0 ? "text-red-400" : "text-bruma"}`}>{failedCount}</div>
-          <div className="text-xs text-plomo-dark mt-0.5">{failedCount > 0 ? "requieren atencion" : "sin errores"}</div>
+          <div className="text-xs text-plomo-dark mt-0.5">{failedCount > 0 ? "requieren atención" : "sin errores"}</div>
         </div>
       </div>
 
-      {/* Upload / Profile selector */}
+      {/* Wizard / CTA */}
       <section className="animate-fade-in-up" style={{ animationDelay: "0.1s" }}>
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-1 h-5 bg-krypton rounded-full" />
-          <h2 className="text-sm font-semibold text-bruma uppercase tracking-wider">
-            {pendingDoc ? "Configurar correccion" : "Nuevo documento"}
-          </h2>
-        </div>
-        {pendingDoc ? (
-          <ProfileSelector
-            docId={pendingDoc.id}
-            filename={pendingDoc.filename}
+        {showWizard ? (
+          <DocumentWizard
             onProcessStarted={handleProcessStarted}
-            onCancel={handleCancelProfile}
+            onReset={() => setShowWizard(false)}
           />
         ) : (
-          <DocumentUploader
-            onSuccess={handleUploadSuccess}
-            onUploaded={handleDocUploaded}
-          />
+          <div className="glass-card rounded-2xl p-8">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-6">
+              {/* Copy */}
+              <div className="text-center sm:text-left">
+                <h2 className="text-heading-3 text-bruma mb-1">Nuevo documento</h2>
+                <p className="text-sm text-plomo">
+                  Sube tu DOCX y STYLIA lo corregirá manteniendo tu estilo.
+                </p>
+              </div>
+              {/* Actions */}
+              <div className="flex flex-col sm:flex-row gap-3 flex-shrink-0">
+                <Link
+                  href="/profiles/studio"
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-border text-sm text-plomo hover:text-bruma hover:border-krypton/30 transition-all"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                  </svg>
+                  Profile Studio
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => setShowWizard(true)}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-krypton text-carbon text-sm font-semibold shadow-glow-sm hover:bg-krypton-400 transition-all"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                  </svg>
+                  Subir documento
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </section>
 

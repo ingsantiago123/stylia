@@ -13,7 +13,9 @@ import {
   EntityNormalization,
   IdiolectProtection,
   RegisterConstraint,
+  PromptBlocksConfig,
 } from "@/lib/api";
+import { PromptBlocksPanel } from "@/components/PromptBlocksPanel";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -861,6 +863,19 @@ export function EditorialProfilePanel({ docId }: { docId: string }) {
         onUpdated={load}
         isLocked={is_locked}
       />
+
+      {/* Bloques del prompt — sólo visible cuando el documento se puede editar
+         (ya pasó el setup inicial). La selección principal va en ProfileEditor. */}
+      {!is_locked && (
+        <PromptBlocksPanel
+          profile={profile}
+          locked={is_locked}
+          onSave={async (updates: { prompt_blocks: PromptBlocksConfig }) => {
+            await patchEditorialProfile(docId, updates);
+            await load();
+          }}
+        />
+      )}
 
       {/* Impact simulation */}
       <ImpactEstimatePanel docId={docId} />

@@ -63,7 +63,9 @@ class Settings(BaseSettings):
     pass2_enabled: bool = True             # activar/desactivar Pasada 2 globalmente
 
     # Renovación S3: ventana de contexto enriquecida
-    context_window_size: int = 5          # párrafos previos para contexto en LLM (era fijo en 3)
+    # Triplicada (era 5): permite al LLM ver más párrafos previos para detectar
+    # mejor cohesión, paralelismo entre listas/secciones, y términos recurrentes.
+    context_window_size: int = 15
 
     # --- Precios OpenAI (USD por 1M tokens) ---
     # Actualizar cuando cambien: https://openai.com/api/pricing/

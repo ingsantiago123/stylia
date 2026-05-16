@@ -45,6 +45,7 @@ def classify_paragraph(
     style_name: str | None = None,
     is_in_table: bool = False,
     glossary_terms: list[str] | None = None,
+    block=None,
 ) -> tuple[str, bool]:
     """
     Clasifica un párrafo por tipo usando heurísticas (sin LLM).
@@ -55,6 +56,10 @@ def classify_paragraph(
         style_name: Nombre del estilo python-docx (ej: 'Heading 1').
         is_in_table: Si el párrafo está dentro de una tabla.
         glossary_terms: Lista de términos técnicos del glosario.
+        block: Instancia de `Block` con metadatos B.5 (style_*, list_*,
+            table_*). Si se proporciona y trae datos, se usa como señal
+            primaria sobre las heurísticas. Retrocompatible: si es None o
+            no trae datos, se cae al algoritmo heurístico clásico.
 
     Returns:
         (paragraph_type, requires_llm)
@@ -63,6 +68,31 @@ def classify_paragraph(
     if not stripped:
         return "vacio", False
 
+    # === Señal primaria: metadata estructural del Block (Nivel 3) ===
+    if block is not None:
+        bsn = getattr(block, "style_name", None)
+        if bsn:
+            sl = bsn.lower()
+            if "heading" in sl or "título" in sl or "titulo" in sl:
+                level = getattr(block, "style_level", None) or 2
+                return ("titulo" if level == 1 else "subtitulo"), False
+            if "quote" in sl or "cita" in sl:
+                return "cita", False
+            if "caption" in sl or "pie" in sl:
+                return "pie_imagen", True
+            if "footnote" in sl or "nota" in sl:
+                return "nota_pie", True
+        if getattr(block, "list_id", None):
+            return "lista", True
+        if getattr(block, "table_id", None):
+            role = getattr(block, "table_cell_role", None)
+            if role == "header":
+                return "celda_tabla_header", True
+            if role == "total":
+                return "celda_tabla_total", True
+            return "celda_tabla", True
+
+    # === Heurísticas (fallback retrocompatible) ===
     # Por ubicación en documento
     if location.startswith("header:"):
         return "encabezado", False
@@ -693,6 +723,26 @@ def analyze_document_sync(
         "usage_records": usage_records,
         "stats": stats,
     }
+
+
+# =============================================
+# Nivel 2 (transitorio): enrichment estructural sin pasar por B.5 Celery
+# =============================================
+
+def enrich_blocks_with_docx_sync(
+    doc_id: str,
+    docx_uri: str,
+    session,
+    docx_bytes_cached: bytes | None = None,
+) -> dict:
+    """Helper transitorio que delega en extraction_docx_structure_sync.
+
+    Útil si todavía no se quiere mover el pipeline a la nueva sub-etapa B.5
+    pero sí se desea poblar metadata estructural en Block después de Etapa
+    C. Idempotente: re-ejecutar sobre el mismo doc sobrescribe los campos.
+    """
+    from app.services.extraction_docx import extract_docx_structure_sync
+    return extract_docx_structure_sync(doc_id, docx_uri, session, docx_bytes_cached)
 
 
 # =============================================

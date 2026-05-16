@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   getLlmAudit,
   getLlmAuditDiff,
@@ -122,19 +123,19 @@ export default function AuditDetailPage() {
   return (
     <div className="space-y-5">
       {/* ── Header ── */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={() => router.push("/audit")}
-          className="flex items-center gap-1.5 text-plomo hover:text-krypton text-sm transition-colors group"
+      <div className="flex items-center gap-2 min-w-0">
+        <Link
+          href="/audit"
+          className="flex items-center gap-1.5 text-plomo hover:text-krypton text-sm transition-colors group shrink-0"
         >
           <svg className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
           </svg>
           Auditoría
-        </button>
-        <span className="text-plomo-dark">/</span>
-        <span className="text-sm text-bruma font-medium truncate max-w-xs">{doc?.filename ?? docId}</span>
-        <span className="ml-auto text-[11px] font-mono text-plomo-dark bg-surface-elevated px-2 py-0.5 rounded">
+        </Link>
+        <span className="text-plomo-dark shrink-0">/</span>
+        <span className="text-sm text-bruma font-medium truncate">{doc?.filename ?? docId}</span>
+        <span className="ml-auto text-[11px] font-mono text-plomo-dark bg-surface-elevated px-2 py-0.5 rounded shrink-0 hidden sm:block">
           Plan v4 — Doble Pasada
         </span>
       </div>

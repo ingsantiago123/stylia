@@ -326,10 +326,19 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
     patch_version = 1
 
     for patch_data in docx_patches:
-        para_idx = patch_data.get("paragraph_index", 0)
-        db_block = _find_best_block(
-            patch_data.get("original_text", ""), para_idx, total_paragraphs
-        )
+        para_idx = patch_data.get("paragraph_index", 0) or 0
+
+        # Nivel 2/3 — patches grupales vienen con block_id explícito
+        db_block = None
+        if patch_data.get("block_id"):
+            db_block = db.execute(
+                select(Block).where(Block.id == patch_data["block_id"])
+            ).scalar_one_or_none()
+
+        if db_block is None:
+            db_block = _find_best_block(
+                patch_data.get("original_text", ""), para_idx, total_paragraphs
+            )
         if not db_block:
             continue
 
@@ -343,6 +352,11 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
         p_llm_log = patch_data.get("llm_change_log_json")
         p_reverted = patch_data.get("reverted_lt_changes_json")
         p_protected = patch_data.get("protected_regions_snapshot")
+        # Nivel 2/3 — agrupación grupal
+        p_group_id = patch_data.get("group_id")
+        p_group_call_index = patch_data.get("group_call_index")
+        p_group_call_id = patch_data.get("group_call_id")
+        p_structural_role = patch_data.get("structural_role")
 
         if llm_changes:
             for change in llm_changes:
@@ -362,7 +376,7 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
                     explanation=change.get("explanation"),
                     confidence=patch_data.get("confidence"),
                     rewrite_ratio=patch_data.get("rewrite_ratio"),
-                    pass_number=2 if "chatgpt" in patch_data["source"] else 1,
+                    pass_number=patch_data.get("pass_number") or (2 if "chatgpt" in patch_data["source"] else 1),
                     model_used=patch_data.get("model_used", "languagetool"),
                     paragraph_index=para_idx,
                     route_taken=route,
@@ -372,6 +386,10 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
                     protected_regions_snapshot=p_protected,
                     corrected_pass1_text=patch_data.get("corrected_pass1_text"),
                     pass2_audit_json=patch_data.get("pass2_audit_json"),
+                    group_id=p_group_id,
+                    group_call_index=p_group_call_index,
+                    group_call_id=p_group_call_id,
+                    structural_role=p_structural_role,
                 ))
                 patch_version += 1
         else:
@@ -386,9 +404,12 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
                 review_reason=p_review_reason,
                 gate_results=p_gate_results,
                 applied=False,
+                category=patch_data.get("category"),
+                severity=patch_data.get("severity"),
+                explanation=patch_data.get("explanation"),
                 confidence=patch_data.get("confidence"),
                 rewrite_ratio=patch_data.get("rewrite_ratio"),
-                pass_number=1,
+                pass_number=patch_data.get("pass_number") or 1,
                 model_used=patch_data.get("model_used", "languagetool"),
                 paragraph_index=para_idx,
                 route_taken=route,
@@ -398,6 +419,10 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
                 protected_regions_snapshot=p_protected,
                 corrected_pass1_text=patch_data.get("corrected_pass1_text"),
                 pass2_audit_json=patch_data.get("pass2_audit_json"),
+                group_id=p_group_id,
+                group_call_index=p_group_call_index,
+                group_call_id=p_group_call_id,
+                structural_role=p_structural_role,
             ))
             patch_version += 1
 
@@ -1001,6 +1026,54 @@ def process_document_pipeline(self, doc_id: str):
         _save_stage_timing(db, doc_id, stage_timings)
 
         # =============================================
+        # ETAPA B.5: EXTRACCIÓN ESTRUCTURAL DOCX (Nivel 3)
+        # Enriquece los Block con metadata nativa del DOCX (style_name,
+        # list_*, table_*) y crea ElementGroup por cada lista/tabla.
+        # =============================================
+        _update_document_status(db, doc_id, "extracted_docx")
+        _update_progress(
+            db, doc_id, "extracted_docx",
+            "Detectando estructura DOCX...", start_stage=True,
+        )
+        t0_b5 = time.time()
+        try:
+            from app.services.extraction_docx import extract_docx_structure_sync
+            docx_bytes = _get_cached_docx_bytes(doc_id, doc.docx_uri or doc.source_uri)
+            b5_summary = extract_docx_structure_sync(
+                doc_id=doc_id,
+                docx_uri=doc.docx_uri or doc.source_uri,
+                session=db,
+                docx_bytes_cached=docx_bytes,
+            )
+            logger.info(f"[Etapa B.5] {b5_summary}")
+        except Exception as e:
+            # NO bloqueante: si B.5 falla, el pipeline sigue con el flujo
+            # heurístico clásico. La metadata estructural simplemente no
+            # se persiste y los prompts caen a su comportamiento Nivel 1.
+            logger.warning(
+                f"[Etapa B.5] Falló enrichment estructural (se continúa sin él): {e}"
+            )
+        stage_timings["B5"] = round(time.time() - t0_b5, 1)
+
+        # Recoger ubicaciones DOCX de bloques ya asignados a un grupo estructural.
+        # Se usará en Etapa D para saltar esos párrafos en la pasada individual.
+        _grouped_locations: set[str] = set()
+        try:
+            from app.models.block import Block as _Block
+            from app.models.page import Page as _Page
+            _grp_rows = db.execute(
+                select(_Block.docx_location)
+                .join(_Page, _Block.page_id == _Page.id)
+                .where(_Page.doc_id == doc_id, _Block.element_group_id.isnot(None))
+            ).all()
+            _grouped_locations = {r[0] for r in _grp_rows if r[0]}
+            if _grouped_locations:
+                logger.info(f"[Etapa B.5] {len(_grouped_locations)} ubicaciones grupales — se omitirán en D individual")
+        except Exception as _ge:
+            logger.warning(f"[Etapa B.5] No se pudo construir grouped_locations: {_ge}")
+        _save_stage_timing(db, doc_id, stage_timings)
+
+        # =============================================
         # ETAPA C: ANÁLISIS EDITORIAL
         # =============================================
         _update_document_status(db, doc_id, "analyzing")
@@ -1020,6 +1093,8 @@ def process_document_pipeline(self, doc_id: str):
                 "audience_type": profile_row.audience_type,
                 "audience_expertise": profile_row.audience_expertise,
                 "tone": profile_row.tone,
+                "genre": getattr(profile_row, "genre", None),
+                "subgenre": getattr(profile_row, "subgenre", None),
                 "preserve_author_voice": profile_row.preserve_author_voice,
                 "max_rewrite_ratio": profile_row.max_rewrite_ratio,
                 "max_expansion_ratio": profile_row.max_expansion_ratio,
@@ -1027,6 +1102,10 @@ def process_document_pipeline(self, doc_id: str):
                 "protected_terms": profile_row.protected_terms or [],
                 "forbidden_changes": profile_row.forbidden_changes or [],
                 "lt_disabled_rules": profile_row.lt_disabled_rules or [],
+                "register_constraints": getattr(profile_row, "register_constraints", None) or [],
+                "idiolect_protections": getattr(profile_row, "idiolect_protections", None) or [],
+                # Configuración granular del prompt (UI). None = todos los bloques activos.
+                "prompt_blocks": getattr(profile_row, "prompt_blocks", None),
             }
             logger.info(f"[Etapa C] Perfil editorial: {profile_row.preset_name or 'custom'}")
 
@@ -1094,6 +1173,29 @@ def process_document_pipeline(self, doc_id: str):
                 json.dumps(classifications, ensure_ascii=False).encode("utf-8"),
                 content_type="application/json",
             )
+            # Escribir paragraph_type en blocks (match por docx_location = location)
+            try:
+                from app.models.block import Block as _BlockC
+                from app.models.page import Page as _PageC
+                loc_to_ptype = {pc["location"]: pc["paragraph_type"] for pc in classifications if pc.get("paragraph_type")}
+                if loc_to_ptype:
+                    _blk_rows = db.execute(
+                        select(_BlockC)
+                        .join(_PageC, _BlockC.page_id == _PageC.id)
+                        .where(_PageC.doc_id == doc_id)
+                    ).scalars().all()
+                    updated_count = 0
+                    for blk in _blk_rows:
+                        loc = blk.docx_location or ""
+                        ptype = loc_to_ptype.get(loc)
+                        if ptype and blk.paragraph_type != ptype:
+                            blk.paragraph_type = ptype
+                            updated_count += 1
+                    if updated_count:
+                        db.flush()
+                        logger.info(f"[Etapa C] paragraph_type escrito en {updated_count} blocks")
+            except Exception as _pte:
+                logger.warning(f"[Etapa C] No se pudo escribir paragraph_type en blocks (no bloqueante): {_pte}")
 
         # =============================================
         # C.6: Análisis de Contexto Global (Plan v4)
@@ -1215,6 +1317,7 @@ def process_document_pipeline(self, doc_id: str):
                 on_progress=_correction_progress,
                 docx_bytes_cached=_docx_bytes,
                 global_context=global_context_dict,
+                grouped_locations=_grouped_locations or None,
             )
 
             # Sprint 2: persistir mapa canónico paragraph_index → página
@@ -1274,13 +1377,40 @@ def process_document_pipeline(self, doc_id: str):
         _save_stage_timing(db, doc_id, stage_timings)
 
         # =============================================
+        # ETAPA D.5: PASADA GRUPAL (Nivel 2/3)
+        # Corrige listas/tablas detectadas en B.5 en una sola llamada
+        # por grupo. Los patches grupales tienen prioridad sobre los
+        # individuales en _apply_docx_patches.
+        # =============================================
+        try:
+            from app.services.correction import correct_groups_for_doc_sync
+            group_patches, group_usage = correct_groups_for_doc_sync(
+                doc_id=doc_id,
+                session=db,
+                profile=profile_dict,
+                global_context=global_context_dict,
+            )
+            if group_patches:
+                docx_patches.extend(group_patches)
+                for r in group_usage:
+                    db.add(LlmUsage(doc_id=doc_id, **r))
+                db.commit()
+                logger.info(
+                    f"[Etapa D.5] Pasada grupal: +{len(group_patches)} patches"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[Etapa D.5] Pasada grupal falló (no bloqueante): {e}"
+            )
+
+        # =============================================
         # PERSISTIR PATCHES → PENDING_REVIEW
         # =============================================
         # Guardar patches en MinIO para uso en Etapa E posterior
         patches_key = f"docx/{doc_id}/patches_docx.json"
         minio_client.upload_file(
             patches_key,
-            json.dumps(docx_patches, ensure_ascii=False, indent=2).encode("utf-8"),
+            json.dumps(docx_patches, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
             content_type="application/json",
         )
 
@@ -1765,6 +1895,9 @@ def recorrect_single_patch(self, doc_id: str, patch_id: str, feedback: str):
                     "protected_terms": profile.protected_terms or [],
                     "forbidden_changes": getattr(profile, "forbidden_changes", []) or [],
                     "lt_disabled_rules": getattr(profile, "lt_disabled_rules", []) or [],
+                    "register_constraints": getattr(profile, "register_constraints", None) or [],
+                    "idiolect_protections": getattr(profile, "idiolect_protections", None) or [],
+                    "prompt_blocks": getattr(profile, "prompt_blocks", None),
                 }
         except Exception:
             pass

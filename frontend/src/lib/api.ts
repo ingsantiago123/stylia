@@ -124,6 +124,51 @@ export interface PatchListItem {
   // Renovación S0
   correction_phase: string | null;
   substitution_rule_id: string | null;
+  // Nivel 1: conciencia estructural
+  paragraph_type: string | null;
+  // Nivel 2/3: agrupación grupal (listas/tablas)
+  group_id: string | null;
+  group_call_index: number | null;
+  group_call_id: string | null;
+  structural_role: string | null;
+}
+
+// Nivel 3: estructura del documento
+export interface DocumentStructureGroup {
+  id: string;
+  group_type: "list" | "table";
+  docx_native_id: string | null;
+  section_id: string | null;
+  item_count: number;
+  blocks_count: number;
+  patches_count: number;
+  correction_status: string;
+  metadata: Record<string, unknown>;
+  label: string;
+}
+
+export interface DocumentStructureSection {
+  id: string;
+  section_index: number;
+  section_title: string | null;
+  start_paragraph: number | null;
+  end_paragraph: number | null;
+  groups: DocumentStructureGroup[];
+}
+
+export interface DocumentStructure {
+  doc_id: string;
+  sections: DocumentStructureSection[];
+  orphan_groups: DocumentStructureGroup[];
+  totals: { sections: number; lists: number; tables: number };
+}
+
+export async function fetchDocumentStructure(
+  docId: string
+): Promise<DocumentStructure> {
+  const r = await fetch(`/api/v1/documents/${docId}/structure`);
+  if (!r.ok) throw new Error(`structure ${r.status}`);
+  return r.json();
 }
 
 // Sprint 6: Structural map
@@ -234,9 +279,26 @@ export interface StyleProfile {
   register_constraints: RegisterConstraint[];
   macro_correction_level: MacroCorrectionLevel;
   correction_phases: string[];
+  // Configuración granular de bloques del prompt (UI). null = todos activos.
+  prompt_blocks: PromptBlocksConfig | null;
   created_at: string;
   updated_at: string;
 }
+
+// Llaves de los bloques del prompt configurables desde la UI.
+// Si la flag no existe en el dict, se asume true (activado).
+export type PromptBlockKey =
+  | "global_context"
+  | "profile_header"
+  | "ubicacion"
+  | "structural_rules"
+  | "context_prev"
+  | "substitution_rules"
+  | "register_constraints"
+  | "idiolect_protections"
+  | "protected_regions";
+
+export type PromptBlocksConfig = Partial<Record<PromptBlockKey, boolean>>;
 
 export interface StyleProfileCreate {
   preset_name?: string | null;
@@ -264,6 +326,7 @@ export interface StyleProfileCreate {
   register_constraints?: RegisterConstraint[] | null;
   macro_correction_level?: MacroCorrectionLevel | null;
   correction_phases?: string[] | null;
+  prompt_blocks?: PromptBlocksConfig | null;
 }
 
 // =============================================
@@ -351,12 +414,13 @@ export interface PageAnnotation {
   review_status: string;
   original_snippet: string;
   corrected_snippet: string;
+  annot_type?: "paragraph" | "change" | "deleted";
 }
 
 export async function getPageAnnotations(
   docId: string,
   pageNo: number,
-  mode: "candidate" | "final" = "final",
+  mode: "candidate" | "final" | "original" = "final",
 ): Promise<PageAnnotation[]> {
   const res = await fetch(`${API_BASE}/documents/${docId}/pages/${pageNo}/annotations?mode=${mode}`);
   if (!res.ok) return [];

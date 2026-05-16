@@ -2,8 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800;1,14..32,400&display=swap');
 
+/* ============================================================
+   BASE
+   ============================================================ */
 @layer base {
   * {
     border-color: theme('colors.border.DEFAULT');
@@ -13,6 +16,7 @@
     scroll-behavior: smooth;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
 
   body {
@@ -22,12 +26,25 @@
   }
 
   ::selection {
-    background-color: rgba(212, 255, 0, 0.25);
+    background-color: rgba(212, 255, 0, 0.22);
     color: #F5F5F7;
+  }
+
+  /* Remove autofill background in dark mode */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus {
+    -webkit-box-shadow: 0 0 0 1000px #141416 inset;
+    -webkit-text-fill-color: #F5F5F7;
   }
 }
 
+/* ============================================================
+   COMPONENT UTILITIES
+   ============================================================ */
 @layer utilities {
+
+  /* ── Typography ── */
   .text-gradient-krypton {
     @apply bg-clip-text text-transparent bg-gradient-to-r from-krypton-200 via-krypton to-krypton-100;
   }
@@ -36,6 +53,11 @@
     @apply bg-clip-text text-transparent bg-gradient-to-b from-bruma to-plomo;
   }
 
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* ── Glass morphism ── */
   .glass {
     @apply bg-surface/60 backdrop-blur-xl border border-border;
   }
@@ -45,10 +67,10 @@
   }
 
   .glass-card {
-    background: linear-gradient(135deg, rgba(28,28,31,0.8) 0%, rgba(20,20,22,0.9) 100%);
+    background: linear-gradient(135deg, rgba(28,28,31,0.80) 0%, rgba(20,20,22,0.90) 100%);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(42,42,46,0.6);
+    border: 1px solid rgba(42,42,46,0.60);
   }
 
   .glass-card-hover:hover {
@@ -56,6 +78,7 @@
     border-color: rgba(212, 255, 0, 0.15);
   }
 
+  /* ── Glow effects ── */
   .glow-krypton {
     box-shadow: 0 0 40px rgba(212, 255, 0, 0.12), 0 0 80px rgba(212, 255, 0, 0.04);
   }
@@ -64,11 +87,16 @@
     box-shadow: 0 0 15px rgba(212, 255, 0, 0.12);
   }
 
+  .krypton-glow {
+    box-shadow: 0 0 15px rgba(212, 255, 0, 0.2), 0 0 30px rgba(212, 255, 0, 0.1);
+  }
+
+  /* ── Borders ── */
   .border-gradient-krypton {
     border-image: linear-gradient(to right, transparent, rgba(212, 255, 0, 0.3), transparent) 1;
   }
 
-  /* Circular progress ring */
+  /* ── Progress ring (SVG-based) ── */
   .progress-ring-track {
     stroke: rgba(42, 42, 46, 0.8);
   }
@@ -81,70 +109,79 @@
   .progress-ring-fill-error {
     stroke: #EF4444;
   }
+
+  /* ── Document preview thumbnail ── */
+  .doc-preview-thumb {
+    background: linear-gradient(180deg, #1C1C1F 0%, #141416 100%);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.03);
+  }
+
+  /* ── Correction diff underline ── */
+  .correction-underline {
+    text-decoration: underline;
+    text-decoration-color: rgba(212, 255, 0, 0.4);
+    text-underline-offset: 3px;
+    text-decoration-thickness: 2px;
+  }
+
+  /* ── Stat card hover lift ── */
+  .stat-card {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  }
+
+  /* ── Tab indicator ── */
+  .tab-indicator {
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* ── Badge / pill base ── */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide;
+  }
+
+  /* ── Prose-style section header ── */
+  .section-header {
+    @apply flex items-center gap-2 mb-4;
+  }
+  .section-header::before {
+    content: '';
+    @apply block w-1 h-4 bg-krypton rounded-full shrink-0;
+  }
+
+  /* ── Loading skeleton ── */
+  .shimmer-bg {
+    background: linear-gradient(
+      90deg,
+      rgba(42,42,46,0.30) 25%,
+      rgba(42,42,46,0.60) 50%,
+      rgba(42,42,46,0.30) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s ease-in-out infinite;
+  }
+
+  /* ── Monospace code block ── */
+  .code-block {
+    @apply font-mono text-xs bg-surface border border-border rounded-xl px-4 py-3 text-bruma/80 overflow-x-auto leading-relaxed;
+  }
 }
 
-/* Scrollbar styling */
-::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: #2A2A2E;
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #3A3A3E;
-}
+/* ============================================================
+   SCROLLBAR
+   ============================================================ */
+::-webkit-scrollbar        { width: 5px; height: 5px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: #2A2A2E; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3A3A3E; }
 
-/* Krypton glow effect for active elements */
-.krypton-glow {
-  box-shadow: 0 0 15px rgba(212, 255, 0, 0.2), 0 0 30px rgba(212, 255, 0, 0.1);
-}
-
-/* Subtle underline for corrections */
-.correction-underline {
-  text-decoration: underline;
-  text-decoration-color: rgba(212, 255, 0, 0.4);
-  text-underline-offset: 3px;
-  text-decoration-thickness: 2px;
-}
-
-/* Document preview thumbnail */
-.doc-preview-thumb {
-  background: linear-gradient(180deg, #1C1C1F 0%, #141416 100%);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.03);
-}
-
-/* Animated shimmer for loading states */
-.shimmer-bg {
-  background: linear-gradient(
-    90deg,
-    rgba(42,42,46,0.3) 25%,
-    rgba(42,42,46,0.6) 50%,
-    rgba(42,42,46,0.3) 75%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.5s ease-in-out infinite;
-}
-
+/* ============================================================
+   KEYFRAMES
+   ============================================================ */
 @keyframes shimmer {
-  0% { background-position: 200% 0; }
+  0%   { background-position:  200% 0; }
   100% { background-position: -200% 0; }
-}
-
-/* Stat card hover effect */
-.stat-card {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.stat-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
-}
-
-/* Tab indicator animation */
-.tab-indicator {
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }

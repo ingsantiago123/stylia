@@ -27,6 +27,7 @@ import { CorrectionHistory } from "@/components/CorrectionHistory";
 import { CorrectionFlowViewer } from "@/components/CorrectionFlowViewer";
 import { DiffCompareView } from "@/components/DiffCompareView";
 import { AnalysisView } from "@/components/AnalysisView";
+import { StructuralTree } from "@/components/StructuralTree";
 import { EditorialProfilePanel } from "@/components/EditorialProfilePanel";
 import { MacroCorrectionView } from "@/components/MacroCorrectionView";
 type Tab = "pipeline" | "analysis" | "corrections" | "adn" | "pages" | "api-flow";
@@ -364,7 +365,10 @@ export default function DocumentDetailPage() {
         )}
 
         {activeTab === "analysis" && (
-          <AnalysisView analysis={analysis} />
+          <div className="space-y-6">
+            <AnalysisView analysis={analysis} />
+            <StructuralTree docId={docId} />
+          </div>
         )}
 
         {activeTab === "corrections" && (

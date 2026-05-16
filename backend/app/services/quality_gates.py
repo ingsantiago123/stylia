@@ -272,6 +272,191 @@ def gate_readability_inflesz(
 
 
 # =====================================================================
+# GATES POR TIPO ESTRUCTURAL (Nivel 1)
+# =====================================================================
+
+def gate_title_no_final_period(
+    corrected: str, paragraph_type: str | None
+) -> GateResult:
+    """Títulos y subtítulos NO terminan en punto ni dos puntos. No crítico."""
+    if paragraph_type not in ("titulo", "subtitulo"):
+        return GateResult(
+            passed=True, gate_name="title_no_final_period",
+            value=1.0, threshold=1.0, message="N/A",
+            critical=False,
+        )
+    s = (corrected or "").rstrip()
+    # No considerar elipsis "..." como falta
+    has_bad_ending = (s.endswith(".") and not s.endswith("...")) or s.endswith(":")
+    return GateResult(
+        passed=not has_bad_ending,
+        gate_name="title_no_final_period",
+        value=0.0 if has_bad_ending else 1.0,
+        threshold=1.0,
+        message="Título termina en punto o dos puntos" if has_bad_ending else "",
+        critical=False,
+    )
+
+
+_CAPTION_LABEL_RE = re.compile(
+    r"^(figura|fig\.?|tabla|cuadro|imagen|gr[áa]fico|gr[áa]f\.?|mapa|esquema|ilustraci[oó]n|foto(?:graf[ií]a)?)\s+\d+",
+    re.IGNORECASE,
+)
+
+
+def gate_caption_starts_with_label(
+    original: str, corrected: str, paragraph_type: str | None
+) -> GateResult:
+    """Pies de figura/tabla NO pueden perder su etiqueta numerada inicial.
+    Si el original empezaba con "Figura N." o equivalente, el corregido
+    también debe hacerlo. CRÍTICO."""
+    if paragraph_type != "pie_imagen":
+        return GateResult(
+            passed=True, gate_name="caption_starts_with_label",
+            value=1.0, threshold=1.0, message="N/A",
+            critical=True,
+        )
+    had = bool(_CAPTION_LABEL_RE.match((original or "").strip()))
+    has = bool(_CAPTION_LABEL_RE.match((corrected or "").strip()))
+    if had and not has:
+        return GateResult(
+            passed=False,
+            gate_name="caption_starts_with_label",
+            value=0.0, threshold=1.0,
+            message="Pie de figura/tabla perdió etiqueta numerada inicial",
+            critical=True,
+        )
+    return GateResult(
+        passed=True, gate_name="caption_starts_with_label",
+        value=1.0, threshold=1.0, message="OK",
+        critical=True,
+    )
+
+
+def gate_table_cell_uniform_capitalization(
+    corrected: str, sibling_cells: list[str] | None, paragraph_type: str | None
+) -> GateResult:
+    """Verifica que la capitalización inicial del texto corregido sea
+    consistente con la mayoría de la columna. No crítico.
+    Si no hay sibling_cells (Nivel 1), devuelve N/A passed=True.
+    """
+    if paragraph_type not in ("celda_tabla", "celda_tabla_header", "celda_tabla_total"):
+        return GateResult(
+            passed=True, gate_name="cell_uniform_capitalization",
+            value=1.0, threshold=1.0, message="N/A",
+            critical=False,
+        )
+    sibling_cells = [s for s in (sibling_cells or []) if s and s.strip()]
+    if not sibling_cells:
+        return GateResult(
+            passed=True, gate_name="cell_uniform_capitalization",
+            value=1.0, threshold=1.0,
+            message="Sin celdas hermanas disponibles",
+            critical=False,
+        )
+
+    def is_upper_start(s: str) -> bool:
+        s = s.lstrip()
+        return bool(s) and s[:1].isupper()
+
+    majority_upper = sum(1 for s in sibling_cells if is_upper_start(s)) >= len(sibling_cells) / 2
+    ok = is_upper_start(corrected or "") == majority_upper
+    return GateResult(
+        passed=ok,
+        gate_name="cell_uniform_capitalization",
+        value=1.0 if ok else 0.0,
+        threshold=1.0,
+        message="" if ok else "Capitalización inconsistente con la columna",
+        critical=False,
+    )
+
+
+# =====================================================================
+# GATES DE GRUPO (Nivel 2 — invocados desde el orquestador grupal)
+# =====================================================================
+
+def _classify_ending(s: str) -> str:
+    s = (s or "").rstrip()
+    if not s:
+        return "empty"
+    last = s[-1]
+    if last in ".":
+        return "period"
+    if last in "?¿":
+        return "question"
+    if last in "!¡":
+        return "exclamation"
+    if last in ":;,":
+        return "punct"
+    return "none"
+
+
+def gate_list_format_consistent(corrected_items: list[str]) -> list[GateResult]:
+    """Todos los ítems de la lista deben tener mismo inicio (mayús/minús)
+    y misma puntuación final. Devuelve 2 GateResult."""
+    items = [s for s in (corrected_items or []) if s and s.strip()]
+    if len(items) < 2:
+        same = GateResult(True, "list_format_consistent_initial", 1.0, 1.0, "N/A", critical=False)
+        same2 = GateResult(True, "list_format_consistent_ending", 1.0, 1.0, "N/A", critical=False)
+        return [same, same2]
+    initials = {s.lstrip()[:1].isupper() for s in items}
+    endings = {_classify_ending(s) for s in items}
+    ok_init = len(initials) <= 1
+    ok_end = len(endings) <= 1
+    return [
+        GateResult(
+            passed=ok_init,
+            gate_name="list_format_consistent_initial",
+            value=1.0 if ok_init else 0.0,
+            threshold=1.0,
+            message="" if ok_init else "Capitalización inicial inconsistente entre ítems",
+            critical=False,
+        ),
+        GateResult(
+            passed=ok_end,
+            gate_name="list_format_consistent_ending",
+            value=1.0 if ok_end else 0.0,
+            threshold=1.0,
+            message="" if ok_end else f"Puntuación final inconsistente: {sorted(endings)}",
+            critical=False,
+        ),
+    ]
+
+
+_VERB_INF_RE = re.compile(r"^\s*\w+(ar|er|ir)\b", re.IGNORECASE)
+_ARTICLES = {"el", "la", "los", "las", "un", "una", "unos", "unas"}
+
+
+def gate_list_parallel_structure(corrected_items: list[str]) -> GateResult:
+    """≥75% de los ítems comienzan por el mismo tipo gramatical
+    (verbo infinitivo / artículo / otro). No crítico."""
+    items = [s for s in (corrected_items or []) if s and s.strip()]
+    if len(items) < 2:
+        return GateResult(True, "list_parallel_structure", 1.0, 0.75, "N/A", critical=False)
+
+    def cls(s: str) -> str:
+        first = s.strip().split()[0] if s.strip() else ""
+        if _VERB_INF_RE.match(first):
+            return "verb_inf"
+        if first.lower() in _ARTICLES:
+            return "article"
+        return "other"
+
+    classes = [cls(s) for s in items]
+    from collections import Counter
+    most_class, most_count = Counter(classes).most_common(1)[0]
+    majority = most_count / len(classes)
+    return GateResult(
+        passed=majority >= 0.75,
+        gate_name="list_parallel_structure",
+        value=round(majority, 4),
+        threshold=0.75,
+        message="" if majority >= 0.75 else f"Solo {majority:.0%} comparten estructura ({most_class})",
+        critical=False,
+    )
+
+
+# =====================================================================
 # ORQUESTADOR
 # =====================================================================
 
@@ -281,15 +466,21 @@ def validate_correction(
     profile: dict | None = None,
     protected_terms: list[str] | None = None,
     paragraph_type: str | None = None,
+    sibling_cells: list[str] | None = None,
 ) -> list[GateResult]:
     """
     Ejecuta todos los quality gates sobre una corrección.
     Retorna lista de resultados. Si alguno crítico falla → descartar.
 
     Args:
-        paragraph_type: Tipo del párrafo. Acepta el parámetro pero NO lo usa para
-            ajustar umbrales — la expansión estricta para celdas (1.05) causaba
-            descarte masivo de correcciones legítimas.
+        paragraph_type: Tipo del párrafo. Se usa para los gates específicos
+            por rol (título sin punto, caption con etiqueta, celda uniforme).
+            NO se usa para ajustar umbrales de expansión — la expansión
+            estricta para celdas (1.05) causaba descarte masivo de
+            correcciones legítimas.
+        sibling_cells: Textos de otras celdas de la misma columna (solo
+            relevante para paragraph_type='celda_tabla*'). En Nivel 1 suele
+            ir vacío y el gate devuelve N/A.
     """
     profile = profile or {}
     max_expansion = profile.get("max_expansion_ratio", 1.15)
@@ -309,5 +500,12 @@ def validate_correction(
     # INFLESZ solo si hay rango objetivo en el perfil
     if target_min is not None or target_max is not None:
         gates.append(gate_readability_inflesz(corrected, target_min, target_max))
+
+    # Gates por tipo estructural (Nivel 1) — aditivos, devuelven N/A si no aplica
+    gates.append(gate_title_no_final_period(corrected, paragraph_type))
+    gates.append(gate_caption_starts_with_label(original, corrected, paragraph_type))
+    gates.append(
+        gate_table_cell_uniform_capitalization(corrected, sibling_cells, paragraph_type)
+    )
 
     return gates

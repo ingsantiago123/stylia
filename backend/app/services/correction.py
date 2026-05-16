@@ -563,6 +563,7 @@ def correct_docx_sync(
     on_progress: Callable[[int, int], None] | None = None,
     docx_bytes_cached: bytes | None = None,
     global_context: dict | None = None,
+    grouped_locations: set[str] | None = None,
 ) -> tuple[list[dict], list[dict], list[tuple[str, str, bool]], list[dict]]:
     """
     Corrige un DOCX directamente, párrafo por párrafo.
@@ -638,6 +639,12 @@ def correct_docx_sync(
     for idx, (para_text, location, para_has_pb) in enumerate(all_paragraphs):
         text = para_text.strip()
         if not text or len(text) < 3:
+            continue
+
+        # Nivel 2/3 — Skip si este párrafo pertenece a un grupo estructural (lista/tabla).
+        # La pasada grupal D.5 lo procesará en bloque con contexto de conjunto.
+        if grouped_locations and location in grouped_locations:
+            logger.debug(f"[D] Párrafo {idx} ({location}) → grupo estructural, se omite en pasada individual")
             continue
 
         # S3: Contexto previo enriquecido — ventana de hasta N párrafos
@@ -1013,6 +1020,7 @@ def correct_batch_with_llm_sync(
     global_context: dict | None = None,
     term_registry: list | None = None,
     context_seed_window: list[str] | None = None,
+    grouped_paragraph_indexes: set[int] | None = None,
 ) -> tuple[list[dict], list[dict], str, list[dict]]:
     """
     Pass 1 LLM + Pass 2 auditoría para el rango [start_para..end_para] (inclusive).
@@ -1048,6 +1056,14 @@ def correct_batch_with_llm_sync(
         para_text, location, para_has_pb = all_paragraphs[idx]
         text = para_text.strip()
         if not text or len(text) < 3:
+            continue
+
+        # Nivel 2/3 — Skip si este párrafo va a procesarse en una pasada grupal
+        # (su Block tiene element_group_id no nulo).
+        if grouped_paragraph_indexes and idx in grouped_paragraph_indexes:
+            logger.debug(
+                f"Párrafo {idx} pertenece a un grupo estructural → skip en flujo paralelo"
+            )
             continue
 
         precomputed_lt = lt_results[idx] if idx < len(lt_results) else None
@@ -1363,3 +1379,444 @@ def correct_all_paragraphs_lt_sync(
         f"{lt_hits} con correcciones ({max_workers} workers)"
     )
     return results  # type: ignore[return-value]
+
+
+# =====================================================================
+# Nivel 2/3 — ORQUESTADOR GRUPAL (listas / tablas)
+# =====================================================================
+
+import re as _re_groupal  # alias para no chocar con imports locales
+import uuid as _uuid_groupal
+
+
+_LIST_PREFIX = _re_groupal.compile(
+    r"^\s*(?:[•·▪‒–—●\-\*]|\d{1,3}[.)]|[a-zA-Z][.)]|[ivxlcdmIVXLCDM]+[.)])\s+"
+)
+
+
+def _strip_list_prefix(text: str) -> str:
+    """Quita prefijos de viñeta/numeración que el LLM pueda haber dejado.
+
+    El prompt grupal pide "escribe SOLO el texto del ítem", pero si el LLM
+    fallara duplicaríamos la viñeta en el DOCX final.
+    """
+    if not text:
+        return text
+    return _LIST_PREFIX.sub("", text, count=1)
+
+
+def _safe_json_parse(raw: str) -> dict | None:
+    """Tolera respuestas con texto extra alrededor del JSON."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Recuperar el objeto JSON más externo
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _role_for(block, detection: str = "native") -> str | None:
+    if getattr(block, "list_id", None):
+        fmt = getattr(block, "list_format_type", None) or "bullet"
+        # 'manual' incluido en el role para que rendering sepa que NO debe
+        # quitar prefijos del texto.
+        suffix = ":manual" if detection == "manual" else ""
+        return f"list_item:{fmt}{suffix}"
+    if getattr(block, "table_id", None):
+        role = getattr(block, "table_cell_role", None) or "data"
+        return f"table_cell:{role}"
+    return None
+
+
+def correct_group_with_llm_sync(
+    batch,
+    profile: dict | None,
+    global_context: dict | None,
+    llm_client=None,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Corrige un grupo completo (lista o tabla) en UNA sola llamada al LLM.
+
+    Args:
+        batch: ElementGroupBatch
+        profile, global_context: contexto editorial
+        llm_client: si None, usa el cliente openai global
+
+    Returns:
+        (patches, usage_records, audit_log_entries)
+        patches: lista de dicts compatible con `_persist_patch` (mismo esquema
+        que `correct_batch_with_llm_sync` para minimizar cambios upstream).
+    """
+    from app.services.prompt_builder import (
+        build_system_prompt,
+        build_group_user_prompt_list,
+        build_group_user_prompt_table,
+    )
+    from app.services.group_collector import (
+        attach_list_neighbors, attach_table_neighbors,
+    )
+    from app.utils.openai_client import openai_client as _default_client
+    from app.services.quality_gates import (
+        validate_correction as _validate,
+        gate_list_format_consistent,
+        gate_list_parallel_structure,
+    )
+
+    client = llm_client or _default_client
+    patches: list[dict] = []
+    usage_records: list[dict] = []
+    audit_entries: list[dict] = []
+
+    blocks = batch.blocks
+    n = len(blocks)
+    if n == 0:
+        return patches, usage_records, audit_entries
+
+    # 1) Construir prompt grupal
+    list_detection = "native"
+    if batch.group_type == "list":
+        attach_list_neighbors(batch)
+        items_txt = [b.original_text or "" for b in blocks]
+        list_detection = (batch.metadata or {}).get("detection", "native")
+        user_prompt = build_group_user_prompt_list(
+            items=items_txt,
+            list_metadata={
+                "list_id": batch.docx_native_id,
+                "list_format_type": (batch.metadata or {}).get("format_type"),
+                "list_level": (batch.metadata or {}).get("level"),
+                "detection": list_detection,
+            },
+            neighbors=batch.neighbors,
+            profile=profile,
+            global_context=global_context,
+        )
+    elif batch.group_type == "table":
+        attach_table_neighbors(batch)
+        cols = (batch.metadata or {}).get("num_cols") or 1
+        cells = [
+            {
+                "row": b.row_index if b.row_index is not None else 0,
+                "col": b.column_index if b.column_index is not None else 0,
+                "text": b.original_text or "",
+                "role": b.table_cell_role or "data",
+            }
+            for b in blocks
+        ]
+        user_prompt = build_group_user_prompt_table(
+            cells=cells,
+            table_metadata={
+                "table_id": batch.docx_native_id,
+                "num_rows": (batch.metadata or {}).get("num_rows"),
+                "num_cols": cols,
+                "column_headers": batch.neighbors.get("column_headers"),
+                "column_data_type_hints": batch.neighbors.get("column_data_type_hints"),
+            },
+            neighbors=batch.neighbors,
+            profile=profile,
+            global_context=global_context,
+        )
+    else:
+        logger.warning("correct_group: tipo desconocido %s", batch.group_type)
+        return patches, usage_records, audit_entries
+
+    system_prompt = build_system_prompt()
+
+    # 2) Llamada al LLM (formato JSON) usando el wrapper con max_completion_tokens
+    model = settings.openai_editorial_model or settings.openai_model
+    max_tokens = max(settings.openai_max_tokens, 256 * max(1, n))
+    data, usage = client.correct_with_profile(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_length=None,
+        model_override=model,
+        max_tokens_override=max_tokens,
+    )
+    if not data:
+        logger.warning(
+            "Llamada grupal LLM no devolvió datos para grupo %s.",
+            batch.docx_native_id,
+        )
+        return patches, usage_records, audit_entries
+
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        items = []
+    # Parsing robusto: aceptar índices como int o str numéricos, descartar
+    # los fuera de rango.
+    indexed: dict[int, dict] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        raw_idx = it.get("index")
+        try:
+            idx = int(raw_idx) if raw_idx is not None else None
+        except (ValueError, TypeError):
+            idx = None
+        if idx is None or idx < 0 or idx >= n:
+            continue
+        if idx in indexed:
+            # Primera ocurrencia gana; logueamos duplicados
+            logger.debug(
+                f"group {batch.docx_native_id}: índice duplicado {idx}, ignorado"
+            )
+            continue
+        indexed[idx] = it
+    missing_indexes: list[int] = [i for i in range(n) if i not in indexed]
+    if missing_indexes:
+        logger.info(
+            "group %s: %d/%d ítems faltan en respuesta LLM",
+            batch.docx_native_id, len(missing_indexes), n,
+        )
+    call_id = _uuid_groupal.uuid4().hex[:12]
+
+    # Registrar usage (compartido para todo el grupo)
+    try:
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", 0)
+        cost = (
+            prompt_tokens / 1e6 * settings.openai_pricing_input
+            + completion_tokens / 1e6 * settings.openai_pricing_output
+        )
+        usage_records.append({
+            "paragraph_index": -1,
+            "location": f"group:{batch.group_type}:{batch.docx_native_id}",
+            "call_type": f"group_{batch.group_type}",
+            "model_used": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "cost_usd": round(cost, 8),
+        })
+    except Exception:
+        pass
+
+    # 3) Validar consistencia grupal (Lote 2 gates)
+    corrected_texts_for_gates: list[str] = []
+    for i in range(n):
+        it = indexed.get(i)
+        if it is None:
+            corrected_texts_for_gates.append(blocks[i].original_text or "")
+            continue
+        action = (it.get("action") or "correct").lower()
+        if action == "skip":
+            corrected_texts_for_gates.append(blocks[i].original_text or "")
+        else:
+            raw_corrected = it.get("corrected_text") or ""
+            # En listas manuales el prefijo es parte del texto y debe quedarse.
+            # En el resto (listas nativas, tablas) hacemos strip defensivo.
+            if batch.group_type == "list" and list_detection == "manual":
+                corrected_texts_for_gates.append(raw_corrected)
+            else:
+                corrected_texts_for_gates.append(_strip_list_prefix(raw_corrected))
+
+    group_gate_results: list[dict] = []
+    if batch.group_type == "list":
+        for gr in gate_list_format_consistent(corrected_texts_for_gates):
+            group_gate_results.append(gr.to_dict())
+        group_gate_results.append(
+            gate_list_parallel_structure(corrected_texts_for_gates).to_dict()
+        )
+
+    # 4) Construir un patch por block
+    for i, blk in enumerate(blocks):
+        it = indexed.get(i)
+        if it is None:
+            continue
+        action = (it.get("action") or "correct").lower()
+        if action == "skip":
+            continue
+        raw_corrected = it.get("corrected_text") or ""
+        if batch.group_type == "list" and list_detection == "manual":
+            corrected = raw_corrected
+        else:
+            corrected = _strip_list_prefix(raw_corrected)
+        original = blk.original_text or ""
+        if not corrected or corrected == original:
+            continue
+
+        # Gates por celda (siblings = otras celdas de la misma columna si tabla)
+        sibling_cells: list[str] | None = None
+        paragraph_type = None
+        if batch.group_type == "table":
+            paragraph_type = (
+                "celda_tabla_header" if blk.table_cell_role == "header"
+                else "celda_tabla_total" if blk.table_cell_role == "total"
+                else "celda_tabla"
+            )
+            sibling_cells = [
+                b.original_text or ""
+                for b in blocks
+                if b.column_index == blk.column_index and b is not blk
+            ]
+        elif batch.group_type == "list":
+            paragraph_type = "lista"
+
+        individual_gates = _validate(
+            original=original,
+            corrected=corrected,
+            profile=profile,
+            protected_terms=(profile or {}).get("protected_terms", []),
+            paragraph_type=paragraph_type,
+            sibling_cells=sibling_cells,
+        )
+        all_gates = [g.to_dict() for g in individual_gates] + group_gate_results
+        critical_failed = [g for g in all_gates if not g["passed"] and g.get("critical")]
+        non_critical_failed = [g for g in all_gates if not g["passed"] and not g.get("critical")]
+        if critical_failed:
+            logger.info(
+                f"group {batch.docx_native_id} item {i}: gate crítico falló → descartado"
+            )
+            continue
+        review_status = "manual_review" if non_critical_failed else "auto_accepted"
+        review_reason = (
+            "; ".join(g["message"] for g in non_critical_failed)
+            if non_critical_failed else None
+        )
+
+        # Validar tipos de campos opcionales
+        confidence = it.get("confidence")
+        try:
+            confidence = float(confidence) if confidence is not None else None
+        except (ValueError, TypeError):
+            confidence = None
+        rewrite_ratio = it.get("rewrite_ratio")
+        try:
+            rewrite_ratio = float(rewrite_ratio) if rewrite_ratio is not None else None
+        except (ValueError, TypeError):
+            rewrite_ratio = None
+
+        patches.append({
+            "block_id": blk.id,
+            "paragraph_index": None,
+            "location": getattr(blk, "docx_location", None),
+            "source": "llm-group",
+            "original_text": original,
+            "corrected_text": corrected,
+            "operations": [],
+            "category": (it.get("changes", [{}])[0] or {}).get("category") if it.get("changes") else None,
+            "severity": (it.get("changes", [{}])[0] or {}).get("severity") if it.get("changes") else None,
+            "explanation": (it.get("changes", [{}])[0] or {}).get("explanation") if it.get("changes") else None,
+            "confidence": confidence,
+            "rewrite_ratio": rewrite_ratio,
+            "pass_number": 1,
+            "model_used": model,
+            "route_taken": f"group_{batch.group_type}",
+            "gate_results": all_gates,
+            "review_status": review_status,
+            "review_reason": review_reason,
+            "group_id": batch.group_id,
+            "group_call_index": i,
+            "group_call_id": call_id,
+            "structural_role": _role_for(blk, list_detection),
+            "llm_change_log_json": it.get("changes") or [],
+        })
+
+    if missing_indexes:
+        logger.info(
+            "group %s: %d/%d ítems faltan en respuesta, sin fallback automático",
+            batch.docx_native_id, len(missing_indexes), n,
+        )
+
+    return patches, usage_records, audit_entries
+
+
+def correct_groups_for_doc_sync(
+    doc_id,
+    session,
+    profile: dict | None = None,
+    global_context: dict | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Ejecuta la pasada grupal sobre todos los ElementGroup de un documento.
+
+    Returns (patches, usage_records). Los patches son compatibles con
+    `_persist_patches` y `_apply_docx_patches`.
+    """
+    from app.services.group_collector import (
+        collect_groups_for_document, partition_table_group,
+    )
+    from app.models.element_group import ElementGroup
+
+    batches = collect_groups_for_document(session, doc_id)
+    if not batches:
+        return [], []
+
+    all_patches: list[dict] = []
+    all_usage: list[dict] = []
+    for batch in batches:
+        # Marcar como in_progress
+        try:
+            eg = session.get(ElementGroup, batch.group_id)
+            if eg is not None:
+                eg.correction_status = "in_progress"
+                session.flush()
+        except Exception:
+            pass
+
+        sub_batches = partition_table_group(batch) if batch.group_type == "table" else [batch]
+        partial_failure = False
+        for sub in sub_batches:
+            try:
+                patches, usage, _audit = correct_group_with_llm_sync(
+                    batch=sub, profile=profile, global_context=global_context,
+                )
+                all_patches.extend(patches)
+                all_usage.extend(usage)
+                if len(patches) < len(sub.blocks):
+                    partial_failure = True
+            except Exception as e:
+                logger.warning(
+                    f"group {batch.docx_native_id}: fallo en sub-batch: {e}"
+                )
+                partial_failure = True
+
+        # Marcar como completed/partial_failure
+        try:
+            eg = session.get(ElementGroup, batch.group_id)
+            if eg is not None:
+                eg.correction_status = "partial_failure" if partial_failure else "completed"
+                session.flush()
+        except Exception:
+            pass
+
+    logger.info(
+        f"Pasada grupal: {len(all_patches)} patches generados desde {len(batches)} grupos"
+    )
+    return all_patches, all_usage
+
+
+def compute_grouped_paragraph_indexes_sync(
+    doc_id, session, all_paragraphs: list[tuple[str, str, bool]]
+) -> set[int]:
+    """Devuelve un set de paragraph_index (índice global en all_paragraphs)
+    cuyos Block tienen element_group_id != NULL — para skippear en pasada
+    individual.
+
+    Matching: por (location → docx_location). Si el Block no tiene
+    docx_location, no se puede skippear y se mantiene el path normal.
+    """
+    from app.models.block import Block
+    from app.models.page import Page
+
+    blocks = (
+        session.query(Block.docx_location)
+        .join(Page, Block.page_id == Page.id)
+        .filter(Page.doc_id == doc_id, Block.element_group_id.isnot(None))
+        .all()
+    )
+    grouped_locations = {row[0] for row in blocks if row[0]}
+    if not grouped_locations:
+        return set()
+    idxs: set[int] = set()
+    for idx, (_text, loc, _has_pb) in enumerate(all_paragraphs):
+        if loc in grouped_locations:
+            idxs.add(idx)
+    return idxs

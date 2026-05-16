@@ -1,718 +1,761 @@
 # CLAUDE-LOGIC.md — Lógica, Workflow y Flujo de Datos
 
-Este documento detalla cómo fluye la información desde que el usuario sube un documento hasta que descarga el resultado corregido. Es el complemento de CLAUDE.md enfocado en el **cómo funciona internamente**.
+Complemento de `CLAUDE.md` enfocado en el **cómo funciona internamente**: flujo de datos, decisiones de diseño, algoritmos paso a paso y detalles de implementación que no encajan en la referencia rápida.
 
 ---
 
-## 1. Flujo completo del usuario (MVP2)
+## 1. Flujo completo del usuario
 
 ```
-USUARIO                     FRONTEND                         BACKEND                          SERVICIOS EXTERNOS
+USUARIO                     FRONTEND                         BACKEND                          SERVICIOS
   │                            │                                │                                │
   │ 1. Arrastra .docx          │                                │                                │
-  │ ───────────────────────→   │                                │                                │
-  │                            │ 2. POST /api/v1/upload         │                                │
-  │                            │ ──────────────────────────────→│ 3. Valida + guarda MinIO       │───→ MinIO
-  │                            │                                │ 4. Crea Document (status=uploaded)
-  │                            │ ← Response {id, status}        │ 5. Crea Document en DB         │───→ PostgreSQL
-  │                            │                                │                                │
-  │ 6. Ve doc en lista          │                                │                                │
-  │ ←───────────────────────   │                                │                                │
-  │                            │                                │                                │
-  │ [OPCIONAL] 7. Selecciona    │                                │                                │
-  │    perfil editorial         │ 8. POST /documents/{id}/profile │                                │
-  │ ───────────────────────→   │ ──────────────────────────────→│ 9. Crear/actualizar perfil     │───→ PostgreSQL
-  │                            │ ← Response (perfil guarado)    │                                │
-  │                            │                                │                                │
-  │ 10. Click "Procesar"        │                                │                                │
-  │ ───────────────────────→   │ 11. POST /documents/{id}/process│                                │
-  │                            │ ──────────────────────────────→│ 12. Lanza Celery task          │───→ Redis (broker)
-  │                            │ ← Response (tarea encolada)    │ 13. Worker: A→B→C→D→E         │
-  │                            │                                │ (status: converting..correcting)
-  │                            │ 14. Polling GET /documents      │                                │
-  │                            │     (dinámico: 5-30s)           │                                │
+  │ ───────────────────────→   │ 2. POST /upload                │                                │
+  │                            │ ──────────────────────────────→│ 3. Valida + guarda MinIO       │→ MinIO
+  │                            │                                │ 4. Crea Document (uploaded)    │→ PostgreSQL
+  │                            │ ← {id, status: uploaded}       │                                │
+  │ 5. Selecciona perfil       │                                │                                │
+  │ ───────────────────────→   │ 6. POST /profile               │                                │
+  │                            │ ──────────────────────────────→│ 7. Guarda DocumentProfile      │→ PostgreSQL
+  │                            │                                │   (con prompt_blocks optional)  │
+  │ 8. Click "Procesar"        │                                │                                │
+  │ ───────────────────────→   │ 9. POST /process               │                                │
+  │                            │ ──────────────────────────────→│ 10. Lanza Celery task          │→ Redis
+  │                            │                                │ 11. Worker: A→B→B.5→C→D→D.5→E │
+  │                            │ 12. Polling GET /documents      │                                │
+  │                            │ ←──────────────────────────────│ heartbeat cada 4s              │
+  │ 13. Ve progreso por etapa  │                                │                                │
+  │ ←───────────────────────   │ 14. candidate_ready            │                                │
   │                            │ ←──────────────────────────────│                                │
-  │ 15. Ve progreso por etapa  │                                │                                │
-  │ ←───────────────────────   │ 16. Pipeline finaliza           │                                │
-  │                            │ ──────────────────────────────→│ candidate_rendering → candidate_ready
-  │                            │ ← Doc con status=candidate_ready│                                │
-  │                            │                                │                                │
-  │ 17. Click en documento      │                                │                                │
-  │ ───────────────────────→   │ 18. GET /documents/{id}         │                                │
-  │                            │     GET /analysis               │                                │
-  │                            │     GET /corrections            │                                │
-  │                            │ ──────────────────────────────→│                                │
-  │ 19. Ve 5 tabs + correcciones│ ←──────────────────────────────│                                │
-  │ (Resumen|Análisis|Correcciones│                               │                                │
-  │  |Comparar|Flujo API)        │                                │                                │
-  │ ←───────────────────────   │                                │                                │
-  │                            │                                │                                │
-  │ [OPCIONAL HITL]            │                                │                                │
-  │ 20. Revisa correcciones     │                                │                                │
-  │ 21. Aprueba/rechaza patches │ 22. POST /corrections/{id}/review│                              │
-  │ ───────────────────────→   │ ──────────────────────────────→│ 23. Actualiza patches         │───→ PostgreSQL
-  │                            │                                │                                │
-  │ 24. Click "Finalizar"       │                                │                                │
-  │ ───────────────────────→   │ 25. POST /documents/{id}/finalize│                              │
-  │                            │ ──────────────────────────────→│ 26. status=finalizing          │───→ Redis (worker)
-  │                            │                                │ 27. Rerender DOCX/PDF final   │───→ MinIO
-  │                            │ ← Response (finalizado)        │ 28. status=completed           │───→ PostgreSQL
-  │                            │                                │                                │
-  │ 29. Click "Descargar PDF"   │                                │                                │
-  │ ───────────────────────→   │ 30. GET /download/pdf           │                                │
-  │                            │ ──────────────────────────────→│ 31. Stream desde MinIO         │───→ MinIO
-  │ 32. Descarga archivo final  │ ←──────────────────────────────│                                │
-  │ ←───────────────────────   │                                │                                │
+  │ 15. Abre documento         │                                │                                │
+  │ ───────────────────────→   │ GET /documents/{id}            │                                │
+  │                            │ GET /corrections               │                                │
+  │                            │ GET /analysis                  │                                │
+  │                            │ GET /structure                 │                                │
+  │ 16. Ve 5 tabs + árbol      │ ←──────────────────────────────│                                │
+  │ [Revisión HITL opcional]   │                                │                                │
+  │ 17. Finaliza               │ POST /finalize                 │                                │
+  │ ───────────────────────→   │ ──────────────────────────────→│ 18. Rerender + completed       │→ MinIO/PostgreSQL
+  │ 19. Descarga               │ GET /download/pdf              │                                │
+  │ ───────────────────────→   │ ──────────────────────────────→│ 20. Stream MinIO               │→ MinIO
 ```
 
 ---
 
-## 2. Pipeline de procesamiento (Celery worker)
-
-Cuando el usuario hace POST a `/documents/{id}/process`, el endpoint dispara `process_document_pipeline` como tarea Celery en la cola `pipeline`. Esta tarea ejecuta 5 etapas secuencialmente, seguidas de 2 estados de finalización:
+## 2. Pipeline de procesamiento — etapa por etapa
 
 ### ETAPA A: Ingesta (`services/ingestion.py`)
 
-**Entrada**: doc_id, source_key (MinIO), filename, original_format
+**Entrada**: doc_id, source_key (MinIO), filename
 **Salida**: {pdf_uri, total_pages}
 
 ```
 1. Descargar DOCX de MinIO → bytes en memoria
 2. Escribir a archivo temporal
-3. Ejecutar: soffice --headless --convert-to pdf --outdir {tmpdir} {docx_path}
-   - Timeout: 300 segundos
-   - Si falla: raise RuntimeError
-4. Contar páginas del PDF con PyMuPDF: len(fitz.open(pdf_bytes))
-5. Subir PDF a MinIO: pdf/{doc_id}/{stem}.pdf
-6. Limpiar archivos temporales
+3. soffice --headless --convert-to pdf --outdir {tmpdir} {docx_path} (timeout 300s)
+4. Contar páginas: len(fitz.open(pdf_bytes))
+5. Subir PDF: pdf/{doc_id}/{stem}.pdf
+6. Limpiar temporales
 ```
 
-**DB updates**: Document.status = "converting" → "extracting", Document.pdf_uri, Document.total_pages
-**Pages creadas**: Una por cada página detectada (status="pending")
+DB: `Document.status = converting → extracting`, `Document.pdf_uri`, `Document.total_pages`
 
 ---
 
 ### ETAPA B: Extracción (`services/extraction.py`)
 
-**Entrada**: doc_id, pdf_uri, page_no
-**Salida**: {layout_uri, text_uri, preview_uri, blocks[], full_text}
+**Entrada**: doc_id, pdf_uri
+**Salida por página**: {layout_uri, text_uri, preview_uri, blocks[]}
 
 ```
 Por cada página:
 1. Descargar PDF de MinIO
-2. Abrir con PyMuPDF: fitz.open(stream=pdf_bytes)
-3. Extraer layout: page.get_text("dict", sort=True)
-   - Retorna: {"blocks": [{type, bbox, lines: [{spans: [{text, font, size, color, flags}]}]}]}
-4. Clasificar bloques:
-   - type=0 → "text" (extraer líneas y spans)
-   - type=1 → "image" (solo bbox)
-5. Generar preview: page.get_pixmap(dpi=150) → PNG bytes
-6. Subir a MinIO:
-   - pages/{doc_id}/layout/{page_no}.json  (estructura completa)
-   - pages/{doc_id}/text/{page_no}.txt     (texto plano concatenado)
-   - pages/{doc_id}/preview/{page_no}.png  (imagen preview)
-7. Crear Block records en DB (uno por bloque de texto/imagen)
+2. page.get_text("dict", sort=True)
+   → {"blocks": [{type, bbox, lines: [{spans: [{text, font, size, color}]}]}]}
+3. Clasificar: type=0 → "text", type=1 → "image"
+4. page.get_pixmap(dpi=150) → PNG
+5. Subir: layout/{page_no}.json, text/{page_no}.txt, preview/{page_no}.png
+6. Crear Block records en DB (uno por bloque PyMuPDF)
 ```
 
-**Estructura de un bloque extraído**:
-```json
-{
-  "block_no": 0,
-  "type": "text",
-  "bbox": [72.0, 90.5, 540.3, 120.8],
-  "text": "Texto completo del bloque...",
-  "lines": [{
-    "bbox": [72.0, 90.5, 540.3, 105.2],
-    "spans": [{
-      "text": "Texto ",
-      "font": "TimesNewRomanPSMT",
-      "size": 12.0,
-      "color": 0,
-      "flags": 0,
-      "bbox": [72.0, 90.5, 110.3, 105.2]
-    }]
-  }]
+**Limitación conocida**: PyMuPDF extrae bloques del PDF renderizado, no del DOCX original. Fragmenta párrafos, colapsa celdas de tabla. Por eso B.5 existe: para leer la estructura real del DOCX.
+
+---
+
+### ETAPA B.5: Extracción Estructural DOCX (`services/extraction_docx.py`)
+
+Sub-etapa **no bloqueante** (si falla, D continúa sin conciencia estructural).
+
+**Entrada**: doc_id, docx_uri, DB session
+**Salida**: {n_lists, n_tables, n_blocks_updated, n_synthetic_blocks}
+
+#### Paso 1: Abrir DOCX con python-docx
+
+```python
+docx_bytes = minio_client.download_file(docx_uri)
+doc = DocxDocument(io.BytesIO(docx_bytes))
+```
+
+#### Paso 2: Detectar grupos de listas
+
+```
+_detect_list_groups(doc):
+
+A. Listas nativas (numPr en XML):
+   Para cada párrafo:
+     numPr = párrafo.element.find(".//numPr") 
+     si existe → numId = numPr.find("numId").val
+     Agrupar todos los párrafos con mismo numId
+     Si grupo >= 2 ítems → ElementGroup(type='list', docx_native_id=f"numId_{numId}")
+     style_name del párrafo determina format_type (Bullet → bullet, List Number → decimal, etc.)
+
+B. Listas manuales (regex sobre texto):
+   _is_list_like_text(text):
+     Patrón: ^\s*(?:[•\-–*]|\d{1,3}[.)]\s|[a-zA-Z][.)]\s)
+     Cuerpo después del prefijo >= 4 chars
+     → True si hay match y cuerpo sustancial
+   
+   _looks_like_numbered_heading(text, style_name):
+     Texto corto (< 60 chars) + sin puntuación final + estilo Heading → True
+     → excluir: "1. Introducción", "2. Marco teórico"
+   
+   Scanear doc.paragraphs secuencialmente:
+     Si is_list_like AND NOT looks_like_heading AND estilo NOT Heading:
+       Acumular en lista temporal
+     Si no → cerrar lista acumulada (>= 2 ítems → ElementGroup manual)
+   
+   Detectar format_type:
+     decimal_dot: "1.", "2.", ...
+     decimal_paren: "1)", "2)", ...
+     bullet: "•", "-", "–", ...
+     Si mezcla → "mixed"
+```
+
+#### Paso 3: Detectar grupos de tablas
+
+```
+_detect_table_groups(doc):
+
+Para cada tabla (con índice i):
+  n_rows = len(table.rows), n_cols = max(len(r.cells) for r in rows)
+  non_empty = número de celdas con texto
+  
+  Filtros anti-decorativas:
+    Si n_rows==1 AND n_cols==1 → skip (tabla de un solo elemento)
+    Si non_empty < 2 → skip (tabla casi vacía)
+    Si n_cols==1 AND n_rows <= 3 → skip (lista disfrazada de tabla pequeña)
+  
+  → ElementGroup(type='table', docx_native_id=f"table_{i}", item_count=non_empty)
+  
+  Para cada celda:
+    row 0 → table_cell_role = "header"
+    row last AND texto numérico → table_cell_role = "total"
+    resto → table_cell_role = "data"
+```
+
+#### Paso 4: Sincronizar con Blocks existentes en DB
+
+```
+_guess_location_for_block(text, existing_blocks):
+
+1. Normalizar: strip().lower().replace múltiples espacios
+2. Pass 1 — match exacto normalizado
+3. Pass 2 — match por prefijo 80 chars
+4. Pass 3 — containment (item en block o block en item, > 70% overlap)
+→ Retorna block_id si encontrado, else None
+```
+
+#### Paso 5: Enriquecer Blocks existentes y crear sintéticos
+
+```
+Para cada ítem de cada grupo:
+  block = _guess_location_for_block(item_text, db_blocks)
+  
+  Si block encontrado:
+    block.list_id = group.docx_native_id  (o table_id)
+    block.list_position = posición_en_grupo
+    block.list_total = total_ítems
+    block.list_format_type = "decimal_dot" | "bullet" | etc.
+    block.style_name = párrafo.style.name
+    block.style_level = heading_level (si aplica)
+    block.docx_location = location_string (body:N, table:T:R:C:P)
+    block.element_group_id = group.id
+    block.table_cell_role = "header" | "data" | "total"
+  
+  Si NO encontrado:
+    Crear Block sintético:
+      block_type = "docx_synthetic"
+      original_text = item_text
+      docx_location = location_string
+      element_group_id = group.id
+      ... (todos los campos de metadata)
+```
+
+#### Paso 6: Calcular grouped_locations
+
+Después de B.5, en `tasks_pipeline.py`:
+
+```python
+_grouped_locations = {
+    block.docx_location
+    for block in db.query(Block.docx_location)
+        .join(Page).filter(Page.doc_id == doc_id, Block.element_group_id.isnot(None))
+    if block.docx_location
 }
+# Se pasa a correct_docx_sync como grouped_locations=_grouped_locations
 ```
 
 ---
 
 ### ETAPA C: Análisis Editorial (`services/analysis.py`)
 
-**Entrada**: doc_id, list of Blocks with original_text
-**Salida**: {sections[], glossary[], paragraph_classifications{}, inferred_profile{}}
+**Sub-etapas**: C.1 (inferencia perfil) → C.2 (validación perfil) → C.3 (secciones) → C.4 (glosario) → C.5 (clasificación) → C.6 (contexto global)
+
+#### C.5: Clasificación de párrafos por tipo
+
+```python
+classify_paragraph(text, location, style_name, is_in_table, glossary_terms, block=None):
+
+# Señal primaria: metadata B.5 del Block (si disponible)
+if block:
+    if block.style_name contains "heading"/"título" → ("titulo"|"subtitulo", False)
+    if block.list_id → ("lista", True)
+    if block.table_id:
+        role = block.table_cell_role
+        "header" → ("celda_tabla_header", True)
+        "total"  → ("celda_tabla_total", False)  # no modificar totales
+        else     → ("celda_tabla", True)
+
+# Señal secundaria: location string
+if location starts "table:" → ("celda_tabla", True)
+if location starts "header:" → ("encabezado", False)
+if location starts "footer:" → ("pie_pagina", False)
+
+# Señal terciaria: heurísticas sobre el texto
+if style_name contains "Heading" → nivel → titulo/subtitulo
+if starts LIST_PATTERN → ("lista", True)
+if starts DIALOGUE_PATTERN → ("dialogo", True)
+if contains FIGURE_PATTERN → ("pie_figura", True)
+...
+```
+
+**11 tipos**: `titulo`, `subtitulo`, `narrativo`, `explicacion_tecnica`, `dialogo`, `cita`, `lista`, `celda_tabla`, `celda_tabla_header`, `celda_tabla_total`, `pie_figura`, `nota_pie`, `encabezado`, `pie_pagina`, `vacio`
+
+#### Escritura de paragraph_type a blocks
+
+Después de C.5, `tasks_pipeline.py` escribe paragraph_type a la DB:
+
+```python
+loc_to_ptype = {pc["location"]: pc["paragraph_type"] for pc in classifications}
+blocks = db.query(Block).join(Page).filter(Page.doc_id == doc_id).all()
+for blk in blocks:
+    ptype = loc_to_ptype.get(blk.docx_location)
+    if ptype:
+        blk.paragraph_type = ptype
+db.flush()
+```
+
+Matching: `block.docx_location` (string de B.5) == `pc["location"]` (string del análisis DOCX).
+
+#### C.6: Contexto global (ADN editorial)
 
 ```
-1. Dividir párrafos en secciones (heurística: títulos, cambios temáticos, saltos de línea)
-2. Por cada sección:
-   - Generar resumen con contexto 3-párrafo ventana
-   - Extraer términos clave (frecuencia, campo semántico)
-   - Marcar términos protegidos (nombres, marcas, tecnicismos)
-3. Clasificar cada párrafo (11 tipos):
-   - intro, heading, body, list_item, table, quote, footer, code, image_caption, transition, conclusion
-4. Inferir perfil editorial si no fue proporcionado:
-   - Heurística: género (ensayo/narrativa/técnico), tono (formal/informal), nivel intervención (ligero/medio/profundo)
-5. Actualizar Document.document_profiles.protected_terms con términos del análisis
-6. Crear SectionSummary y TermRegistry records en BD
-7. Guardar análisis completo en Document.analysis_json
-```
+Muestreo estratificado:
+  - 3 párrafos del inicio (body:0, body:1, body:2)
+  - 3 párrafos del medio
+  - 3 párrafos del final
 
-**DB updates**: Document.status = "analyzing" → "correcting", SectionSummary[], TermRegistry[]
+Llamada LLM → {
+  global_summary: resumen editorial
+  dominant_voice: primera/tercera persona, impersonal
+  dominant_register: formal/semiformal/coloquial/técnico
+  key_themes_json: ["tema1", "tema2"]
+  protected_globals_json: [{"term": "X", "reason": "Y"}]
+  style_fingerprint_json: {puntuacion, estructura_oraciones, ...}
+}
+→ Guardado en DocumentGlobalContext
+→ Términos globales protegidos se agregan al perfil
+```
 
 ---
 
-### ETAPA D: Corrección (`services/correction.py` + MVP2 servicios)
+### ETAPA D: Corrección Individual (`services/correction.py → correct_docx_sync`)
 
-**Ruta 1 activa: DOCX-first** (`correct_docx_sync`)
-
-**Entrada**: doc_id, docx_uri (MinIO key del original), config, profile (opcional), analysis_data (de Etapa C)
-**Salida**: lista de patches [{paragraph_index, location, original_text, corrected_text, lt_operations, category, severity, explanation, confidence, route_taken, gate_results, review_reason}]
+**Entrada**: docx_uri, profile, analysis_data, global_context, `grouped_locations: set[str]`
 
 ```
-1. Descargar DOCX de MinIO → archivo temporal
-2. Parsear con python-docx: DocxDocument(tmpfile)
-3. Recolectar TODOS los párrafos (_collect_all_paragraphs):
+1. Descargar DOCX → DocxDocument
+2. _collect_all_paragraphs(doc):
    - doc.paragraphs → "body:0", "body:1", ...
    - doc.tables[t].rows[r].cells[c].paragraphs[p] → "table:0:1:2:0"
-   - doc.sections[s].header.paragraphs[p] → "header:0:0"
-   - doc.sections[s].footer.paragraphs[p] → "footer:0:0"
+   - doc.sections[s].header/footer → "header:0:0", "footer:0:0"
+   Retorna: [(text, location, has_page_break), ...]
 
-4. Por cada párrafo (si len(text.strip()) >= 3):
+3. Para cada (text, location, has_page_break) con len(text) >= 3:
 
-   PASO 0 — Router de complejidad (MVP2 Lote 4):
-   ├─ Evaluar: paragraph_type (del análisis C), longitud, complejidad sintáctica, posición en sección
-   ├─ Decidir ruta: SKIP | CHEAP | EDITORIAL
-   ├─ SKIP: sin llamada LLM (solo LanguageTool)
-   ├─ CHEAP: llamada LLM con modelo económico (openai_cheap_model)
-   └─ EDITORIAL: llamada LLM con modelo potente (openai_editorial_model)
+   ⬛ SKIP si location in grouped_locations
+     → Este párrafo se procesa en D.5 como parte de un grupo
+     → No añadir a corrected_context tampoco (evita contaminar contexto)
 
-   PASO 1 — LanguageTool:
-   ├─ POST http://languagetool:8010/v2/check (load-balanced en Nginx)
-   │  body: {text, language: "es", disabledRules: "RULE1,RULE2"}
-   ├─ Parsear response.matches[]
-   ├─ Ordenar matches por offset DESCENDENTE
-   ├─ Aplicar reemplazos de atrás hacia adelante:
-   │  corrected = text[:offset] + replacement + text[offset+length:]
-   ├─ Registrar operaciones: [{offset, length, original, replacement, rule_id, category, message}]
-   └─ Resultado: post_lt_text (texto con ortografía/gramática corregida)
+   ⬛ Determinar classification = para_classifications.get(idx, {})
+     paragraph_type = classification.get("paragraph_type")
 
-   PASO 2 — ChatGPT (estilo, si ruta != SKIP):
-   ├─ Construir prompt con PromptBuilder (MVP2 Lote 2):
-   │  ├─ System: cacheable, sin variables
-   │  ├─ User: dinámico incluye
-   │  │  ├─ Instrucciones del perfil (si aplica)
-   │  │  ├─ Contexto jerárquico: section_summary, active_terms, paragraph_type (MVP2 Lote 4)
-   │  │  ├─ Contexto acumulado: últimos 3 párrafos corregidos
-   │  │  ├─ Límite de caracteres (max_expansion_ratio del perfil)
-   │  │  └─ Texto a corregir (post_lt_text)
-   │  └─ response_format: {"type": "json_object"}
-   ├─ Llamar OpenAI API con modelo elegido por router:
-   │  client.chat.completions.create(model=model, temperature=0.3, max_tokens=500)
-   ├─ Parsear JSON: {"corrected_text": "...", "changes_made": [...], "character_count": N}
-   └─ Fallback: _simulate_correction() o usar post_lt_text
+   ⬛ Construir context_prev:
+     Ventana de 15 párrafos (settings.context_window_size)
+     corrected_meta[-15:] → lista de {text, type, location}
 
-   PASO 3 — Quality Gates (MVP2 Lote 5):
-   ├─ Validar corrección post-LLM:
-   │  ├─ gate_not_empty (CRÍTICO): texto no vacío
-   │  ├─ gate_expansion_ratio (CRÍTICO): len(corrected) <= 110% original
-   │  ├─ gate_protected_terms (CRÍTICO): términos protegidos preservados
-   │  ├─ gate_rewrite_ratio (no-crítico): distancia edición normalizada
-   │  ├─ gate_language_preserved (no-crítico): proporción chars españoles
-   │  └─ gate_readability_inflesz (no-crítico): INFLESZ en rango target
-   ├─ Decisión:
-   │  ├─ Si gate crítico falla → gate_rejected, usa original, marca para manual_review
-   │  ├─ Si solo gates no-críticos fallan → valida, marca review_reason
-   │  └─ Si todo pasa → valida
-   └─ Resultado: final_text, gate_results (JSONB), review_reason
+   ⬛ Lookahead: tipo del párrafo siguiente
 
-   CONTEXTO ACUMULADO (MVP2 Lote 4):
-   ├─ Mantener contexto jerárquico por sección + últimos 3 corregidos
-   ├─ corrected_context.append(final_text) después de cada párrafo
-   └─ Se pasan [section_summary, active_terms, corrected_context[-3:]] al siguiente
+   ⬛ Contexto de tabla (si location starts "table:"):
+     table_context_map[f"table:{idx}"] → {headers, similar_cells, ...}
 
-5. Guardar patches JSON en MinIO: docx/{doc_id}/patches_docx.json
-6. Crear Patch records en DB con campos MVP2:
-   - category, severity (MVP2 Lote 2)
-   - explanation, confidence, rewrite_ratio (MVP2 Lote 2)
-   - route_taken (MVP2 Lote 4)
-   - gate_results, review_reason (MVP2 Lote 5)
-7. Actualizar Document.review_status = pending_review si hay patches con manual_review=True
+   ⬛ _correct_single_paragraph(idx, text, location, ...):
+     → Pasada 1: LanguageTool + ChatGPT (build_user_prompt)
+     → Pasada 2: Auditoría contextual (si global_context disponible)
+     → Quality gates (ver sección)
+     → Retorna patch_data, usage_record, final_text, route_taken
+
+   ⬛ Acumular contexto:
+     corrected_context.append(final_text)
+     corrected_meta.append({"text": final_text, "type": paragraph_type, "location": location})
 ```
 
-**Estructura de un patch**:
-```json
-{
-  "paragraph_index": 5,
-  "location": "body:5",
-  "original_text": "Este texto esta mal escrito.",
-  "corrected_text": "Este texto está correctamente redactado.",
-  "lt_operations": [
-    {
-      "offset": 11,
-      "length": 4,
-      "original": "esta",
-      "replacement": "está",
-      "rule_id": "MORFOLOGIK_RULE_ES",
-      "category": "TYPOS",
-      "message": "Se ha encontrado un posible error ortográfico."
-    }
-  ],
-  "source": "languagetool+chatgpt"
-}
+**Rutas en el router**:
+| Ruta | Criterio | Modelo |
+|------|---------|--------|
+| `skip` | párrafo vacio, muy corto, sin errores, en lista nativa sin LT | ninguno |
+| `cheap` | párrafo corto o tipo de baja complejidad (encabezado, pie, nota) | gpt-4o-mini (cheap) |
+| `editorial` | párrafo largo, complejo, intervención profunda, sección principal | gpt-4o-mini (editorial) |
+| `group_list` | ítems de lista → pasan a D.5 | (no aplica en D) |
+| `group_table` | celdas de tabla → pasan a D.5 | (no aplica en D) |
+
+---
+
+### ETAPA D.5: Corrección Grupal (`services/correction.py → correct_groups_for_doc_sync`)
+
+**Entrada**: doc_id, DB session, profile, global_context
+
+```
+1. Cargar todos los ElementGroup del documento
+2. Por cada grupo:
+   
+   A. Recolectar ítems del grupo:
+      SELECT blocks WHERE element_group_id = group.id ORDER BY list_position / (row_index, col_index)
+      Filtrar: block.original_text con len >= 1
+
+   B. Decidir ruta:
+      route_group(batch, profile):
+        Si group_type == 'list' → GROUP_LIST
+        Si group_type == 'table' → GROUP_TABLE
+        (puede ser SKIP si intervention_level == "ortografico")
+
+   C. Construir prompt grupal:
+      Lista: build_group_user_prompt_list(items, list_metadata, neighbors, profile, global_context)
+      Tabla: build_group_user_prompt_table(cells, table_metadata, neighbors, profile, global_context)
+      
+      neighbors incluye:
+        preceding_paragraph: párrafo inmediatamente antes del grupo
+        following_paragraph: párrafo inmediatamente después del grupo
+        capitalization_majority: "mayúscula" | "minúscula" (analizado sobre los ítems)
+        ending_punct_majority: "punto" | "nada" | "coma"
+        parallel_structure_hint: "nominal" | "verbal" | "adjetival"
+
+   D. Llamar LLM:
+      correct_group_with_llm_sync(items, prompt, profile):
+        messages = [SYSTEM_PROMPT, user_prompt]
+        response = openai.chat.completions.create(model=model, max_completion_tokens=...)
+        
+        Parsear JSON robusto:
+          data = json.loads(response.content)
+          items_list = data.get("items", data) si es lista directa
+          Para cada item:
+            idx = int(item["index"]) si válido y en rango
+            action = item.get("action", "correct")
+            corrected_text = item.get("corrected_text", "")
+
+   E. Generar patches:
+      Para cada corrección recibida:
+        patch = {
+          "location": block.docx_location,
+          "original_text": block.original_text,
+          "corrected_text": corrected_text,
+          "route_taken": "group_list" | "group_table",
+          "group_id": str(group.id),
+          "group_call_index": idx,
+          "group_call_id": str(uuid.uuid4()),
+          "structural_role": _role_for(block, detection),
+          ...
+        }
+      
+      structural_role ejemplos:
+        list_item:bullet:manual  → ítem de lista manual con viñeta
+        list_item:mixed:native   → ítem de lista nativa con formato mixto
+        table_cell:header        → celda de encabezado de tabla
+        table_cell:data          → celda de datos de tabla
+        table_cell:total         → celda de totales (no se modifica)
+
+   F. Actualizar grupo:
+      group.correction_status = "completed" | "partial_failure"
+      partial_failure si #patches < #items_esperados
 ```
 
 ---
 
 ### ETAPA E: Renderizado (`services/rendering.py`)
 
-**Entrada**: doc_id, docx_uri, filename, all_patches (lista de patches de Etapa D, incluyendo approved de HITL)
-**Salida**: {corrected_docx_uri, corrected_pdf_uri, changes_count}
+**Entrada**: doc_id, docx_uri, all_patches (individuales + grupales)
 
 ```
-1. Descargar DOCX original de MinIO → archivo local temporal
-2. Abrir con python-docx: DocxDocument(local_docx)
-3. Por cada patch (filtrar: solo approved=True):
-   a. Localizar párrafo: _get_paragraph_by_location(doc, location)
-      - Parsea "body:5" → doc.paragraphs[5]
-      - Parsea "table:0:1:2:0" → doc.tables[0].rows[1].cells[2].paragraphs[0]
-      - Parsea "header:0:0" → doc.sections[0].header.paragraphs[0]
-   b. Verificar: paragraph.text.strip() == original_text
-      - Si NO coincide → skip (log warning)
-      - Si SÍ coincide → aplicar
-   c. Aplicar: _apply_text_to_paragraph_runs(paragraph, corrected_text)
-      - runs[0].text = corrected_text  (todo el texto en primer run)
-      - runs[1:].text = ""             (vaciar resto para no duplicar)
-      - PRESERVA: formato del primer run (font, bold, italic, size, color)
+_apply_docx_patches(doc, patches):
 
-4. Guardar DOCX corregido: {stem}_corrected.docx en tmpdir
-5. Convertir a PDF: soffice --headless --convert-to pdf
-6. Subir a MinIO:
-   - docx/{doc_id}/{stem}_corrected.docx
-   - final/{doc_id}/{stem}_corrected.pdf
-7. Marcar patches como applied=True en DB
+1. Separar patches:
+   group_patches = [p for p in patches if p.get("group_id")]
+   individual_patches = [p for p in patches if not p.get("group_id")]
 
-DB updates: Document.status = "candidate_rendering" → "candidate_ready"
-Document.docx_uri actualizado, Document.pdf_uri actualizado
-```
+2. Aplicar grupales primero (ordenados por group_call_index):
+   _apply_group_patches(doc, group_patches)
+   Para cada patch:
+     paragraph = _get_paragraph_by_location(doc, location)
+     is_manual = ":manual" in (structural_role or "")
+     
+     Si is_manual:
+       Aplicar corrected_text CON prefijo tal como está
+       (No strip del prefijo — el usuario lo escribió a mano)
+     Si nativo:
+       corrected = _strip_list_prefix(corrected_text)
+       Aplicar sin el prefijo (el DOCX lo añade automáticamente)
+     
+     _apply_individual_patch(paragraph, original, corrected)
 
----
+3. Aplicar individuales:
+   Para cada patch:
+     paragraph = _get_paragraph_by_location(doc, location)
+     Verificar: paragraph.text.strip() == original_text (o tolerancia de ~90%)
+     Si coincide → aplicar
+     Si no → skip con warning (texto ya modificado por patch grupal previo o cambio manual)
 
-### ESTADO INTERMEDIO: Candidato listo para revisión (`POST /documents/{id}/finalize`)
-
-**Entrada**: doc_id, user_review_feedback (opcional)
-**Salida**: {review_summary, stats}
-
-```
-document.status = "candidate_ready"
-
-El documento permanece en estado candidato hasta que el usuario:
-- Revisa las correcciones en frontend (CorrectionHistory + DiffCompareView)
-- Aprueba/rechaza correcciones individuales (MVP2 HITL)
-- Opcionalmente edita correcciones manualmente
-- Haz click "Finalizar" → POST /documents/{id}/finalize
-
-En candidate_ready, el usuario puede:
-- Descargar "candidato" (DOCX/PDF con correcciones aprobadas)
-- Reabrir (status=correcting) para relanzar corrección con cambios
-- Finalize (status=finalizing)
+_apply_individual_patch(paragraph, original, corrected):
+  runs = paragraph.runs
+  runs[0].text = corrected_text   # todo el texto en primer run
+  for run in runs[1:]:
+    run.text = ""                  # vaciar resto
+  # Preserva formato de runs[0] (font, bold, italic, size, color)
 ```
 
 ---
 
-### ESTADO FINAL: Finalizando y Completado
+## 3. Construcción del prompt LLM
 
-**POST `/documents/{id}/finalize`**
+### Sistema de bloques
 
-```
-1. Document.status = "finalizing"
-2. Celery worker tarea finalize_document:
-   a. Si hay edits manuales desde HITL:
-      - Recolectar patches editados manualmente
-      - Lanzar quality_gates nuevamente
-      - Si pasan → aplicar
-   b. Renderizar final (Etapa E nuevamente si hay cambios)
-   c. Generar estadísticas finales y resumen de cambios
-   d. Marcar Document.review_status = "completed"
-3. Document.status = "completed"
-4. Subir resumen a MinIO: final/{doc_id}/summary.json
-5. Actualizar BD: Document.completed_at, Document.final_review_notes
-```
+El prompt para cada párrafo se construye en `prompt_builder.py → build_user_prompt()`:
 
----
-
-## 3. Cómo se construye el prompt para el LLM
-
-El prompt se construye en `openai_client.py:correct_text_style()`:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ SYSTEM MESSAGE                                                  │
-│ "Eres un corrector de estilo experto en español. Siempre       │
-│  respondes en formato JSON válido."                             │
-├─────────────────────────────────────────────────────────────────┤
-│ USER MESSAGE                                                    │
-│                                                                  │
-│ Eres un corrector de estilo profesional en español. Tu tarea    │
-│ es corregir y mejorar el siguiente párrafo.                     │
-│                                                                  │
-│ INSTRUCCIONES ESTRICTAS:                                        │
-│ - Mejora claridad, concisión y fluidez del texto                │
-│ - Mejora la redacción y el estilo sin alterar el tono del autor │
-│ - NO cambies el significado ni el contenido                     │
-│ - Mantén consistencia con el contexto previo                    │
-│ - Máximo {max_length} caracteres                                │
-│ - Responde SOLO con el JSON sin explicaciones                   │
-│                                                                  │
-│ Formato de respuesta JSON requerido:                            │
-│ {                                                                │
-│   "corrected_text": "texto corregido aquí",                     │
-│   "changes_made": ["lista", "de", "cambios"],                   │
-│   "character_count": número_de_caracteres                       │
-│ }                                                                │
-│                                                                  │
-│ [SI HAY CONTEXTO:]                                              │
-│ CONTEXTO PREVIO (párrafos ya corregidos):                       │
-│ Párrafo 1: {corrected_context[-3]}                              │
-│ Párrafo 2: {corrected_context[-2]}                              │
-│ Párrafo 3: {corrected_context[-1]}                              │
-│                                                                  │
-│ PÁRRAFO A CORREGIR:                                             │
-│ {original_text}                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Parámetros de la llamada API:
 ```python
-client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[system_msg, user_msg],
-    max_tokens=500,
-    temperature=0.3,
-    response_format={"type": "json_object"}
-)
+# 1. Determinar qué bloques aplican según el tipo de elemento
+applicable = _blocks_for_paragraph_type(paragraph_type)
+# Ej: "titulo" → {"global_context", "profile_header", "ubicacion", "structural_rules", "register_constraints"}
+# Ej: "lista"  → {"global_context", ..., "context_prev", "idiolect_protections", "protected_regions"}
+
+# 2. Por cada bloque, check combinado: tipo_aplica AND flag_de_usuario
+def emit(name: str) -> bool:
+    type_ok = name in applicable
+    user_flag = prompt_blocks.get(name)  # None = no configurado = usar default
+    user_on = True if user_flag is None else bool(user_flag)
+    return type_ok and user_on
+
+# 3. Construir partes del prompt
+parts = []
+if emit("global_context"):   parts.append(build_global_context_block(global_context))
+if emit("profile_header"):   parts.append(build_profile_header(profile))
+if emit("ubicacion"):        parts.append(build_location_block(location, section, next_type))
+if emit("structural_rules"): parts.append(build_structural_rules(paragraph_type))
+if emit("context_prev"):     parts.append(build_context_prev(corrected_meta[-15:]))
+...
 ```
 
-### Post-procesamiento de la respuesta:
-```python
-content = response.choices[0].message.content  # string JSON
-data = json.loads(content)
-corrected = data["corrected_text"]
+### System prompt (cacheable)
 
-# Validación de longitud
-if len(corrected) > int(len(original) * 1.1):
-    return original  # rechazar si excede 110%
-return corrected
+`SYSTEM_PROMPT` en `prompt_builder.py` — no tiene variables, se puede cachear por OpenAI:
+
+```
+Eres un corrector de estilo profesional en español.
+
+PRINCIPIOS:
+- Corrige lo que tiene evidencia de error; preserva lo que está bien.
+- La coherencia entre párrafos es tan importante como la corrección individual.
+- La redundancia conceptual (repetir una idea con distintas palabras en el mismo fragmento)
+  es un defecto a corregir: "llegó tarde pero pudo revisarse" no necesita aclaración añadida.
+- Devuelve SIEMPRE JSON válido. Nunca texto libre.
+```
+
+### User prompt — estructura por bloques activos
+
+```
+[CONTEXTO GLOBAL DEL DOCUMENTO]          ← si emit("global_context")
+  register=..., voice=..., themes=...
+
+[PERFIL EDITORIAL]                        ← si emit("profile_header")
+  PERFIL: registro=formal | intervención=profunda | audiencia=académica...
+  PRIORIDADES: claridad, cohesion, precision_lexica
+  PROTEGER TÉRMINOS: "STYLIA", "ChatGPT"
+
+[UBICACIÓN ESTRUCTURAL]                   ← si emit("ubicacion")
+  UBICACIÓN: sección=2 (Marco teórico) | página=3/12 | tipo=narrativo
+  SIGUIENTE: subtitulo
+
+[REGLAS ESTRUCTURALES]                    ← si emit("structural_rules")
+  TIPO: titulo
+  REGLAS: No añadir punto final. No alterar mayúsculas del título.
+
+[CONTEXTO PREVIO]                         ← si emit("context_prev")
+  CONTEXTO PREVIO (últimos 15 párrafos corregidos):
+  [1] [tipo: narrativo] "primer párrafo corregido..."
+  [2] [tipo: narrativo] "segundo párrafo corregido..."
+  ...
+
+[RESTRICCIONES DE REGISTRO]              ← si emit("register_constraints")
+  RESTRICCIONES DE REGISTRO: lenguaje_inclusivo, sin_anglicismos
+
+[IDIOLECTOS PROTEGIDOS]                  ← si emit("idiolect_protections")
+  IDIOLECTOS PROTEGIDOS (no corregir aunque parezcan errores):
+  - narrador: "pos" (habla del personaje campesino)
+
+[REGIONES PROTEGIDAS]                    ← si emit("protected_regions")
+  REGIONES PROTEGIDAS: no tocar código, citas directas entre «»
+
+[PÁRRAFO A CORREGIR]                      ← siempre
+══════════════════════════════════════════════════════
+Texto a corregir:
+"El texto que se va a corregir aquí."
+
+Devuelve JSON:
+{"corrected_text": "...", "changes": [...], "confidence": 0.0-1.0, "rewrite_ratio": 0.0-1.0}
+══════════════════════════════════════════════════════
 ```
 
 ---
 
-## 4. Contexto acumulado: cómo se mantiene coherencia entre párrafos
+## 4. Contexto acumulado: ventana de 15 párrafos
 
 ```
-Párrafo 1: se corrige SIN contexto
-           → corrected_context = ["texto corregido 1"]
+Párrafo 0:  corregido SIN contexto
+            corrected_meta = [{text, type, loc}]
 
-Párrafo 2: se corrige CON contexto = ["texto corregido 1"]
-           → corrected_context = ["texto corregido 1", "texto corregido 2"]
+Párrafo 1:  corregido con context_prev = [meta_0]
+            corrected_meta = [meta_0, meta_1]
 
-Párrafo 3: se corrige CON contexto = ["texto corregido 1", "texto corregido 2"]
-           → corrected_context = ["texto corregido 1", "texto corregido 2", "texto corregido 3"]
+Párrafo 14: corregido con context_prev = [meta_0..meta_13]
+            corrected_meta = [meta_0..meta_14]
 
-Párrafo 4: se corrige CON contexto = ["texto corregido 2", "texto corregido 3"]  ← ventana de 3
-           → corrected_context = [..., "texto corregido 4"]
+Párrafo 15: context_prev = [meta_1..meta_14]  ← ventana deslizante de 15
+Párrafo N:  context_prev = [meta_{N-15}..meta_{N-1}]
 
-Párrafo N: siempre recibe los últimos 3 párrafos ya corregidos
+Nota: Párrafos en grupos (group_list/group_table) NO se añaden a corrected_meta.
+      Esto evita que el texto de ítems de lista contamine el contexto narrativo.
 ```
 
-La ventana de 3 párrafos se implementa con: `corrected_context[-3:]`
+Implementado con: `corrected_meta[-settings.context_window_size:]` donde `context_window_size = 15`
 
-Esto le permite al LLM:
-- Mantener un tono consistente a lo largo del documento
-- No repetir correcciones que ya se hicieron
-- Preservar la narrativa y las transiciones entre párrafos
-- Usar terminología consistente con lo ya corregido
+El contexto enriquecido incluye tipo de elemento: `[tipo: titulo]`, `[tipo: narrativo]` — permite al LLM saber si el contexto previo era un título o un párrafo narrativo para ajustar el estilo de la corrección.
 
 ---
 
-## 5. Cómo se editan los documentos (preservación de formato)
+## 5. Quality gates
 
-### El problema
-Un párrafo en python-docx se compone de **runs** (fragmentos con formato individual):
+Cada corrección pasa por `validate_correction()` en `quality_gates.py`:
+
+### Gates originales (Lote 5)
+
+| Gate | Tipo | Criterio | En fallo |
+|------|------|---------|----------|
+| `not_empty` | CRÍTICO | len(corrected) > 0 | gate_rejected |
+| `expansion_ratio` | CRÍTICO | len(corrected) ≤ len(original) * 1.15 | gate_rejected |
+| `protected_terms` | CRÍTICO | todos los términos protegidos presentes en corrected | gate_rejected |
+| `rewrite_ratio` | no-crítico | distancia_edición_normalizada ≤ max_rewrite_ratio | manual_review |
+| `language_preserved` | no-crítico | proporción de chars españoles ≥ 0.8 | manual_review |
+| `readability_inflesz` | no-crítico | INFLESZ en rango [target_min, target_max] | manual_review |
+
+### Gates estructurales (Structural Awareness)
+
+| Gate | Aplica a | Criterio | Tipo |
+|------|---------|---------|------|
+| `title_no_final_period` | `titulo`, `subtitulo` | corrected no termina con `.` | no-crítico |
+| `caption_starts_with_label` | `pie_figura` | corrected empieza con "Figura/Fig./Imagen/Tabla N" | CRÍTICO |
+| `table_cell_uniform_capitalization` | `celda_tabla` | capitalización consistente con celdas hermanas | no-crítico |
+| `list_format_consistent` | grupos de lista | todos los ítems tienen mismo tipo de puntuación final | no-crítico |
+| `list_parallel_structure` | grupos de lista | ≥ 75% de ítems inician con el mismo tipo gramatical | no-crítico |
+
+### Decisión de gate
+
 ```
-Párrafo: "Este es un texto en negrita y normal"
-Run 1: "Este es un texto en "  (font: Times, 12pt)
-Run 2: "negrita"               (font: Times, 12pt, bold)
-Run 3: " y normal"             (font: Times, 12pt)
+gate_results = validate_correction(original, corrected, profile, paragraph_type, sibling_cells)
+
+failed_critical = [g for g in gate_results if not g.passed and g.is_critical]
+failed_soft     = [g for g in gate_results if not g.passed and not g.is_critical]
+
+if failed_critical:
+    → usar original (corrected descartado)
+    → review_status = "gate_rejected"
+    → review_reason = descripción del gate fallido
+
+elif failed_soft:
+    → usar corrected (se aplica)
+    → review_status = "manual_review"
+    → review_reason = descripción de los gates no-críticos fallidos
+
+else:
+    → usar corrected
+    → review_status = None
 ```
 
-Si reemplazamos el texto completo, necesitamos manejar los runs correctamente.
+---
 
-### La solución actual (MVP)
+## 6. Cómo se editan los documentos (preservación de formato)
+
+### El problema de los runs
+
+Un párrafo en python-docx tiene **runs** (fragmentos con formato individual):
+```
+Párrafo: "Este texto tiene negrita y normal"
+Run 0: "Este texto tiene "  (Times 12pt, normal)
+Run 1: "negrita"             (Times 12pt, bold=True)
+Run 2: " y normal"           (Times 12pt, normal)
+```
+
+### Solución actual
+
 ```python
 def _apply_text_to_paragraph_runs(paragraph, new_text):
     runs = paragraph.runs
-    # Poner TODO el texto corregido en el primer run
-    runs[0].text = new_text
-    # Vaciar los demás runs
+    if not runs:
+        return
+    runs[0].text = new_text  # todo el texto en primer run
     for run in runs[1:]:
-        run.text = ""
+        run.text = ""         # vaciar resto
+    # Preserva: font family, size, color, bold, italic del run[0]
+    # Pierde: formatos en runs 1..N (negrita parcial, cursiva, etc.)
 ```
 
-**Limitación**: Se preserva el formato del **primer run** solamente. Si el párrafo tenía negrita parcial, cursiva, etc., esos formatos se pierden. El texto completo hereda el formato de `runs[0]`.
+**Limitación aceptable en MVP**: la mayoría de párrafos editoriales tienen formato uniforme. Preservar formato parcial requiere diff character-level (planificado para fases futuras).
 
-**Esto es aceptable en MVP** porque:
-- La mayoría de párrafos editoriales tienen formato uniforme
-- Preservar formato parcial requiere diff character-level (planificado para fases futuras)
-- Es mejor tener texto corregido con formato simple que texto incorrecto con formato perfecto
+### Matching de párrafo por location string
 
----
-
-## 6. Cómo interactúa el usuario con la aplicación
-
-### Dashboard (Home `/`)
-
-```
-┌─────────────────────────────────────────────────────────┐
-│ STYLIA                                          ● Live  │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │  ⬆ Arrastra un archivo .docx aquí                 │  │
-│  │    o haz clic para seleccionar                    │  │
-│  │    Formatos: .docx — Máximo 500 MB                │  │
-│  └───────────────────────────────────────────────────┘  │
-│                                                         │
-│  📄 2 documento(s) en proceso                           │
-│                                                         │
-│  ┌────────────────┐  ┌────────────────┐                 │
-│  │ tesis_cap3.docx│  │ informe.docx   │                 │
-│  │ ● Corrigiendo  │  │ ✓ Completado   │                 │
-│  │ ██████░░░ 60%  │  │ [PDF] [DOCX]   │                 │
-│  │ 5 págs         │  │ 12 págs        │                 │
-│  └────────────────┘  └────────────────┘                 │
-│                                                         │
-│  v0.1.0 — Corrección de estilo con IA                   │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Vista de detalle (`/documents/[id]`)
-
-5 tabs disponibles (MVP2 completado):
-
-1. **Resumen**: Estado del documento, progreso por etapa, perfiles (inferido vs seleccionado), estadísticas de correcciones
-2. **Análisis**: Secciones detectadas (MVP2 Lote 3), glosario de términos, distribución de tipos de párrafos, perfil editorial inferido
-3. **Correcciones**: Lista filtrable con diff word-level (rojo=original, verde=corregido), filtros por categoría/severidad/ruta (MVP2 Lote 2/4), badges de estado y confianza
-4. **Comparar**: Vista side-by-side original/corregido con modo diff avanzado, anotaciones de calidad (MVP2 Lote 5)
-5. **Flujo API**: Timeline de requests a LanguageTool y ChatGPT con contexto jerárquico (MVP2 Lote 4)
-
-### Acciones del usuario:
-
-**Fase upload**:
-- **Subir**: Drag-drop o click → solo .docx
-- **Ver estado**: Doc aparece en lista con status=uploaded
-
-**Fase selección de perfil**:
-- **(Opcional) Seleccionar perfil**: Grid de 10 presets o editor custom
-- **Sin perfil**: Usar flujo genérico MVP1
-
-**Fase procesamiento**:
-- **Procesar**: Click botón → POST /documents/{id}/process
-- **Monitorear**: Polling dinámico muestra progreso por etapa (5-30s según estado)
-- **Ver detalles**: Click documento → 5 tabs con análisis completo
-
-**Fase revisión (HITL)**:
-- **Revisar correcciones**: Expandir cards para ver diff detallado y explicaciones (MVP2 Lote 2)
-- **Filtrar**: Por categoría, severidad, ruta SKIP/CHEAP/EDITORIAL (MVP2 Lotes 2/4)
-- **Aprobar/rechazar**: Acciones en patches individuales (HITL)
-- **Descargar candidato**: PDF/DOCX con correcciones aprobadas (status=candidate_ready)
-
-**Fase finalización**:
-- **Finalizar**: Click "Completar" → POST /documents/{id}/finalize → status=completed
-- **Reabrir**: Para relanzar corrección → status=correcting
-- **Descargar final**: PDF/DOCX final (status=completed)
-- **Eliminar**: Botón rojo con confirmación
-
-**Costos**:
-- **Ver costos**: Tab `/costs` con resumen de llamadas LLM y costos agregados por documento
-
----
-
-## 7. LanguageTool: cómo funciona la corrección ortográfica
-
-### Request
-```http
-POST http://languagetool:8010/v2/check
-Content-Type: application/x-www-form-urlencoded
-
-text=Este texto esta mal escrito a proposito&language=es
-```
-
-### Response (simplificada)
-```json
-{
-  "matches": [
-    {
-      "offset": 11,
-      "length": 4,
-      "message": "Se ha encontrado un posible error",
-      "replacements": [{"value": "está"}],
-      "rule": {"id": "MORFOLOGIK_RULE_ES", "category": {"id": "TYPOS"}}
-    },
-    {
-      "offset": 30,
-      "length": 9,
-      "message": "Falta tilde",
-      "replacements": [{"value": "propósito"}],
-      "rule": {"id": "MORFOLOGIK_RULE_ES", "category": {"id": "TYPOS"}}
-    }
-  ]
-}
-```
-
-### Aplicación de correcciones
-Se aplican **de atrás hacia adelante** (offset descendente) para no alterar las posiciones:
 ```python
-sorted_matches = sorted(matches, key=lambda m: m["offset"], reverse=True)
-for match in sorted_matches:
-    corrected = corrected[:offset] + replacement + corrected[offset + length:]
+def _get_paragraph_by_location(doc, location):
+    if location.startswith("body:"):
+        idx = int(location.split(":")[1])
+        return doc.paragraphs[idx]
+    
+    elif location.startswith("table:"):
+        _, t, r, c, p = location.split(":")
+        return doc.tables[int(t)].rows[int(r)].cells[int(c)].paragraphs[int(p)]
+    
+    elif location.startswith("header:"):
+        _, s, p = location.split(":")
+        return doc.sections[int(s)].header.paragraphs[int(p)]
+    
+    elif location.startswith("footer:"):
+        _, s, p = location.split(":")
+        return doc.sections[int(s)].footer.paragraphs[int(p)]
 ```
 
-Resultado: `"Este texto está mal escrito a propósito"`
+### Verificación previa a aplicar
 
----
-
-## 8. Flujo de datos entre componentes
-
-```
-                          ┌────────────┐
-                          │   MinIO    │
-                          │  (S3 obj)  │
-                          └──────┬─────┘
-                                 │ download/upload
-                                 │
-┌──────────┐    HTTP    ┌───────┴──────┐    SQL     ┌────────────┐
-│ Frontend │◄──────────►│   FastAPI    │◄──────────►│ PostgreSQL │
-│ Next.js  │  REST API  │   Backend   │  SQLAlchemy │  (ORM)     │
-└──────────┘            └───────┬──────┘            └────────────┘
-                                │ enqueue task
-                                │
-                          ┌─────┴──────┐
-                          │   Redis    │
-                          │  (broker)  │
-                          └─────┬──────┘
-                                │ consume task
-                                │
-                          ┌─────┴──────┐    HTTP    ┌──────────────┐
-                          │   Celery   │◄──────────►│ LanguageTool │
-                          │   Worker   │            └──────────────┘
-                          │            │    HTTP    ┌──────────────┐
-                          │            │◄──────────►│  OpenAI API  │
-                          └────────────┘            └──────────────┘
-```
-
-### Flujo de un archivo a través del sistema:
-```
-1. Upload  → MinIO: source/{doc_id}/archivo.docx
-2. Convert → MinIO: pdf/{doc_id}/archivo.pdf
-3. Extract → MinIO: pages/{doc_id}/layout/1.json, text/1.txt, preview/1.png
-4. Correct → MinIO: docx/{doc_id}/patches_docx.json
-5. Render  → MinIO: docx/{doc_id}/archivo_corrected.docx
-                     final/{doc_id}/archivo_corrected.pdf
+```python
+actual_text = paragraph.text.strip()
+if actual_text != original_text:
+    # Puede haber sido modificado por un patch grupal anterior
+    logger.warning(f"Texto no coincide, skip: '{actual_text[:50]}' != '{original_text[:50]}'")
+    return False, "text_mismatch"
 ```
 
 ---
 
-## 9. Manejo de errores y fallbacks
+## 7. Flujo de datos de archivos en MinIO
+
+```
+source/{doc_id}/{filename}                    # DOCX original (subido por usuario)
+pdf/{doc_id}/{stem}.pdf                        # PDF convertido por LibreOffice
+pages/{doc_id}/layout/{page_no}.json           # Bloques PyMuPDF por página
+pages/{doc_id}/text/{page_no}.txt              # Texto plano por página
+pages/{doc_id}/preview/{page_no}.png           # Preview PNG 150dpi
+pages/{doc_id}/preview_candidate/{no}.png      # Preview con marcas de corrección
+pages/{doc_id}/annotations_candidate/{no}.json # Posiciones de correcciones en página
+pages/{doc_id}/annotations_original/{no}.json  # Posiciones en original
+analysis/{doc_id}/classifications.json         # paragraph_classifications de Etapa C
+docx/{doc_id}/patches_docx.json               # TODOS los patches (individual + grupal)
+docx/{doc_id}/{stem}_corrected.docx           # DOCX corregido candidato
+final/{doc_id}/{stem}_corrected.pdf           # PDF corregido candidato
+```
+
+---
+
+## 8. Manejo de errores y fallbacks
 
 | Escenario | Comportamiento |
 |-----------|---------------|
 | OpenAI API sin key | `_simulate_correction()`: reemplazos hardcoded básicos |
-| OpenAI API falla (timeout, error) | Retorna `None` → se usa texto post-LanguageTool |
-| OpenAI respuesta excede 110% | Se descarta corrección, se usa texto original |
-| LanguageTool falla (timeout, error) | Retorna texto original sin cambios |
-| LibreOffice conversión falla | Raise RuntimeError → pipeline falla, retry en 60s |
-| Texto párrafo no coincide al aplicar patch | Skip silencioso con warning log |
-| Celery task falla | Retry x3 con countdown=60s, luego marca "failed" |
-| Archivo demasiado grande | HTTP 413 antes de procesar |
-| Formato no .docx | HTTP 400 con mensaje descriptivo |
+| OpenAI `max_tokens` obsoleto | Se usa `max_completion_tokens` en la nueva SDK |
+| OpenAI respuesta excede max_expansion | Se descarta, se usa texto post-LT |
+| LanguageTool timeout | Retorna texto original sin correcciones LT |
+| B.5 falla (exception) | No bloqueante: pipeline continúa sin conciencia estructural |
+| D.5 falla (exception) | No bloqueante: solo patches individuales persisten |
+| Grupo parcialmente corregido | `correction_status = partial_failure`; ítems faltantes sin patch |
+| Texto no coincide al aplicar patch | Skip silencioso con warning (protege integridad del doc) |
+| LibreOffice conversión falla | RuntimeError → pipeline falla, retry con backoff exponencial |
+| Celery task falla | Retry x3 con backoff (30s, 90s, 270s), luego status=failed |
 
 ---
 
-## 10. Configuración por documento (config_json)
+## 9. Interfaz de usuario: componentes clave
 
-Cada documento puede tener configuración personalizada almacenada en `documents.config_json` (JSONB):
+### PromptBlocksPanel
 
-```json
-{
-  "language": "es",
-  "lt_disabled_rules": ["WHITESPACE_RULE", "UPPERCASE_SENTENCE_START"],
-  "perfectionista": false,
-  "custom_dict": ["STYLIA", "ChatGPT"],
-  "style_guide": "formal"
-}
+9 toggles para activar/desactivar bloques del prompt. Ubicaciones:
+1. **ProfileEditor** (antes de procesar): colapsable "Configuración avanzada del prompt"
+2. **EditorialProfilePanel** (después de procesar): visible si el doc no está locked
+
+Lógica: `dirty = drafts differ from initial` → habilita "Guardar cambios" → `onSave({prompt_blocks: draft})`
+
+### CorrectionHistory con GroupCard
+
+```
+Renderizado de correcciones:
+1. Filtrar por categoría/severidad/ruta/tipo
+2. Agrupar correcciones consecutivas con mismo group_id → GroupCard
+3. GroupCard colapsa los ítems del grupo en una sola card expandible
+4. Cada item dentro muestra diff individual
 ```
 
-Actualmente solo se usan `language` y `lt_disabled_rules`. El resto está preparado para fases futuras.
+`GroupCard` muestra: tipo de grupo (Lista / Tabla), N ítems, structural_role, indicador "grupal"
+
+### StructuralTree
+
+Árbol visual en tab Análisis:
+```
+Documento
+├── Sección 1: Introducción (párrafos 0-12)
+│   └── 📋 Lista "manual_list_0" — 3 ítems — completed
+├── Sección 2: Marco teórico (párrafos 13-45)
+│   ├── 📊 Tabla "table_1" 4×3 — 10 celdas — completed
+│   └── 📋 Lista "numId_2" — 5 ítems — partial_failure
+└── Sección 3: Conclusiones (párrafos 46-72)
+    └── 📊 Tabla "table_4" 6×2 — 12 celdas — completed
+```
+
+Datos de `GET /documents/{id}/structure`.
 
 ---
 
-## 11. Tracking de progreso (cómo se calcula)
+## 10. Decisiones de diseño clave
 
-El frontend calcula el progreso del documento basado en la etapa actual y un heartbeat/evento de progreso:
-
-**Modelo MVP2** (etapas A-B-C-D-E):
-```
-- converting (etapa A): 10% (estimado)
-- extracting (etapa B): 20% (estimado)
-- analyzing (etapa C): 30% (estimado)
-- correcting (etapa D): 75% (basado en párrafos procesados: heartbeat)
-- candidate_rendering (etapa E): 90% (estimado)
-- candidate_ready: 100%
-- finalizing → completed: 100%
-```
-
-El backend emite **heartbeats de progreso** durante la Etapa D (corrección) para indicar avance real:
-```
-POST /documents/{id}/progress
-{
-  "current_paragraph": N,
-  "total_paragraphs": M,
-  "percentage": (N/M) * 75
-}
-```
-
-El frontend polling obtiene este dato cada 5-30s según el estado:
-- Etapas rápidas (A, B, C): polling cada 30s
-- Etapa D (corrección): polling cada 5s (conteo de párrafos procesados)
-- Etapas finales (E, finalize): polling cada 10s
-
-**Cálculo de progreso global**:
-```python
-progress_by_stage = {
-  "converting": 0.10,
-  "extracting": 0.20,
-  "analyzing": 0.30,
-  "correcting": 0.30 + (current_para / total_paras) * 0.45,
-  "candidate_rendering": 0.90,
-  "candidate_ready": 1.0,
-  "finalizing": 1.0,
-  "completed": 1.0
-}
-current_progress = progress_by_stage[document.status]
-```
-
----
-
-## 12. Diferencia entre Ruta 1, 2 y 3
-
-| Ruta | Entrada | Estado | Descripción |
-|------|---------|--------|-------------|
-| **Ruta 1** (activa) | DOCX | MVP 1 | Corrige directamente párrafos del DOCX, evita fragmentación PDF |
-| **Ruta 2** (futura) | PDF digital | Fase 3 | Extrae bloques del PDF, corrige y regenera overlay |
-| **Ruta 3** (futura) | PDF escaneado | Fase 4 | OCR → texto → corrección → overlay sobre imagen |
-
-La Ruta 1 fue elegida para MVP porque:
-- Los párrafos del DOCX están completos (no fragmentados como en PDF)
-- Se preserva la estructura del documento (tablas, headers, footers)
-- python-docx permite manipulación directa de runs
-- La conversión final a PDF con LibreOffice mantiene fidelidad visual
+| Decisión | Razón |
+|----------|-------|
+| B.5 no bloqueante | La conciencia estructural mejora la calidad pero no es requisito para corregir. Si B.5 falla, D funciona como antes. |
+| Grupos en D.5, no en D | D es secuencial con contexto acumulado. Procesar grupos ahí complejiza el flujo. D.5 es una pasada separada sin dependencia de contexto acumulado. |
+| grouped_locations como set de strings | Evita necesidad de pasar session DB a correct_docx_sync. Calculado una vez después de B.5 y reutilizado. |
+| Formato manual preservado (no normalizar) | "2)" y "2." son decisiones del autor, no errores. El LLM solo corrige el contenido. |
+| context_window = 15 (triplicado de 5) | Más contexto reduce redundancias entre párrafos distantes y mejora la coherencia en documentos largos. El costo marginal por token es bajo en gpt-4o-mini. |
+| paragraph_type escrito en blocks DESPUÉS de C | B.5 enriquece blocks con metadata DOCX (list_id, table_id). C clasifica usando esa metadata. Escribir paragraph_type al final de C garantiza que use los datos de B.5. |
+| Block sintético (`docx_synthetic`) | PyMuPDF a veces no extrae bloques que sí existen en el DOCX (ej: celdas vacías, tablas complejas). Los sintéticos garantizan que D.5 tenga un block_id para guardar el patch. |
+| Patches grupales tienen prioridad en render | El renderizador aplica grupos primero. Si un ítem individual también tiene patch (edge case con duplicados históricos), el grupal gana porque fue generado con más contexto. |

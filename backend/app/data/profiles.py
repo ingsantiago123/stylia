@@ -271,7 +271,7 @@ PRESETS: dict[str, dict] = {
         "max_expansion_ratio": 1.10,
         "target_inflesz_min": 55,
         "target_inflesz_max": 70,
-        "style_priorities": ["claridad", "fluidez", "cohesion", "precision_lexica"],
+        "style_priorities": ["claridad", "fluidez", "cohesion", "precision_lexica", "eliminacion_redundancias"],
         "protected_terms": [],
         "forbidden_changes": [],
         "lt_disabled_rules": [],

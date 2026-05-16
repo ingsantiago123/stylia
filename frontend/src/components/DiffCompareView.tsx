@@ -78,6 +78,20 @@ const REVIEW_STATUS_STYLES: Record<string, { overlay: string; label: string }> =
   pending:       { overlay: "border border-yellow-400/30 bg-yellow-500/5", label: "Pendiente" },
 };
 
+// Hex colors per category — used for annotation overlay inline styles
+// (inline style avoids Tailwind purge issues with dynamic class names)
+const ANN_CAT_HEX: Record<string, string> = {
+  redundancia: "#f97316",
+  claridad:    "#3b82f6",
+  registro:    "#6366f1",
+  cohesion:    "#06b6d4",
+  lexico:      "#14b8a6",
+  estructura:  "#8b5cf6",
+  puntuacion:  "#f59e0b",
+  ritmo:       "#ec4899",
+  muletilla:   "#f43f5e",
+};
+
 // =============================================
 // Page number buttons (smart windowing)
 // =============================================
@@ -112,6 +126,7 @@ export function DiffCompareView({
   const [currentPage, setCurrentPage] = useState(1);
   const [tooltip, setTooltip] = useState<TooltipData | null>(null);
   const [annotations, setAnnotations] = useState<PageAnnotation[]>([]);
+  const [originalAnnotations, setOriginalAnnotations] = useState<PageAnnotation[]>([]);
   const [selectedAnnotation, setSelectedAnnotation] = useState<SelectedAnnotation | null>(null);
   const [finalizeLoading, setFinalizeLoading] = useState(false);
 
@@ -204,6 +219,7 @@ export function DiffCompareView({
     setLeftError(false);
     setRightError(false);
     setAnnotations([]);
+    setOriginalAnnotations([]);
     setTooltip(null);
     setSelectedAnnotation(null);
   }, [currentPage]);
@@ -216,6 +232,14 @@ export function DiffCompareView({
       .then(setAnnotations)
       .catch(() => setAnnotations([]));
   }, [docId, currentPage, showCorrectedPreview, isCandidateReady, rightImageCacheBust]);
+
+  // Anotaciones del original: contorno + palabras eliminadas/cambiadas
+  useEffect(() => {
+    if (!showCorrectedPreview) return;
+    getPageAnnotations(docId, currentPage, "original")
+      .then(setOriginalAnnotations)
+      .catch(() => setOriginalAnnotations([]));
+  }, [docId, currentPage, showCorrectedPreview, rightImageCacheBust]);
 
   // Find matching patches for an annotation via patch_ids
   const findPatchesForAnnotation = useCallback(
@@ -453,14 +477,36 @@ export function DiffCompareView({
             <div className="w-2.5 h-2.5 rounded-full bg-plomo/50" />
             <span className="text-xs uppercase tracking-wider font-semibold text-plomo">Original</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <div className="w-2.5 h-2.5 rounded-full bg-krypton" />
             <span className="text-xs uppercase tracking-wider font-semibold text-plomo">
               {isCandidateReady ? "Candidato" : "Corregido"}
             </span>
-            {annotations.length > 0 && (
-              <span className="text-[10px] text-plomo/60">— {annotations.length} marcas en esta pagina</span>
-            )}
+            {/* Category color legend for this page */}
+            {annotations.length > 0 && (() => {
+              const cats = [...new Set(annotations.map(a => a.category).filter(Boolean))];
+              return (
+                <div className="flex items-center gap-1.5 ml-1">
+                  {cats.map(cat => (
+                    <span
+                      key={cat}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                      style={{
+                        backgroundColor: (ANN_CAT_HEX[cat] || "#D4FF00") + "22",
+                        color: (ANN_CAT_HEX[cat] || "#D4FF00"),
+                        border: `1px solid ${(ANN_CAT_HEX[cat] || "#D4FF00")}55`,
+                      }}
+                    >
+                      <span
+                        className="w-1.5 h-1.5 rounded-full inline-block"
+                        style={{ backgroundColor: ANN_CAT_HEX[cat] || "#D4FF00" }}
+                      />
+                      {cat}
+                    </span>
+                  ))}
+                </div>
+              );
+            })()}
           </div>
         </div>
       </div>
@@ -476,13 +522,52 @@ export function DiffCompareView({
             {leftError ? (
               <ImagePlaceholder text="Preview no disponible" />
             ) : (
-              <img
-                src={getPagePreviewUrl(docId, currentPage)}
-                alt={`Pagina ${currentPage} original`}
-                className={`w-full h-auto ${leftLoaded ? "block" : "hidden"}`}
-                onLoad={() => setLeftLoaded(true)}
-                onError={() => { setLeftError(true); setLeftLoaded(true); }}
-              />
+              <div className="relative">
+                <img
+                  src={getPagePreviewUrl(docId, currentPage)}
+                  alt={`Pagina ${currentPage} original`}
+                  className={`w-full h-auto ${leftLoaded ? "block" : "hidden"}`}
+                  onLoad={() => setLeftLoaded(true)}
+                  onError={() => { setLeftError(true); setLeftLoaded(true); }}
+                />
+                {/* Layer 1: contorno del párrafo en el original */}
+                {leftLoaded && originalAnnotations
+                  .filter(a => a.annot_type !== "deleted")
+                  .map((ann, i) => {
+                    const catHex = ANN_CAT_HEX[ann.category] || "#D4FF00";
+                    return (
+                      <div
+                        key={`orig-para-${i}`}
+                        className="absolute rounded-sm pointer-events-none"
+                        style={{
+                          left: `${ann.x_pct}%`,
+                          top: `${ann.y_pct}%`,
+                          width: `${ann.w_pct}%`,
+                          height: `${ann.h_pct}%`,
+                          border: `2px solid ${catHex}BB`,
+                          backgroundColor: "transparent",
+                        }}
+                      />
+                    );
+                  })}
+                {/* Layer 2: palabras eliminadas/cambiadas en el original */}
+                {leftLoaded && originalAnnotations
+                  .filter(a => a.annot_type === "deleted")
+                  .map((ann, i) => (
+                    <div
+                      key={`orig-del-${i}`}
+                      className="absolute rounded-sm pointer-events-none"
+                      style={{
+                        left: `${ann.x_pct}%`,
+                        top: `${ann.y_pct}%`,
+                        width: `${ann.w_pct}%`,
+                        height: `${ann.h_pct}%`,
+                        backgroundColor: "rgba(239,68,68,0.30)",
+                        border: "1px solid rgba(239,68,68,0.70)",
+                      }}
+                    />
+                  ))}
+              </div>
             )}
           </div>
         </div>
@@ -538,36 +623,80 @@ export function DiffCompareView({
                       onLoad={() => setRightLoaded(true)}
                       onError={() => { setRightError(true); setRightLoaded(true); }}
                     />
-                    {/* Annotation overlays with review status colors */}
-                    {rightLoaded && annotations.map((ann, i) => {
-                      const reviewStatus = getAnnotationReviewStatus(ann);
-                      const statusStyle = REVIEW_STATUS_STYLES[reviewStatus] || REVIEW_STATUS_STYLES.pending;
-                      const isSelected = selectedAnnotation?.annotation === ann;
+                    {/* Layer 1: Paragraph outlines — border only, interactive */}
+                    {rightLoaded && annotations
+                      .filter(a => a.annot_type !== "change")
+                      .map((ann, i) => {
+                        const reviewStatus = getAnnotationReviewStatus(ann);
+                        const isSelected = selectedAnnotation?.annotation === ann;
+                        const catHex = ANN_CAT_HEX[ann.category] || "#D4FF00";
 
-                      return (
-                        <div
-                          key={i}
-                          className={`absolute transition-all rounded-sm ${
-                            isReviewMode ? "cursor-pointer" : "cursor-default"
-                          } ${
-                            isSelected
-                              ? "border-2 border-krypton bg-krypton/20 shadow-[0_0_8px_rgba(212,255,0,0.3)]"
-                              : isReviewMode
-                                ? `${statusStyle.overlay} hover:brightness-125`
-                                : "hover:bg-white/10"
-                          }`}
-                          style={{
-                            left: `${ann.x_pct}%`,
-                            top: `${ann.y_pct}%`,
-                            width: `${ann.w_pct}%`,
-                            height: `${ann.h_pct}%`,
-                          }}
-                          onClick={() => handleAnnotationClick(ann)}
-                          onMouseEnter={(e) => handleAnnotationHover(e, ann)}
-                          onMouseLeave={handleAnnotationLeave}
-                        />
-                      );
-                    })}
+                        let borderColor: string;
+                        let backgroundColor: string;
+                        let borderWidth: string;
+                        let boxShadow: string | undefined;
+
+                        if (isSelected) {
+                          borderColor = "rgba(212,255,0,0.90)";
+                          borderWidth = "2px";
+                          backgroundColor = "rgba(212,255,0,0.08)";
+                          boxShadow = "0 0 10px rgba(212,255,0,0.40)";
+                        } else if (isReviewMode && (reviewStatus === "rejected" || reviewStatus === "gate_rejected")) {
+                          borderColor = "rgba(239,68,68,0.75)";
+                          borderWidth = "2px";
+                          backgroundColor = "transparent";
+                        } else if (isReviewMode && reviewStatus === "manual_review") {
+                          borderColor = "rgba(234,179,8,0.75)";
+                          borderWidth = "2px";
+                          backgroundColor = "transparent";
+                        } else {
+                          borderColor = catHex + "BB";
+                          borderWidth = "2px";
+                          backgroundColor = "transparent";
+                        }
+
+                        return (
+                          <div
+                            key={`para-${i}`}
+                            className={`absolute transition-all rounded-sm border ${
+                              isReviewMode ? "cursor-pointer" : "cursor-default"
+                            }`}
+                            style={{
+                              left: `${ann.x_pct}%`,
+                              top: `${ann.y_pct}%`,
+                              width: `${ann.w_pct}%`,
+                              height: `${ann.h_pct}%`,
+                              borderColor,
+                              borderWidth,
+                              backgroundColor,
+                              boxShadow,
+                            }}
+                            onClick={() => handleAnnotationClick(ann)}
+                            onMouseEnter={(e) => handleAnnotationHover(e, ann)}
+                            onMouseLeave={handleAnnotationLeave}
+                          />
+                        );
+                      })}
+                    {/* Layer 2: Changed word highlights — visual only, pointer-events-none */}
+                    {rightLoaded && annotations
+                      .filter(a => a.annot_type === "change")
+                      .map((ann, i) => {
+                        const catHex = ANN_CAT_HEX[ann.category] || "#D4FF00";
+                        return (
+                          <div
+                            key={`chg-${i}`}
+                            className="absolute rounded-sm pointer-events-none"
+                            style={{
+                              left: `${ann.x_pct}%`,
+                              top: `${ann.y_pct}%`,
+                              width: `${ann.w_pct}%`,
+                              height: `${ann.h_pct}%`,
+                              backgroundColor: catHex + "40",
+                              border: `1px solid ${catHex}88`,
+                            }}
+                          />
+                        );
+                      })}
                   </div>
                 )}
               </>

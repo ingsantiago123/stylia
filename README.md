@@ -1,7 +1,10 @@
 # STYLIA — Corrector de Estilo Editorial para Español
 
 > Sistema de corrección editorial inteligente para documentos DOCX en español.  
-> Combina LanguageTool (ortografía y gramática) con OpenAI GPT (estilo, claridad, coherencia) bajo perfiles editoriales parametrizados. Preserva formato y voz del autor.
+> Combina LanguageTool (ortografía y gramática) con OpenAI GPT (estilo, claridad, coherencia) bajo perfiles editoriales parametrizados. Preserva formato y voz del autor.  
+> Incluye extracción de estructura DOCX nativa, corrección grupal de listas y tablas, y prompts dinámicos por tipo de elemento.
+
+**Versión**: 0.3.0 — Structural Awareness activo (B.5/D.5)
 
 ---
 
@@ -10,22 +13,24 @@
 1. [Qué es STYLIA y para qué sirve](#1-qué-es-stylia-y-para-qué-sirve)
 2. [Inicio rápido](#2-inicio-rápido)
 3. [Flujo completo de uso](#3-flujo-completo-de-uso)
-4. [Pipeline de procesamiento (Etapas A–E)](#4-pipeline-de-procesamiento-etapas-ae)
-5. [Motor de corrección: cómo funciona por dentro](#5-motor-de-corrección-cómo-funciona-por-dentro)
-6. [Perfiles editoriales predefinidos (10 perfiles)](#6-perfiles-editoriales-predefinidos-10-perfiles)
-7. [Perfiles personalizados y ficha ADN editorial](#7-perfiles-personalizados-y-ficha-adn-editorial)
-8. [Reglas personalizadas: sustitución, entidades e idiolectos](#8-reglas-personalizadas-sustitución-entidades-e-idiolectos)
-9. [Las pestañas de la interfaz: qué hace cada una](#9-las-pestañas-de-la-interfaz-qué-hace-cada-una)
-10. [Quality gates: validación automática de correcciones](#10-quality-gates-validación-automática-de-correcciones)
-11. [Revisión humana (HITL)](#11-revisión-humana-hitl)
-12. [Corrección macro por sección](#12-corrección-macro-por-sección)
-13. [Costos y métricas LLM](#13-costos-y-métricas-llm)
-14. [API REST completa](#14-api-rest-completa)
-15. [Variables de entorno](#15-variables-de-entorno)
-16. [Arquitectura y stack tecnológico](#16-arquitectura-y-stack-tecnológico)
-17. [Estructura del repositorio](#17-estructura-del-repositorio)
-18. [Comandos de desarrollo](#18-comandos-de-desarrollo)
-19. [Limitaciones actuales y roadmap](#19-limitaciones-actuales-y-roadmap)
+4. [Pipeline de procesamiento (Etapas A–E + B.5/D.5)](#4-pipeline-de-procesamiento-etapas-ae--b5d5)
+5. [Análisis estructural: listas, tablas y tipos de párrafo](#5-análisis-estructural-listas-tablas-y-tipos-de-párrafo)
+6. [Motor de corrección: cómo funciona por dentro](#6-motor-de-corrección-cómo-funciona-por-dentro)
+7. [Perfiles editoriales predefinidos (10 perfiles)](#7-perfiles-editoriales-predefinidos-10-perfiles)
+8. [Perfiles personalizados y ficha ADN editorial](#8-perfiles-personalizados-y-ficha-adn-editorial)
+9. [Reglas personalizadas: sustitución, entidades e idiolectos](#9-reglas-personalizadas-sustitución-entidades-e-idiolectos)
+10. [Bloques del prompt: control granular](#10-bloques-del-prompt-control-granular)
+11. [Las pestañas de la interfaz: qué hace cada una](#11-las-pestañas-de-la-interfaz-qué-hace-cada-una)
+12. [Quality gates: validación automática de correcciones](#12-quality-gates-validación-automática-de-correcciones)
+13. [Revisión humana (HITL)](#13-revisión-humana-hitl)
+14. [Corrección macro por sección](#14-corrección-macro-por-sección)
+15. [Costos y métricas LLM](#15-costos-y-métricas-llm)
+16. [API REST completa](#16-api-rest-completa)
+17. [Variables de entorno](#17-variables-de-entorno)
+18. [Arquitectura y stack tecnológico](#18-arquitectura-y-stack-tecnológico)
+19. [Estructura del repositorio](#19-estructura-del-repositorio)
+20. [Comandos de desarrollo](#20-comandos-de-desarrollo)
+21. [Limitaciones actuales y roadmap](#21-limitaciones-actuales-y-roadmap)
 
 ---
 
@@ -144,9 +149,9 @@ curl -L http://localhost:8000/api/v1/documents/$DOC_ID/download/pdf  -o corregid
 
 ---
 
-## 4. Pipeline de procesamiento (Etapas A–E)
+## 4. Pipeline de procesamiento (Etapas A–E + B.5/D.5)
 
-El procesamiento de cada documento sigue 5 etapas secuenciales ejecutadas como tarea Celery:
+El procesamiento de cada documento sigue 7 etapas secuenciales ejecutadas como tarea Celery. Las sub-etapas B.5 y D.5 son no bloqueantes: si fallan, el pipeline continúa sin ellas.
 
 ```
 DOCX original
@@ -167,35 +172,58 @@ DOCX original
     • Sube todo a MinIO: layout JSON, texto TXT, previews PNG
   │
   ▼
+[B.5] EXTRACCIÓN ESTRUCTURAL DOCX ← NUEVO
+    • Abre el DOCX original con python-docx (no el PDF)
+    • Detecta listas nativas (atributo numPr del XML) y manuales (regex de prefijo)
+    • Detecta tablas (filtrado de tablas decorativas)
+    • Crea un registro ElementGroup por cada lista y tabla encontrada
+    • Enriquece cada Block de la DB con: list_id, table_id, style_name, docx_location,
+      list_position, list_format_type, table_cell_role, element_group_id
+    • Crea blocks "sintéticos" para celdas DOCX no capturadas por PyMuPDF
+    → Resultado: mapa completo de la estructura real del documento
+  │
+  ▼
 [C] ANÁLISIS EDITORIAL
     • Detecta secciones del documento (títulos, capítulos, partes)
     • Construye glosario de términos frecuentes con frecuencia de aparición
-    • Clasifica cada párrafo en 11 tipos (narrativo, diálogo, técnico, lista, tabla, etc.)
-    • Infiere perfil editorial del documento (género, audiencia, registro, tono)
-    • Construye el ADN global del documento: voz dominante, términos protegidos globales,
-      fingerprint de estilo (longitud media de oraciones, ratio de voz pasiva, etc.)
-    • Los términos protegidos del análisis se agregan automáticamente al perfil
+    • Clasifica cada párrafo en 14 tipos usando metadata de B.5 como señal primaria:
+      titulo, subtitulo, narrativo, explicacion_tecnica, dialogo, cita, lista,
+      celda_tabla, celda_tabla_header, celda_tabla_total, pie_figura, nota_pie,
+      encabezado, pie_pagina
+    • Escribe paragraph_type en la tabla blocks de la DB (match por docx_location)
+    • Infiere perfil editorial (género, audiencia, registro, tono)
+    • Construye ADN global: voz dominante, términos globales protegidos, fingerprint
   │
   ▼
-[D] CORRECCIÓN (el núcleo del sistema)
-    • Por cada párrafo del DOCX (no del PDF, para preservar formato exacto):
-        FASE 0: Aplica reglas de sustitución del usuario (antes de LT)
+[D] CORRECCIÓN INDIVIDUAL
+    • Omite párrafos que pertenecen a un ElementGroup (serán procesados en D.5)
+    • Por cada párrafo no grupal:
+        FASE 0: Sustituciones de usuario (antes de LT)
         FASE 1: LanguageTool corrige ortografía y gramática
         FASE 2: Router decide ruta (SKIP / CHEAP / EDITORIAL)
-        FASE 3: LLM Pasada 1 corrige estilo según perfil editorial
-        FASE 4: LLM Pasada 2 auditoría (detecta destrucciones de términos técnicos)
-        FASE 5: Quality gates validan la corrección (5 checks automáticos)
-    • Cada corrección genera un patch con: texto original, texto corregido, categoría,
-      severidad, explicación, confianza, ruta tomada, resultados de gates
+        FASE 3: LLM Pasada 1 — prompt dinámico filtrado por tipo de párrafo
+        FASE 4: LLM Pasada 2 — auditoría contextual (detecta destrucciones)
+        FASE 5: Quality gates (5 checks + gates estructurales por tipo)
+    • Ventana de contexto: últimos 15 párrafos corregidos (triplicado)
   │
   ▼
-[E] RENDERIZADO
-    • Abre el DOCX original con python-docx
-    • Localiza cada párrafo por su identificador de ubicación (body:N, table:T:R:C:P, etc.)
-    • Aplica las correcciones preservando estilos de fuente y formato
-    • Genera DOCX corregido candidato
-    • Convierte a PDF con LibreOffice
-    • Sube DOCX y PDF corregidos a MinIO
+[D.5] CORRECCIÓN GRUPAL ← NUEVO
+    • Por cada ElementGroup (lista o tabla):
+        — Recolecta todos los ítems del grupo ordenados por posición
+        — Una sola llamada LLM con todos los ítems en el prompt
+        — Para listas: evalúa paralelismo, puntuación uniforme, capitalización
+        — Para tablas: evalúa uniformidad de celdas, roles (header/data/total)
+        — Respuesta JSON indexada: cada ítem devuelto por su posición
+        — Genera patches con group_id, group_call_index, structural_role
+    • El LLM ve el grupo completo: puede detectar incoherencias entre ítems
+  │
+  ▼
+[E] RENDERIZADO (group-aware)
+    • Aplica primero los patches grupales (en orden de group_call_index)
+    • Luego aplica los patches individuales (salteando los ya modificados por grupos)
+    • Para listas manuales: preserva el prefijo exacto del usuario (no normaliza "2)" a "2.")
+    • Para listas nativas: elimina el prefijo (el DOCX lo gestiona automáticamente)
+    • Genera DOCX corregido candidato y convierte a PDF
   │
   ▼
 candidate_ready → [Revisión humana] → completed
@@ -218,7 +246,111 @@ candidate_ready → [Revisión humana] → completed
 
 ---
 
-## 5. Motor de corrección: cómo funciona por dentro
+## 5. Análisis estructural: listas, tablas y tipos de párrafo
+
+Esta es la capacidad diferencial de STYLIA v0.3.0. El sistema no trata todos los párrafos igual: entiende la estructura del documento y aplica reglas distintas según el tipo de elemento.
+
+### Por qué importa la estructura
+
+Un corrector genérico puede:
+- Añadir punto final a un título (incorrecto)
+- Cambiar "2)" a "2." en una lista numerada (cambia el formato sin necesidad)
+- Modificar el total de una tabla (destruye los datos)
+- Corregir ítems de una lista de forma inconsistente entre sí
+
+STYLIA v0.3.0 evita estos problemas porque antes de corregir sabe exactamente qué tipo de elemento es cada párrafo.
+
+### Tipos de párrafo detectados (14 tipos)
+
+| Tipo | Descripción | Señal de detección |
+|------|-------------|-------------------|
+| `titulo` | Título principal (Heading 1) | Estilo DOCX o heurística de texto corto sin punto |
+| `subtitulo` | Título secundario (Heading 2+) | Estilo DOCX Heading nivel 2+ |
+| `narrativo` | Párrafo narrativo o expositivo | Texto largo, sin marcadores especiales |
+| `explicacion_tecnica` | Párrafo técnico con terminología | Densidad de términos del glosario |
+| `dialogo` | Fragmento de diálogo | Empieza con —, «, " + mayúscula |
+| `cita` | Cita textual | Estilo Quote en DOCX o marcadores tipográficos |
+| `lista` | Ítem de lista | `list_id` del Block (B.5) o prefijo numérico/viñeta |
+| `celda_tabla` | Celda de datos de tabla | `table_id` del Block + role=data |
+| `celda_tabla_header` | Celda de encabezado de tabla | Primera fila de la tabla |
+| `celda_tabla_total` | Celda de totales | Última fila + contenido numérico |
+| `pie_figura` | Pie de figura o imagen | Empieza con "Figura", "Fig.", "Imagen", "Gráfico" |
+| `nota_pie` | Nota al pie | Numeración + texto corto |
+| `encabezado` | Encabezado de página | Ubicación header: en DOCX |
+| `pie_pagina` | Pie de página | Ubicación footer: en DOCX |
+
+### Detección de listas
+
+**Listas nativas** (el DOCX gestiona la numeración):
+- El XML del párrafo tiene atributo `numPr` con un `numId`
+- Todos los párrafos con el mismo `numId` forman un grupo
+- El DOCX añade la viñeta o número automáticamente → STYLIA no debe tocarlos
+
+**Listas manuales** (el usuario escribió el prefijo a mano):
+- El texto empieza con: `1.`, `2)`, `•`, `-`, `a)`, `i.`, etc.
+- El cuerpo después del prefijo tiene al menos 4 caracteres
+- Se excluyen títulos numerados ("1. Introducción" es un título, no un ítem)
+- Los prefijos se preservan exactamente: si el usuario usó `2)`, STYLIA no lo cambia a `2.`
+
+**Anti-falsos-positivos**:
+- Párrafos con estilo Heading numerados no se detectan como lista
+- Textos cortos (< 60 chars) sin puntuación final con prefijo = probablemente título
+- Secuencias donde todos los "ítems" tienen estilo Heading → descartadas
+
+### Detección de tablas
+
+- Se analiza cada tabla del DOCX
+- **Tablas decorativas descartadas**: 1×1, <2 celdas con texto real, tablas Nx1 con ≤3 filas
+- Se asigna rol a cada celda: `header` (primera fila), `total` (última fila numérica), `data`
+- Las celdas `total` nunca se modifican (protección de datos)
+
+### Corrección en conjunto (ElementGroup)
+
+Una vez detectados los grupos, STYLIA envía el grupo completo en una sola llamada al LLM:
+
+**Para listas** — El LLM recibe todos los ítems y puede:
+- Verificar paralelismo (todos empiezan con verbo infinitivo, o todos con sustantivo)
+- Unificar puntuación al cierre (todos con punto, o todos sin él)
+- Detectar consistencia de capitalización (todos con mayúscula inicial, o todos en minúscula)
+- Corregir cada ítem individualmente mientras mantiene coherencia entre ellos
+
+**Para tablas** — El LLM recibe todas las celdas con su rol y puede:
+- Uniformizar capitalización por columna (todos los encabezados en mayúscula)
+- Corregir contenido de celdas data sin tocar las de total
+- Verificar que los textos de celdas hermanas sean gramaticalmente paralelos
+
+### Árbol estructural (UI)
+
+La pestaña "Análisis" muestra el árbol de estructura del documento:
+
+```
+Documento
+├── Sección 1: Introducción
+│   └── 📋 Lista manual — 4 ítems — ✓ completada
+├── Sección 2: Marco teórico
+│   ├── 📊 Tabla 4×3 — 10 celdas — ✓ completada
+│   └── 📋 Lista nativa (decimal) — 6 ítems — ⚠ parcial
+└── Sección 3: Conclusiones
+    └── 📊 Tabla 2×5 — 8 celdas — ✓ completada
+```
+
+Cada nodo muestra: tipo, dimensiones, número de ítems, estado de corrección.
+
+### En la lista de correcciones
+
+Las correcciones grupales aparecen agrupadas con una `GroupCard` colapsable:
+
+```
+▼ [LISTA — 4 ítems — manual]
+  ├── [1] "1. Informe final"  →  "1. Informe final."  [puntuacion: sugerencia]
+  ├── [2] "2) Base de datos"  →  "2) Base de datos."  [puntuacion: sugerencia]
+  ├── [3] "3. Acta de cierre" →  "3. Acta de cierre." [puntuacion: sugerencia]
+  └── [4] "Cuatro. Resumen"   →  "4. Resumen final."  [estructura: importante]
+```
+
+---
+
+## 6. Motor de corrección: cómo funciona por dentro
 
 ### Ruta activa: DOCX-first (Ruta 1)
 
@@ -277,7 +409,7 @@ El prompt enviado al LLM tiene estructura en bloques:
   • Advertencia si el párrafo cruza un salto de página
 
 [BLOQUE 3] CONTEXTO PREVIO
-  • Últimos N párrafos corregidos (ventana configurable, por defecto 5)
+  • Últimos N párrafos corregidos (ventana configurable, por defecto 15)
   • Con tipo de párrafo y etiqueta de categorías de cambio aplicados
 
 [BLOQUE 4] REGLAS DEL USUARIO YA APLICADAS
@@ -332,11 +464,11 @@ Responde con: `final_text`, `reverted_destructions[]`, `style_improvements[]`, `
 
 ### Ventana de contexto acumulado
 
-El sistema mantiene una ventana deslizante de los últimos **5 párrafos corregidos** (configurable con `CONTEXT_WINDOW_SIZE`). Esto garantiza coherencia terminológica y de estilo entre párrafos consecutivos. En modo paralelo por lotes, la ventana se inicializa con los últimos N párrafos del lote anterior.
+El sistema mantiene una ventana deslizante de los últimos **15 párrafos corregidos** (configurable con `CONTEXT_WINDOW_SIZE`). Esto garantiza coherencia terminológica y de estilo entre párrafos consecutivos. En modo paralelo por lotes, la ventana se inicializa con los últimos N párrafos del lote anterior.
 
 ---
 
-## 6. Perfiles editoriales predefinidos (10 perfiles)
+## 7. Perfiles editoriales predefinidos (10 perfiles)
 
 STYLIA incluye 10 perfiles editoriales cuidadosamente diseñados para los géneros más comunes en español. Cada perfil configura automáticamente el nivel de intervención, el registro, la audiencia y las prioridades de corrección.
 
@@ -462,7 +594,7 @@ STYLIA incluye 10 perfiles editoriales cuidadosamente diseñados para los géner
 
 ---
 
-## 7. Perfiles personalizados y ficha ADN editorial
+## 8. Perfiles personalizados y ficha ADN editorial
 
 ### Crear un perfil personalizado
 
@@ -525,7 +657,7 @@ Puedes ver y editar la ficha ADN en la pestaña **"ADN Editorial"** de cualquier
 
 ---
 
-## 8. Reglas personalizadas: sustitución, entidades e idiolectos
+## 9. Reglas personalizadas: sustitución, entidades e idiolectos
 
 La pestaña **"ADN Editorial"** permite configurar 4 tipos de reglas avanzadas que se aplican **antes** de LanguageTool (Fase 0) y se refuerzan en el prompt del LLM.
 
@@ -627,7 +759,69 @@ Devuelve:
 
 ---
 
-## 9. Las pestañas de la interfaz: qué hace cada una
+## 10. Bloques del prompt: control granular
+
+El sistema de bloques del prompt (PromptBlocksConfig) permite habilitar o deshabilitar exactamente qué información se incluye en el prompt de cada llamada al LLM, con control por tipo de párrafo.
+
+### Los 9 bloques configurables
+
+| Bloque | ID | Contenido | Por defecto |
+|--------|----|-----------|-------------|
+| 0 | `global_context` | ADN del documento: voz, registro, términos globales protegidos, fingerprint de estilo | Activado |
+| 1 | `editorial_profile` | Perfil editorial: nivel de intervención, registro, audiencia, tono, max ratio de reescritura | Activado |
+| 2 | `structural_location` | Tipo de párrafo, sección actual, resumen de sección, términos activos, posición en documento | Activado |
+| 3 | `previous_context` | Últimos N párrafos corregidos (ventana deslizante de 15 párrafos) | Activado |
+| 4 | `user_substitutions` | Sustituciones aplicadas en Fase 0 que el LLM no debe revertir | Solo si hay sustituciones |
+| 5 | `register_restrictions` | Restricciones de registro: sin anglicismos, voseo, lenguaje inclusivo, etc. | Solo si hay restricciones |
+| 6 | `protected_idiolects` | Rasgos de voz del autor que el LLM no debe "corregir" | Solo si hay idiolectos |
+| 7 | `paragraph_text` | El texto del párrafo a corregir | Siempre |
+| 8 | `protected_regions` | Fragmentos del párrafo que no pueden modificarse | Solo si hay regiones protegidas |
+
+### Filtrado por tipo de párrafo
+
+La función `_blocks_for_paragraph_type()` determina qué bloques se incluyen según el tipo del párrafo actual:
+
+| Tipo de párrafo | Bloques omitidos | Razón |
+|----------------|-----------------|-------|
+| `titulo` / `subtitulo` | 3 (contexto previo), 6 (idiolectos) | Los títulos no necesitan coherencia con el flujo narrativo |
+| `pie_pagina` / `encabezado` | 3 (contexto previo), 6 (idiolectos) | Elementos de plantilla, sin contexto narrativo |
+| `celda_tabla_total` | 1, 3, 4, 5, 6 | Celdas de totales: solo verificar integridad numérica |
+| `nota_pie` | 6 (idiolectos) | Notas formales, sin voz del autor |
+| `lista` (manual) | — | Todos los bloques, con reglas especiales de lista |
+| `lista` (nativa) | 3 (contexto previo) | La lista nativa se corrige como grupo, no secuencialmente |
+
+Esto reduce el número de tokens enviados por párrafo (y el costo) cuando el tipo de elemento no necesita toda la información de contexto.
+
+### Configuración por perfil
+
+En el perfil editorial puedes habilitar o deshabilitar bloques globalmente:
+
+```json
+{
+  "prompt_blocks_config": {
+    "global_context": true,
+    "editorial_profile": true,
+    "structural_location": true,
+    "previous_context": true,
+    "user_substitutions": true,
+    "register_restrictions": false,
+    "protected_idiolects": false,
+    "protected_regions": true
+  }
+}
+```
+
+### Visualización en el panel PromptBlocks (UI)
+
+La pestaña "Flujo API" incluye el panel PromptBlocksPanel que muestra, párrafo por párrafo:
+- Qué bloques estaban habilitados en esa llamada
+- El contenido exacto de cada bloque enviado
+- Los tokens consumidos por bloque
+- Por qué se omitió un bloque (tipo de párrafo, sin datos, perfil)
+
+---
+
+## 11. Las pestañas de la interfaz: qué hace cada una
 
 ### Pestaña "Resumen"
 
@@ -759,7 +953,7 @@ Vista side-by-side del documento original vs. el documento corregido:
 
 ---
 
-## 10. Quality gates: validación automática de correcciones
+## 12. Quality gates: validación automática de correcciones
 
 Antes de presentar cada corrección al revisor humano, el sistema ejecuta 5 validaciones automáticas:
 
@@ -783,6 +977,20 @@ Si un gate crítico falla, la corrección se marca como `gate_rejected` y se apl
 
 Si un gate no crítico falla, la corrección se marca como `manual_review`. El revisor humano puede aprobarla de todos modos.
 
+### Gates estructurales (por tipo de párrafo)
+
+Estos gates adicionales se ejecutan según el tipo de párrafo detectado en B.5:
+
+| Gate | Tipo de párrafo | Qué valida |
+|------|----------------|-----------|
+| `title_no_final_period` | `titulo` / `subtitulo` | El título corregido no termina con punto final |
+| `caption_starts_with_label` | `pie_figura` | La corrección preserva el prefijo "Figura X:" o "Gráfico X:" |
+| `table_cell_uniform_capitalization` | `celda_tabla_header` | Los encabezados de columna mantienen capitalización uniforme |
+| `list_format_consistent` | `lista` (manual) | El prefijo del ítem (1., 2), •) no fue alterado |
+| `list_parallel_structure` | `lista` | Los ítems del grupo mantienen estructura gramatical paralela |
+
+Los gates estructurales son **no críticos**: si fallan, marcan `manual_review` pero no descartan la corrección.
+
 ### Resultado en el patch
 
 ```json
@@ -792,7 +1000,9 @@ Si un gate no crítico falla, la corrección se marca como `manual_review`. El r
     {"gate_name": "expansion_ratio", "passed": true, "value": 1.05, "threshold": 1.10, "critical": true},
     {"gate_name": "protected_terms", "passed": true, "critical": true},
     {"gate_name": "rewrite_ratio", "passed": false, "value": 0.42, "threshold": 0.30, "critical": false,
-     "message": "Reescritura del 42% supera el umbral del 30%"}
+     "message": "Reescritura del 42% supera el umbral del 30%"},
+    {"gate_name": "list_format_consistent", "passed": true, "critical": false,
+     "message": "Prefijo '2)' preservado correctamente"}
   ],
   "review_status": "manual_review",
   "review_reason": "rewrite_ratio_exceeded"
@@ -801,7 +1011,7 @@ Si un gate no crítico falla, la corrección se marca como `manual_review`. El r
 
 ---
 
-## 11. Revisión humana (HITL)
+## 13. Revisión humana (HITL)
 
 Cuando el pipeline termina, el documento entra en `candidate_ready`. La interfaz muestra el candidato listo para revisión.
 
@@ -873,7 +1083,7 @@ Devuelve:
 
 ---
 
-## 12. Corrección macro por sección
+## 14. Corrección macro por sección
 
 La corrección macro es una **tercera pasada opcional** que opera sobre el documento completo una vez terminadas todas las correcciones micro (por párrafo).
 
@@ -914,7 +1124,7 @@ curl -X POST http://localhost:8000/api/v1/documents/$DOC_ID/recorrect-macro
 
 ---
 
-## 13. Costos y métricas LLM
+## 15. Costos y métricas LLM
 
 STYLIA rastrea el costo de cada llamada al LLM con precisión de párrafo.
 
@@ -954,7 +1164,7 @@ Usa el endpoint `/simulate-impact` para estimar el costo antes de procesar el do
 
 ---
 
-## 14. API REST completa
+## 16. API REST completa
 
 Base URL: `http://localhost:8000/api/v1`
 
@@ -1000,6 +1210,7 @@ Base URL: `http://localhost:8000/api/v1`
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | GET | `/documents/{id}/analysis` | Resultado del análisis editorial (secciones, glosario, clasificación) |
+| GET | `/documents/{id}/structure` | Árbol estructural del documento: listas y tablas detectadas en B.5 con sus ítems |
 | GET | `/documents/{id}/correction-flow` | Flujo de correcciones con contexto jerárquico |
 | GET | `/documents/{id}/correction-batches` | Estado de lotes de corrección paralela |
 | GET | `/documents/{id}/global-context` | ADN global del documento |
@@ -1054,7 +1265,7 @@ Base URL: `http://localhost:8000/api/v1`
 
 ---
 
-## 15. Variables de entorno
+## 17. Variables de entorno
 
 Archivo base: `.env.example`. Copiar a `.env` y completar.
 
@@ -1117,7 +1328,7 @@ OPENAI_PRICING_OUTPUT=4.50   # USD por millón de tokens de salida
 ```env
 MAX_UPLOAD_SIZE_MB=500
 MAX_DOCUMENT_PAGES=1000
-CONTEXT_WINDOW_SIZE=5           # Párrafos previos como contexto del LLM (defecto: 5)
+CONTEXT_WINDOW_SIZE=15          # Párrafos previos como contexto del LLM (defecto: 15, triplicado)
 PASS2_ENABLED=true              # Activar Pasada 2 (auditoría contextual)
 PASS2_REWRITE_THRESHOLD=0.15    # Umbral mínimo de reescritura para activar Pasada 2
 GLOBAL_CONTEXT_SAMPLE_SIZE=9    # Párrafos muestreados para construir ADN global
@@ -1135,7 +1346,7 @@ PARALLEL_CORRECTION_BOUNDARY_CHECK=true  # Re-verificar primer párrafo de cada 
 
 ---
 
-## 16. Arquitectura y stack tecnológico
+## 18. Arquitectura y stack tecnológico
 
 ### Diagrama de servicios
 
@@ -1199,10 +1410,11 @@ Usuario (Browser)
 | `correction_batches` | Lotes de corrección paralela para documentos grandes |
 | `document_global_context` | ADN global: voz, registro, temas, términos protegidos, fingerprint |
 | `llm_audit_log` | Log completo de cada llamada LLM: request/response raw, latencia |
+| `element_groups` | Grupos estructurales detectados en B.5: listas y tablas con todos sus ítems |
 
 ---
 
-## 17. Estructura del repositorio
+## 19. Estructura del repositorio
 
 ```
 corrector de estilos/
@@ -1220,6 +1432,8 @@ corrector de estilos/
 │   │   ├── services/
 │   │   │   ├── ingestion.py      # Etapa A: upload + DOCX→PDF
 │   │   │   ├── extraction.py     # Etapa B: layout extraction (PyMuPDF)
+│   │   │   ├── extraction_docx.py # Etapa B.5: extracción estructural DOCX (listas y tablas)
+│   │   │   ├── group_collector.py # Recolección de ítems de ElementGroup para D.5
 │   │   │   ├── analysis.py       # Etapa C: análisis editorial
 │   │   │   ├── correction.py     # Etapa D: LT + LLM + gates (núcleo del sistema)
 │   │   │   ├── prompt_builder.py # Construcción de prompts parametrizados
@@ -1261,7 +1475,9 @@ corrector de estilos/
 │   │   │   ├── MacroCorrectionView.tsx   # Vista por fase de corrección
 │   │   │   ├── ProfileEditor.tsx         # Editor de perfil editorial
 │   │   │   ├── ProfileSelector.tsx       # Selector de presets
-│   │   │   └── LLMAuditPanel.tsx         # Panel de auditoría LLM
+│   │   │   ├── LLMAuditPanel.tsx         # Panel de auditoría LLM
+│   │   │   ├── StructuralTree.tsx        # Árbol visual de estructura DOCX (listas y tablas)
+│   │   │   └── PromptBlocksPanel.tsx     # Visualización de bloques del prompt por párrafo
 │   │   └── lib/
 │   │       └── api.ts            # Cliente API: tipos TypeScript + funciones fetch
 │
@@ -1273,7 +1489,7 @@ corrector de estilos/
 
 ---
 
-## 18. Comandos de desarrollo
+## 20. Comandos de desarrollo
 
 ### Stack completo con Docker
 
@@ -1329,7 +1545,7 @@ npm run dev   # http://localhost:3001
 
 ---
 
-## 19. Limitaciones actuales y roadmap
+## 21. Limitaciones actuales y roadmap
 
 ### Limitaciones actuales
 
@@ -1351,6 +1567,7 @@ npm run dev   # http://localhost:3001
 | **MVP 1** ✅ | Pipeline DOCX completo, LT + OpenAI, frontend básico |
 | **MVP 2** ✅ | Perfiles editoriales, prompts parametrizados, análisis editorial, router, quality gates, HITL |
 | **Renovación** ✅ | ADN editorial, reglas de sustitución, contexto enriquecido, corrección macro |
+| **Structural Awareness** ✅ | B.5 extracción estructural DOCX, D.5 corrección grupal, gates estructurales, árbol de estructura |
 | **Fase 3** | PDF born-digital (extracción + corrección + overlay), soporte ODT/RTF |
 | **Fase 4** | OCR para PDFs escaneados (Tesseract / Azure OCR) |
 | **Fase 5** | Autenticación multi-usuario, métricas por organización, Kubernetes, escalado productivo |

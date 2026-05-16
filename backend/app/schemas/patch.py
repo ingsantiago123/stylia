@@ -63,6 +63,13 @@ class PatchListItem(BaseModel):
     # Renovación S0
     correction_phase: str | None = None
     substitution_rule_id: str | None = None
+    # Nivel 1: conciencia estructural
+    paragraph_type: str | None = None
+    # Nivel 2/3: agrupación grupal (listas/tablas)
+    group_id: UUID | None = None
+    group_call_index: int | None = None
+    group_call_id: str | None = None
+    structural_role: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -110,6 +117,13 @@ class PatchDetail(BaseModel):
     # Renovación S0
     correction_phase: str | None = None
     substitution_rule_id: str | None = None
+    # Nivel 1: conciencia estructural
+    paragraph_type: str | None = None
+    # Nivel 2/3: agrupación grupal (listas/tablas)
+    group_id: UUID | None = None
+    group_call_index: int | None = None
+    group_call_id: str | None = None
+    structural_role: str | None = None
 
     model_config = {"from_attributes": True}
 

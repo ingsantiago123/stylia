@@ -36,6 +36,8 @@ class StyleProfileCreate(BaseModel):
     register_constraints: list[str] | None = None
     macro_correction_level: str | None = Field(None, pattern="^(none|light|full)$")
     correction_phases: list[str] | None = None
+    # Activar/desactivar bloques del prompt (UI granular). null = todos activos.
+    prompt_blocks: dict[str, bool] | None = None
 
 
 class StyleProfileUpdate(BaseModel):
@@ -64,6 +66,8 @@ class StyleProfileUpdate(BaseModel):
     register_constraints: list[str] | None = None
     macro_correction_level: str | None = Field(None, pattern="^(none|light|full)$")
     correction_phases: list[str] | None = None
+    # Activar/desactivar bloques del prompt (UI granular). null = todos activos.
+    prompt_blocks: dict[str, bool] | None = None
 
 
 class StyleProfileResponse(BaseModel):
@@ -96,6 +100,7 @@ class StyleProfileResponse(BaseModel):
     register_constraints: list[str] = Field(default_factory=list)
     macro_correction_level: str = "none"
     correction_phases: list[str] = Field(default_factory=lambda: ["lt", "llm_micro", "audit"])
+    prompt_blocks: dict[str, bool] | None = None
     created_at: datetime
     updated_at: datetime
 

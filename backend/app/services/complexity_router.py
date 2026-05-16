@@ -19,6 +19,8 @@ class CorrectionRoute(Enum):
     SKIP = "skip"
     CHEAP = "cheap"
     EDITORIAL = "editorial"
+    GROUP_LIST = "group_list"
+    GROUP_TABLE = "group_table"
 
 
 @dataclass
@@ -31,7 +33,10 @@ class RouteDecision:
 _SKIP_TYPES = {"titulo", "subtitulo", "encabezado", "footer", "vacio"}
 
 # Tipos de párrafo que usan ruta barata
-_CHEAP_TYPES = {"celda_tabla", "lista", "pie_imagen"}
+_CHEAP_TYPES = {
+    "celda_tabla", "celda_tabla_header", "celda_tabla_total",
+    "lista", "pie_imagen", "nota_pie",
+}
 
 # Heurística: oraciones subordinadas anidadas (comas, conjunciones)
 _COMPLEX_SYNTAX_PATTERN = re.compile(
@@ -152,3 +157,41 @@ def compute_section_position(
                 return "middle", False, sec
 
     return None, False, None
+
+
+# =====================================================================
+# Routing GRUPAL (Nivel 2/3)
+# =====================================================================
+
+def route_group(batch, profile: dict | None = None) -> RouteDecision:
+    """Decide la ruta de corrección para un grupo (lista/tabla).
+
+    Args:
+        batch: ElementGroupBatch con .group_type, .metadata, .blocks
+        profile: perfil editorial del documento
+    """
+    intervention = (profile or {}).get("intervention_level", "moderada")
+    group_type = getattr(batch, "group_type", None)
+    metadata = getattr(batch, "metadata", {}) or {}
+    blocks = getattr(batch, "blocks", []) or []
+
+    if group_type == "list":
+        total_chars = sum(len((b.original_text or "")) for b in blocks)
+        parallel_hint = metadata.get("parallel_structure_hint", "") or ""
+        if (
+            parallel_hint.startswith("consistent")
+            and total_chars < 600
+            and intervention != "agresiva"
+        ):
+            return RouteDecision(CorrectionRoute.GROUP_LIST, "cheap_group")
+        return RouteDecision(CorrectionRoute.GROUP_LIST, "editorial_group")
+
+    if group_type == "table":
+        n_rows = metadata.get("num_rows") or 1
+        n_cols = metadata.get("num_cols") or 1
+        cells = n_rows * n_cols
+        if cells > 60:
+            return RouteDecision(CorrectionRoute.GROUP_TABLE, "editorial_group_partitioned")
+        return RouteDecision(CorrectionRoute.GROUP_TABLE, "editorial_group")
+
+    return RouteDecision(CorrectionRoute.CHEAP, "fallback")

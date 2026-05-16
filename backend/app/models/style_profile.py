@@ -125,6 +125,15 @@ class DocumentProfile(Base):
         JSONB, nullable=False, default=lambda: ["lt", "llm_micro", "audit"],
         comment='Fases activas: ["substitutions","lt","llm_micro","llm_macro","audit"]'
     )
+    # Configuración granular del prompt (Nivel 2/3 — UI)
+    # Mapa de bloque → bool. Si una flag está ausente, se asume True.
+    # Claves válidas: global_context, profile_header, ubicacion,
+    # structural_rules, context_prev, substitution_rules,
+    # register_constraints, idiolect_protections, protected_regions.
+    prompt_blocks: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment='Activar/desactivar bloques del prompt: {"context_prev": true, ...}'
+    )
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

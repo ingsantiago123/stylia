@@ -159,6 +159,26 @@ class Patch(Base):
         comment="Regiones protegidas detectadas en este párrafo: [{start, end, reason, text}]"
     )
 
+    # Nivel 2/3 — agrupación grupal (lista/tabla) ============================
+    # Si group_id no es null, este patch fue generado en una llamada LLM
+    # grupal junto con los demás patches que comparten el mismo group_id.
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True,
+        comment="ID del ElementGroup (lista/tabla) al que pertenece este patch"
+    )
+    group_call_index: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+        comment="Índice 0..N-1 dentro del grupo (orden lineal)"
+    )
+    group_call_id: Mapped[str | None] = mapped_column(
+        String(50), nullable=True,
+        comment="ID de la llamada LLM grupal (audit trail)"
+    )
+    structural_role: Mapped[str | None] = mapped_column(
+        String(30), nullable=True,
+        comment="list_item:decimal | table_cell:header | etc — rol estructural del patch"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -169,6 +189,7 @@ class Patch(Base):
     __table_args__ = (
         UniqueConstraint("block_id", "version", name="uq_patches_block_version"),
         Index("idx_patches_review", "review_status"),
+        Index("idx_patches_group", "group_id"),
     )
 
     def __repr__(self) -> str:

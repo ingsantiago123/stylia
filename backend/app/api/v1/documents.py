@@ -670,7 +670,7 @@ async def list_corrections(
     Lista correcciones de un documento con filtros opcionales.
     """
     query = (
-        select(Patch, Block.block_no)
+        select(Patch, Block.block_no, Block.paragraph_type)
         .join(Block)
         .join(Page)
         .where(Page.doc_id == doc_id)
@@ -693,7 +693,7 @@ async def list_corrections(
     }
 
     items = []
-    for patch, block_no in rows:
+    for patch, block_no, paragraph_type in rows:
         patch_cost = cost_by_paragraph.get(patch.paragraph_index) if patch.paragraph_index is not None else None
         items.append(PatchListItem(
             id=patch.id,
@@ -724,6 +724,11 @@ async def list_corrections(
             edited_text=patch.edited_text if hasattr(patch, 'edited_text') else None,
             edited_at=patch.edited_at if hasattr(patch, 'edited_at') else None,
             recorrection_count=patch.recorrection_count if hasattr(patch, 'recorrection_count') else 0,
+            paragraph_type=paragraph_type,
+            group_id=getattr(patch, "group_id", None),
+            group_call_index=getattr(patch, "group_call_index", None),
+            group_call_id=getattr(patch, "group_call_id", None),
+            structural_role=getattr(patch, "structural_role", None),
         ))
 
     return items
@@ -800,7 +805,7 @@ async def get_single_correction(
 ):
     """Obtiene un patch individual (para polling post-recorrección)."""
     result = await db.execute(
-        select(Patch, Block.block_no)
+        select(Patch, Block.block_no, Block.paragraph_type)
         .join(Block, Patch.block_id == Block.id)
         .join(Page, Block.page_id == Page.id)
         .where(Page.doc_id == doc_id, Patch.id == patch_id)
@@ -808,7 +813,7 @@ async def get_single_correction(
     row = result.first()
     if not row:
         raise HTTPException(404, "Corrección no encontrada")
-    patch, block_no = row
+    patch, block_no, paragraph_type = row
 
     # Costo
     patch_cost = None
@@ -848,6 +853,11 @@ async def get_single_correction(
         edited_text=patch.edited_text if hasattr(patch, 'edited_text') else None,
         edited_at=patch.edited_at if hasattr(patch, 'edited_at') else None,
         recorrection_count=patch.recorrection_count if hasattr(patch, 'recorrection_count') else 0,
+        paragraph_type=paragraph_type,
+        group_id=getattr(patch, "group_id", None),
+        group_call_index=getattr(patch, "group_call_index", None),
+        group_call_id=getattr(patch, "group_call_id", None),
+        structural_role=getattr(patch, "structural_role", None),
     )
 
 
@@ -1279,11 +1289,18 @@ async def get_page_annotations(
     mode: str = "final",
     db: AsyncSession = Depends(get_db),
 ):
-    """Metadata de anotaciones para overlay hover. mode=candidate para vista candidata."""
+    """
+    Metadata de anotaciones para overlay hover.
+    mode=candidate → anotaciones del candidato (preview_candidate)
+    mode=original  → anotaciones del original (palabras eliminadas/cambiadas)
+    mode=final     → anotaciones del documento final
+    """
     await _get_doc_or_404(db, doc_id)
 
     if mode == "candidate":
         annot_key = f"pages/{doc_id}/annotations_candidate/{page_no}.json"
+    elif mode == "original":
+        annot_key = f"pages/{doc_id}/annotations_original/{page_no}.json"
     else:
         annot_key = f"pages/{doc_id}/annotations/{page_no}.json"
 
@@ -1886,6 +1903,104 @@ async def get_document_analysis(doc_id: UUID, db: AsyncSession = Depends(get_db)
         paragraph_classifications=paragraph_classifications,
         stats=stats,
     )
+
+
+@router.get("/documents/{doc_id}/structure")
+async def get_document_structure(doc_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Devuelve el árbol estructural de un documento (Nivel 3).
+
+    Combina las secciones detectadas (Etapa C) con los grupos
+    estructurales (B.5: listas y tablas) para que el frontend pueda
+    renderizar un árbol navegable Sección → Subsección → Lista/Tabla.
+    """
+    from app.models.element_group import ElementGroup
+
+    await _get_doc_or_404(db, doc_id)
+    sections_res = await db.execute(
+        select(SectionSummary)
+        .where(SectionSummary.doc_id == doc_id)
+        .order_by(SectionSummary.section_index)
+    )
+    sections = sections_res.scalars().all()
+
+    groups_res = await db.execute(
+        select(ElementGroup)
+        .where(ElementGroup.document_id == doc_id)
+        .order_by(ElementGroup.created_at)
+    )
+    groups = groups_res.scalars().all()
+
+    # Contar bloques y patches por grupo
+    block_counts_res = await db.execute(
+        select(Block.element_group_id, func.count(Block.id))
+        .join(Page, Block.page_id == Page.id)
+        .where(Page.doc_id == doc_id, Block.element_group_id.isnot(None))
+        .group_by(Block.element_group_id)
+    )
+    blocks_per_group = {gid: cnt for gid, cnt in block_counts_res.all()}
+
+    patches_count_res = await db.execute(
+        select(Patch.group_id, func.count(Patch.id))
+        .where(Patch.group_id.isnot(None))
+        .group_by(Patch.group_id)
+    )
+    patches_per_group = {gid: cnt for gid, cnt in patches_count_res.all()}
+
+    def _serialize_group(g: ElementGroup) -> dict:
+        meta = g.metadata_json or {}
+        return {
+            "id": str(g.id),
+            "group_type": g.group_type,
+            "docx_native_id": g.docx_native_id,
+            "section_id": str(g.section_id) if g.section_id else None,
+            "item_count": g.item_count,
+            "blocks_count": blocks_per_group.get(g.id, 0),
+            "patches_count": patches_per_group.get(g.id, 0),
+            "correction_status": g.correction_status,
+            "metadata": meta,
+            "label": _group_label(g, meta),
+        }
+
+    section_payload: list[dict] = []
+    groups_by_section: dict = {}
+    for g in groups:
+        groups_by_section.setdefault(g.section_id, []).append(g)
+
+    for s in sections:
+        section_groups = groups_by_section.get(s.id, [])
+        section_payload.append({
+            "id": str(s.id),
+            "section_index": s.section_index,
+            "section_title": s.section_title,
+            "start_paragraph": s.start_paragraph,
+            "end_paragraph": s.end_paragraph,
+            "groups": [_serialize_group(g) for g in section_groups],
+        })
+
+    # Grupos huérfanos (sin section_id)
+    orphan_groups = groups_by_section.get(None, [])
+
+    return {
+        "doc_id": str(doc_id),
+        "sections": section_payload,
+        "orphan_groups": [_serialize_group(g) for g in orphan_groups],
+        "totals": {
+            "sections": len(sections),
+            "lists": sum(1 for g in groups if g.group_type == "list"),
+            "tables": sum(1 for g in groups if g.group_type == "table"),
+        },
+    }
+
+
+def _group_label(group, metadata: dict) -> str:
+    if group.group_type == "list":
+        fmt = metadata.get("format_type") or "bullet"
+        return f"Lista ({fmt}, {group.item_count} ítems)"
+    if group.group_type == "table":
+        rows = metadata.get("num_rows") or 0
+        cols = metadata.get("num_cols") or 0
+        return f"Tabla {rows}×{cols}"
+    return group.group_type or "grupo"
 
 
 @router.get("/documents/{doc_id}/correction-flow")
