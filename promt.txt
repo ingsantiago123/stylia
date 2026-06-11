@@ -1,0 +1,21 @@
+necesito que me hagas un diagnistico completo y extructural sobre el sistema de stylia
+tanto su pipeline base ded atos y demas sistemas que lo integran, el software debe ser un sistema para
+la correccion de estilos y calidad del mismo documento
+se supone que a grandes pasos su pipeline deberia poder 
+1 analizar toda la extructura completa del documento osea su extrucrtra
+saber donde el documento esta usando una tabla una lista donde existe una enumeracion
+donde tiene una imagen un parrafo un titulo una seccion etc mejor dicho todos los componentes que puede tener un 
+texto, libro informe, cuento etc,  el sistema de correcion deberia plicar distintos como sub pipelines
+entonces deberia analiza una tabla de froma distinta aun parraf, analizar los listados
+secciones saber cuando el texto al momento de generarse como tal el pdf o el docx el texto se pasa a otra pagina
+deberia saber si inicia de una forma u tra para tener contuinuidad, si hace una analisis editorial ´pero se queda corto 
+el funcionamineto como tal deberia actuar de una forma muy distinta
+para asegurar que al momento de la corrreccion de estilos no se rompa como ta
+deberia sabe ejemplo si hay una enumeracion que siga un ordes un formato, que las tablas se diistribuyan bien
+y los cambios qe hace deebbria n ser efectuados de tal forma que si sea una correccion
+de estilos que si exista un analisis del pedazo de texto como tal, cad aprte tenga un contexto de en donde esta que funcion cumlet para ssber si efectivavemente se debe hacer un cambio  si no, ademas de eso
+se debe asegurar el sistema para que muestre como tal los errores, y todo loq ue colleva como tal una correccion de estilos
+
+ademas hay muchos componentes partes internas que se supone que ejecutan acciones especificas en el codigo que debian no se intercepta
+como tal las extructura o foramuar promto etc pero la verdad tod el sistema es mediocre analizalo y dame un informe completo en formato.md en la raiz del proyecto con 
+todo lo malo y unplan hiper detallado de como arreglar las csas que fallan 

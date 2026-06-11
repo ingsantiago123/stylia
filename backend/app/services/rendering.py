@@ -614,12 +614,17 @@ def _apply_text_to_paragraph_runs(paragraph, new_text: str) -> bool:
     if old_text == new_text:
         return False
 
-    # Detección quirúrgica de hipervínculos: solo omitir si la corrección los toca
+    # Fase 0: omitir SIEMPRE párrafos con hipervínculos. python-docx excluye
+    # los runs de w:hyperlink de paragraph.runs pero los incluye en
+    # paragraph.text → escribir new_text (que contiene el texto del enlace)
+    # en runs[0] sin vaciar el hyperlink DUPLICABA el texto del enlace.
+    # Hasta que exista edición a nivel de run (Fase 6 del plan), la única
+    # opción segura es no tocar estos párrafos.
     hl_ranges = _get_hyperlink_text_ranges(paragraph)
-    if hl_ranges and _modification_overlaps_hyperlink(old_text, new_text, hl_ranges):
+    if hl_ranges:
         logger.info(
-            f"Párrafo omitido: la corrección toca un hipervínculo "
-            f"(rangos hl={hl_ranges})"
+            f"Párrafo omitido: contiene hipervínculos (edición no destructiva "
+            f"no disponible para hyperlinks; rangos={hl_ranges})"
         )
         return False
 
@@ -691,26 +696,35 @@ def _get_paragraph_by_location(doc: DocxDocument, location: str):
 # =====================================================================
 import re as _re_rendering_group
 
+# Fase 0: SOLO viñetas y numeración decimal. El patrón anterior incluía
+# `[a-zA-Z][.)]` y romanos, lo que corrompía texto legítimo:
+# "E. coli es…" → "coli es…", "I. Kant sostiene…" → "Kant sostiene…".
 _RENDER_LIST_PREFIX = _re_rendering_group.compile(
-    r"^\s*(?:[•·▪‒–—●\-\*]|\d{1,3}[.)]|[a-zA-Z][.)]|[ivxlcdmIVXLCDM]+[.)])\s+"
+    r"^\s*(?:[•·▪‒–—●\-\*]|\d{1,3}[.)])\s+"
 )
 
 
-def _strip_list_prefix(text: str) -> str:
+def _strip_list_prefix(text: str, original: str | None = None) -> str:
     """Quita prefijos de viñeta/numeración que el LLM grupal pudo haber dejado.
 
     Defensivo: el prompt grupal pide "escribe SOLO el texto del ítem", pero
     si el LLM falla no duplicaremos viñetas en el DOCX final.
+
+    Fase 0: si el texto ORIGINAL ya empezaba con el mismo patrón, el prefijo
+    es contenido del autor (no un artefacto del LLM) y se preserva.
     """
     if not text:
+        return text
+    if original and _RENDER_LIST_PREFIX.match(original):
         return text
     return _RENDER_LIST_PREFIX.sub("", text, count=1)
 
 
-def _apply_individual_patch(doc, patch: dict) -> tuple[bool, str]:
+def _apply_individual_patch(doc, patch: dict) -> tuple[bool, str, str]:
     """Aplica un patch individual al DOCX abierto.
 
-    Returns (applied, reason) — reason en {'ok', 'no_paragraph', 'mismatch'}.
+    Returns (applied, reason, detail) — reason en {'ok', 'no_paragraph',
+    'mismatch'}; detail trae el texto actual del párrafo en mismatch (para log).
     """
     location = patch["location"]
     original_text = patch["original_text"]
@@ -718,40 +732,45 @@ def _apply_individual_patch(doc, patch: dict) -> tuple[bool, str]:
 
     paragraph = _get_paragraph_by_location(doc, location)
     if paragraph is None:
-        return False, "no_paragraph"
+        return False, "no_paragraph", ""
 
     current_text = paragraph.text.strip()
     if current_text != original_text:
-        return False, "mismatch"
+        return False, "mismatch", current_text[:80]
 
     if _apply_text_to_paragraph_runs(paragraph, corrected_text):
-        return True, "ok"
-    return False, "ok"  # no rompió, simplemente sin runs
+        return True, "ok", ""
+    return False, "ok", ""  # no rompió, simplemente sin runs
 
 
-def _apply_group_patches(doc, group_id, patches: list[dict]) -> tuple[int, int]:
+def _apply_group_patches(doc, group_id, patches: list[dict]) -> tuple[int, int, list[str]]:
     """Aplica un set de patches que pertenecen al mismo grupo.
 
     Aplica en orden por group_call_index. Si el structural_role indica
     lista MANUAL ("list_item:*:manual"), preserva el prefijo en el texto
     (porque la viñeta es parte del contenido, no del DOCX). En el resto,
-    sanitiza defensivamente cualquier prefijo de lista que el LLM haya
-    dejado.
+    sanitiza prefijos SOLO si el original no los traía (Fase 0).
+
+    Returns (applied, skipped, applied_patch_ids).
     """
     sorted_patches = sorted(
         patches, key=lambda p: p.get("group_call_index", 0) or 0
     )
     applied = 0
     skipped = 0
+    applied_ids: list[str] = []
     for patch in sorted_patches:
         patch_clean = dict(patch)
         role = patch.get("structural_role") or ""
         is_manual = role.endswith(":manual")
         if not is_manual:
-            patch_clean["corrected_text"] = _strip_list_prefix(patch["corrected_text"])
-        ok, reason = _apply_individual_patch(doc, patch_clean)
+            patch_clean["corrected_text"] = _strip_list_prefix(
+                patch["corrected_text"], original=patch.get("original_text")
+            )
+        ok, reason, _detail = _apply_individual_patch(doc, patch_clean)
         if ok:
             applied += 1
+            applied_ids.extend(patch.get("patch_ids") or [])
             logger.debug(
                 f"Grupo {group_id} idx={patch.get('group_call_index')} aplicado"
             )
@@ -760,10 +779,10 @@ def _apply_group_patches(doc, group_id, patches: list[dict]) -> tuple[int, int]:
             logger.warning(
                 f"Grupo {group_id} idx={patch.get('group_call_index')}: {reason}"
             )
-    return applied, skipped
+    return applied, skipped, applied_ids
 
 
-def _apply_docx_patches(docx_path: str, patches: list[dict]) -> str:
+def _apply_docx_patches(docx_path: str, patches: list[dict]) -> tuple[str, list[str]]:
     """
     Aplica correcciones por párrafo al DOCX original.
     Cada patch tiene {paragraph_index, location, original_text, corrected_text}.
@@ -773,12 +792,13 @@ def _apply_docx_patches(docx_path: str, patches: list[dict]) -> str:
     sanitización defensiva de prefijos de viñeta/numeración.
 
     Verifica que el texto original coincida antes de aplicar.
-    Retorna la ruta del DOCX corregido.
+    Retorna (ruta del DOCX corregido, lista de patch_ids realmente aplicados).
     """
     from collections import defaultdict as _dd
     doc = DocxDocument(docx_path)
     changes_count = 0
     skipped_count = 0
+    applied_patch_ids: list[str] = []
 
     grouped: dict = _dd(list)
     individual: list[dict] = []
@@ -790,15 +810,17 @@ def _apply_docx_patches(docx_path: str, patches: list[dict]) -> str:
 
     # 1) Grupos primero, para resolver conflictos antes que los individuales
     for gid, gpatches in grouped.items():
-        a, s = _apply_group_patches(doc, gid, gpatches)
+        a, s, gids = _apply_group_patches(doc, gid, gpatches)
         changes_count += a
         skipped_count += s
+        applied_patch_ids.extend(gids)
 
     # 2) Patches individuales (path histórico)
     for patch in individual:
-        ok, reason = _apply_individual_patch(doc, patch)
+        ok, reason, detail = _apply_individual_patch(doc, patch)
         if ok:
             changes_count += 1
+            applied_patch_ids.extend(patch.get("patch_ids") or [])
             logger.debug(f"Párrafo {patch['location']} corregido: {patch['source']}")
         else:
             skipped_count += 1
@@ -806,7 +828,7 @@ def _apply_docx_patches(docx_path: str, patches: list[dict]) -> str:
                 logger.warning(
                     f"Texto no coincide en {patch['location']}: "
                     f"esperado='{patch['original_text'][:50]}...' "
-                    f"actual='{(doc.paragraphs[0].text if doc.paragraphs else '')[:0]}'"
+                    f"actual='{detail}...'"
                 )
             else:
                 logger.warning(f"No se encontró párrafo en ubicación {patch['location']}")
@@ -819,7 +841,7 @@ def _apply_docx_patches(docx_path: str, patches: list[dict]) -> str:
         f"DOCX corregido: {changes_count} párrafos modificados, "
         f"{skipped_count} omitidos → {output_path}"
     )
-    return output_path
+    return output_path, applied_patch_ids, changes_count
 
 
 def render_docx_first_sync(
@@ -872,7 +894,9 @@ def render_docx_first_sync(
         logger.info(f"Documento {doc_id}: {len(all_patches)} párrafos a corregir (mode={apply_mode})")
 
         # Aplicar correcciones por párrafo
-        corrected_docx_path = _apply_docx_patches(local_docx, all_patches)
+        corrected_docx_path, applied_patch_ids, applied_count = _apply_docx_patches(
+            local_docx, all_patches
+        )
 
         # Convertir DOCX corregido a PDF
         corrected_pdf_path = convert_docx_to_pdf(corrected_docx_path, tmpdir)
@@ -915,5 +939,8 @@ def render_docx_first_sync(
         return {
             "corrected_docx_uri": corrected_docx_key,
             "corrected_pdf_uri": corrected_pdf_key,
-            "changes_count": len(all_patches),
+            # H4: conteo REAL de párrafos aplicados (antes reportaba el total
+            # de patches aunque la mitad se hubiera omitido por mismatch).
+            "changes_count": applied_count,
+            "applied_patch_ids": applied_patch_ids,
         }

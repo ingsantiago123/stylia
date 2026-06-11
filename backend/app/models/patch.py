@@ -75,6 +75,13 @@ class Patch(Base):
         Integer, nullable=True,
         comment="Índice del párrafo en el DOCX, para vincular con llm_usage"
     )
+    # Fase 0 (H1): ubicación DOCX nativa persistida en BD. Antes vivía solo
+    # en patches_docx.json (MinIO), lo que rompía el render de patches
+    # grupales (paragraph_index=None) y dependía de un artefacto externo.
+    location: Mapped[str | None] = mapped_column(
+        String(80), nullable=True,
+        comment="Ubicación DOCX nativa (body:N | table:T:R:C:P | header:S:P | footer:S:P)"
+    )
     route_taken: Mapped[str | None] = mapped_column(
         String(15), nullable=True,
         comment="skip|cheap|editorial — ruta del complexity router (Lote 4)"

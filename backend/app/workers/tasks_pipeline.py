@@ -7,11 +7,9 @@ import json
 import logging
 import re
 import socket
-import tempfile
 import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from pathlib import Path
 
 from sqlalchemy import create_engine, delete, select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -316,6 +314,13 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
                     return best_block
 
         if best_score < 0.3:
+            # Instrumentación Fase 0: este fallback ancla el patch a un bloque
+            # ARBITRARIO. Cuantificarlo es prerequisito para eliminarlo.
+            logger.warning(
+                f"[Persist] fallback_first_block: patch sin match fiable "
+                f"(score={best_score:.2f}, para_idx={para_idx}) → anclado a bloque "
+                f"arbitrario de página estimada {est_page}"
+            )
             if blocks_by_page.get(est_page):
                 return blocks_by_page[est_page][0][0]
             return all_blocks_flat[0][0]
@@ -326,7 +331,10 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
     patch_version = 1
 
     for patch_data in docx_patches:
-        para_idx = patch_data.get("paragraph_index", 0) or 0
+        # H1: preservar None en patches grupales — forzarlos a 0 los hacía
+        # colapsar entre sí en la deduplicación del render candidato.
+        para_idx = patch_data.get("paragraph_index")
+        p_location = patch_data.get("location") or None
 
         # Nivel 2/3 — patches grupales vienen con block_id explícito
         db_block = None
@@ -337,7 +345,7 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
 
         if db_block is None:
             db_block = _find_best_block(
-                patch_data.get("original_text", ""), para_idx, total_paragraphs
+                patch_data.get("original_text", ""), para_idx or 0, total_paragraphs
             )
         if not db_block:
             continue
@@ -386,6 +394,7 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
                     protected_regions_snapshot=p_protected,
                     corrected_pass1_text=patch_data.get("corrected_pass1_text"),
                     pass2_audit_json=patch_data.get("pass2_audit_json"),
+                    location=p_location,
                     group_id=p_group_id,
                     group_call_index=p_group_call_index,
                     group_call_id=p_group_call_id,
@@ -419,6 +428,7 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
                 protected_regions_snapshot=p_protected,
                 corrected_pass1_text=patch_data.get("corrected_pass1_text"),
                 pass2_audit_json=patch_data.get("pass2_audit_json"),
+                location=p_location,
                 group_id=p_group_id,
                 group_call_index=p_group_call_index,
                 group_call_id=p_group_call_id,
@@ -480,25 +490,31 @@ def _run_candidate_render(db: Session, doc_id: str) -> None:
         _cleanup_progress(db, doc_id)
         return
 
-    # Agrupar patch_ids por paragraph_index (múltiples patches por párrafo)
-    para_patch_ids: dict[int, list[str]] = {}
+    # H1: la identidad de un párrafo es su location (BD); paragraph_index es
+    # solo fallback legacy. Antes, todos los patches grupales (paragraph_index
+    # NULL) colapsaban en la clave 0 y se descartaban del render.
+    def _dedup_key(p) -> str:
+        if p.location:
+            return f"loc:{p.location}"
+        return f"idx:{p.paragraph_index if p.paragraph_index is not None else -1}"
+
+    para_patch_ids: dict[str, list[str]] = {}
     for p in all_patch_rows:
-        pidx = p.paragraph_index or 0
-        para_patch_ids.setdefault(pidx, []).append(str(p.id))
+        para_patch_ids.setdefault(_dedup_key(p), []).append(str(p.id))
 
     # Construir dicts con patch_ids y review_status
-    # Deduplicate by paragraph_index: un dict por párrafo (patches comparten original/corrected_text)
-    seen_paragraphs: set[int] = set()
+    # Deduplicar por identidad de párrafo (patches comparten original/corrected_text)
+    seen_paragraphs: set[str] = set()
     docx_patches: list[dict] = []
     for p in all_patch_rows:
-        pidx = p.paragraph_index or 0
-        if pidx in seen_paragraphs:
+        key = _dedup_key(p)
+        if key in seen_paragraphs:
             continue
-        seen_paragraphs.add(pidx)
+        seen_paragraphs.add(key)
         docx_patches.append({
-            "patch_ids": para_patch_ids.get(pidx, []),
-            "paragraph_index": pidx,
-            "location": "",
+            "patch_ids": para_patch_ids.get(key, []),
+            "paragraph_index": p.paragraph_index if p.paragraph_index is not None else 0,
+            "location": p.location or "",
             "original_text": p.original_text,
             "corrected_text": p.corrected_text,
             "source": p.source,
@@ -508,22 +524,28 @@ def _run_candidate_render(db: Session, doc_id: str) -> None:
             "severity": p.severity,
             "explanation": p.explanation,
             "confidence": p.confidence,
+            "group_id": str(p.group_id) if p.group_id else None,
+            "group_call_index": p.group_call_index,
+            "structural_role": p.structural_role,
         })
 
-    # Cargar locations desde MinIO (patches_docx.json tiene location strings)
-    try:
-        patch_key = f"docx/{doc_id}/patches_docx.json"
-        if minio_client.file_exists(patch_key):
-            stored_patches = json.loads(minio_client.download_file(patch_key).decode("utf-8"))
-            location_index: dict[tuple, str] = {}
-            for sp in stored_patches:
-                key = (sp.get("paragraph_index", 0), sp.get("original_text", "")[:50])
-                location_index[key] = sp.get("location", "")
-            for dp in docx_patches:
-                key = (dp["paragraph_index"], dp["original_text"][:50])
-                dp["location"] = location_index.get(key, "")
-    except Exception as e:
-        logger.warning(f"[Candidato] Error cargando locations de MinIO: {e}")
+    # Fallback legacy: documentos procesados antes de la columna `location`
+    # reconstruyen la ubicación desde MinIO (solo entradas sin location).
+    missing_loc = [dp for dp in docx_patches if not dp["location"]]
+    if missing_loc:
+        try:
+            patch_key = f"docx/{doc_id}/patches_docx.json"
+            if minio_client.file_exists(patch_key):
+                stored_patches = json.loads(minio_client.download_file(patch_key).decode("utf-8"))
+                location_index: dict[tuple, str] = {}
+                for sp in stored_patches:
+                    key = (sp.get("paragraph_index", 0), sp.get("original_text", "")[:50])
+                    location_index[key] = sp.get("location", "")
+                for dp in missing_loc:
+                    key = (dp["paragraph_index"], dp["original_text"][:50])
+                    dp["location"] = location_index.get(key, "")
+        except Exception as e:
+            logger.warning(f"[Candidato] Error cargando locations de MinIO: {e}")
 
     logger.info(f"[Candidato] {len(docx_patches)} párrafos a renderizar como candidato")
 
@@ -588,15 +610,32 @@ def _run_stage_e(db: Session, doc_id: str, apply_mode: str = "accepted_and_auto"
     ).scalars().all()
 
     # Convertir a dicts para render_docx_first_sync
-    # Si hay edited_text, usar eso en lugar de corrected_text
+    # H1: location, group_id y structural_role salen de BD — antes los patches
+    # grupales llegaban aquí sin agrupación ni ubicación y nunca se aplicaban.
+    # Si hay edited_text, usar eso en lugar de corrected_text.
+    # Deduplicar por identidad (varios Patch por párrafo comparten texto completo).
+    seen_keys: set[str] = set()
     docx_patches = []
+    patch_ids_by_key: dict[str, list[str]] = {}
     for p in all_patch_rows:
+        key = f"loc:{p.location}" if p.location else (
+            f"idx:{p.paragraph_index if p.paragraph_index is not None else -1}"
+        )
+        patch_ids_by_key.setdefault(key, []).append(str(p.id))
+    for p in all_patch_rows:
+        key = f"loc:{p.location}" if p.location else (
+            f"idx:{p.paragraph_index if p.paragraph_index is not None else -1}"
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
         final_text = p.corrected_text
         if hasattr(p, 'edited_text') and p.edited_text:
             final_text = p.edited_text
         docx_patches.append({
-            "paragraph_index": p.paragraph_index or 0,
-            "location": "",
+            "patch_ids": patch_ids_by_key.get(key, []),
+            "paragraph_index": p.paragraph_index if p.paragraph_index is not None else 0,
+            "location": p.location or "",
             "original_text": p.original_text,
             "corrected_text": final_text,
             "source": p.source,
@@ -606,24 +645,28 @@ def _run_stage_e(db: Session, doc_id: str, apply_mode: str = "accepted_and_auto"
             "severity": p.severity,
             "explanation": p.explanation,
             "confidence": p.confidence,
+            "group_id": str(p.group_id) if p.group_id else None,
+            "group_call_index": p.group_call_index,
+            "structural_role": p.structural_role,
         })
 
-    # Load location from MinIO patches file (has location field)
-    try:
-        patch_key = f"docx/{doc_id}/patches_docx.json"
-        if minio_client.file_exists(patch_key):
-            import json as _json
-            stored_patches = _json.loads(minio_client.download_file(patch_key).decode("utf-8"))
-            # Build location index by paragraph_index + original_text prefix
-            location_index: dict[tuple, str] = {}
-            for sp in stored_patches:
-                key = (sp.get("paragraph_index", 0), sp.get("original_text", "")[:50])
-                location_index[key] = sp.get("location", "")
-            for dp in docx_patches:
-                key = (dp["paragraph_index"], dp["original_text"][:50])
-                dp["location"] = location_index.get(key, "")
-    except Exception as e:
-        logger.warning(f"[Etapa E] Error cargando locations de MinIO: {e}")
+    # Fallback legacy: documentos sin columna location poblada
+    missing_loc = [dp for dp in docx_patches if not dp["location"]]
+    if missing_loc:
+        try:
+            patch_key = f"docx/{doc_id}/patches_docx.json"
+            if minio_client.file_exists(patch_key):
+                import json as _json
+                stored_patches = _json.loads(minio_client.download_file(patch_key).decode("utf-8"))
+                location_index: dict[tuple, str] = {}
+                for sp in stored_patches:
+                    key = (sp.get("paragraph_index", 0), sp.get("original_text", "")[:50])
+                    location_index[key] = sp.get("location", "")
+                for dp in missing_loc:
+                    key = (dp["paragraph_index"], dp["original_text"][:50])
+                    dp["location"] = location_index.get(key, "")
+        except Exception as e:
+            logger.warning(f"[Etapa E] Error cargando locations de MinIO: {e}")
 
     if not docx_patches:
         logger.info("[Etapa E] Sin correcciones aprobadas — documento sin cambios")
@@ -650,15 +693,26 @@ def _run_stage_e(db: Session, doc_id: str, apply_mode: str = "accepted_and_auto"
         apply_mode="all",  # Already filtered above
     )
 
-    # Marcar patches aprobados como aplicados
-    db.execute(
-        update(Patch)
-        .where(Patch.block_id.in_(
-            select(Block.id).join(Page).where(Page.doc_id == doc_id)
-        ))
-        .where(Patch.review_status.in_(accepted_statuses))
-        .values(applied=True)
+    # H4: marcar como aplicados SOLO los patches que el renderer aplicó de
+    # verdad. Antes se marcaba en bloque todo lo aprobado, aunque el render
+    # los hubiera omitido por mismatch/no_paragraph — la BD mentía.
+    applied_ids = render_result.get("applied_patch_ids") or []
+    if applied_ids:
+        db.execute(
+            update(Patch)
+            .where(Patch.id.in_(applied_ids))
+            .values(applied=True)
+        )
+    _applied_set = set(applied_ids)
+    skipped_in_render = sum(
+        1 for dp in docx_patches
+        if not (_applied_set & set(dp.get("patch_ids") or []))
     )
+    if skipped_in_render > 0:
+        logger.warning(
+            f"[Etapa E] {skipped_in_render} párrafos aprobados NO se aplicaron "
+            f"(mismatch/no_paragraph) — quedan con applied=False"
+        )
 
     # Marcar páginas como renderizadas
     for page in pages:
@@ -712,17 +766,33 @@ def _dispatch_parallel_correction(
         True  → lotes despachados; el chord maneja Etapa E + job completion.
         False → documento pequeño (1 lote); usar ruta secuencial.
     """
+    import io as _io
     from docx import Document as DocxDocument
-    from app.services.correction import _collect_all_paragraphs
+    from app.services.correction import (
+        _collect_all_paragraphs,
+        compute_grouped_paragraph_indexes_sync,
+    )
 
-    # Descargar DOCX y recolectar párrafos
+    # Descargar DOCX y recolectar párrafos (BytesIO: sin tempfile inseguro)
     docx_bytes = _get_cached_docx_bytes(str(doc_id), doc.source_uri)
-    tmpfile = tempfile.mktemp(suffix=".docx")
-    with open(tmpfile, "wb") as f:
-        f.write(docx_bytes)
-    docx_doc = DocxDocument(tmpfile)
-    Path(tmpfile).unlink(missing_ok=True)
+    docx_doc = DocxDocument(_io.BytesIO(docx_bytes))
     all_paragraphs = _collect_all_paragraphs(docx_doc)
+
+    # H3 (Fase 0): párrafos que pertenecen a un ElementGroup (B.5) se omiten
+    # de la pasada individual en TODOS los lotes — antes la ruta paralela
+    # ignoraba por completo la conciencia estructural.
+    grouped_indexes: list[int] = []
+    try:
+        grouped_indexes = sorted(
+            compute_grouped_paragraph_indexes_sync(doc_id, db, all_paragraphs)
+        )
+        if grouped_indexes:
+            logger.info(
+                f"[Etapa D] {len(grouped_indexes)} párrafos agrupados (listas/tablas) "
+                f"se omitirán en los lotes individuales"
+            )
+    except Exception as _gie:
+        logger.warning(f"[Etapa D] No se pudieron computar índices grupales: {_gie}")
 
     language = config.get("language", "es")
     disabled_rules = config.get("lt_disabled_rules", [])
@@ -840,6 +910,7 @@ def _dispatch_parallel_correction(
             language=language,
             disabled_rules=disabled_rules,
             global_context_key=global_context_key,
+            grouped_indexes=grouped_indexes,
         )
         for b_idx, (start, end) in enumerate(batch_boundaries)
     )
@@ -1483,10 +1554,16 @@ def correct_batch_llm(
     disabled_rules: list[str],
     global_context_key: str | None = None,
     context_seed_window: list | None = None,
+    grouped_indexes: list[int] | None = None,
 ) -> str:
     """
     Tarea Celery: Pass 2 (LLM) para un batch de párrafos [start_para..end_para].
     Descarga datos de MinIO, corre LLM secuencial dentro del batch, guarda resultado.
+
+    Args:
+        grouped_indexes: H3 — índices de párrafos que pertenecen a un
+            ElementGroup (lista/tabla); se omiten aquí porque la pasada
+            grupal D.5 los procesa en bloque.
 
     Returns: MinIO key del resultado JSON.
     """
@@ -1562,6 +1639,7 @@ def correct_batch_llm(
             context_seed_window=context_seed_window,
             global_context=global_context_dict,
             term_registry=term_registry_list,
+            grouped_paragraph_indexes=set(grouped_indexes) if grouped_indexes else None,
         )
 
         # Guardar resultado en MinIO
@@ -1730,14 +1808,55 @@ def assemble_correction_results(
             except Exception as e:
                 logger.warning(f"[assemble] Boundary check falló, continuando: {e}")
 
-        # Ordenar patches por paragraph_index (garantiza orden DOCX)
-        all_patches.sort(key=lambda p: p.get("paragraph_index", 0))
+        # =============================================
+        # ETAPA D.5 (ruta paralela): PASADA GRUPAL
+        # H3 (Fase 0): antes la ruta paralela NUNCA ejecutaba la corrección
+        # grupal de listas/tablas — toda la conciencia estructural de B.5
+        # desaparecía cuando parallel_correction_enabled estaba activo.
+        # =============================================
+        try:
+            from app.services.correction import correct_groups_for_doc_sync
+            _profile_d5 = json.loads(profile_json) if profile_json else None
+            _gc_d5: dict | None = None
+            if global_context_key:
+                try:
+                    _gc_d5 = json.loads(
+                        minio_client.download_file(global_context_key).decode("utf-8")
+                    )
+                except Exception:
+                    pass
+            group_patches, group_usage = correct_groups_for_doc_sync(
+                doc_id=doc_id,
+                session=db,
+                profile=_profile_d5,
+                global_context=_gc_d5,
+            )
+            if group_patches:
+                all_patches.extend(group_patches)
+                for r in group_usage:
+                    db.add(LlmUsage(doc_id=doc_id, **r))
+                db.commit()
+                logger.info(
+                    f"[assemble] Etapa D.5 grupal: +{len(group_patches)} patches"
+                )
+        except Exception as e:
+            logger.warning(f"[assemble] Pasada grupal D.5 falló (no bloqueante): {e}")
 
-        # Guardar patches consolidados en MinIO
+        # Ordenar patches por paragraph_index (garantiza orden DOCX).
+        # Los grupales tienen paragraph_index=None → van al final; el orden
+        # real de aplicación lo resuelve el renderer (grupos primero).
+        all_patches.sort(
+            key=lambda p: (
+                p.get("paragraph_index") is None,
+                p.get("paragraph_index") or 0,
+            )
+        )
+
+        # Guardar patches consolidados en MinIO (default=str: block_id/group_id UUID)
         patch_key = f"docx/{doc_id}/patches_docx.json"
         minio_client.upload_file(
             patch_key,
-            json.dumps(all_patches, ensure_ascii=False, indent=2).encode("utf-8"),
+            json.dumps(all_patches, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
             content_type="application/json",
         )
 
@@ -1997,29 +2116,33 @@ def rerender_candidate_preview(self, doc_id: str):
             logger.info(f"[Rerender] Sin patches para {doc_id}, nada que re-renderizar")
             return
 
-        # Agrupar patch_ids por paragraph_index
-        para_patch_ids: dict[int, list[str]] = {}
-        for p in all_patch_rows:
-            pidx = p.paragraph_index or 0
-            para_patch_ids.setdefault(pidx, []).append(str(p.id))
+        # H1: identidad por location (BD) con fallback a paragraph_index.
+        def _rr_key(p) -> str:
+            if p.location:
+                return f"loc:{p.location}"
+            return f"idx:{p.paragraph_index if p.paragraph_index is not None else -1}"
 
-        # Deduplicar por paragraph_index y aplicar edited_text si existe
-        seen: set[int] = set()
+        para_patch_ids: dict[str, list[str]] = {}
+        for p in all_patch_rows:
+            para_patch_ids.setdefault(_rr_key(p), []).append(str(p.id))
+
+        # Deduplicar por identidad y aplicar edited_text si existe
+        seen: set[str] = set()
         docx_patches: list[dict] = []
         for p in all_patch_rows:
-            pidx = p.paragraph_index or 0
-            if pidx in seen:
+            key = _rr_key(p)
+            if key in seen:
                 continue
-            seen.add(pidx)
+            seen.add(key)
             final_text = (
                 p.edited_text
                 if (hasattr(p, "edited_text") and p.edited_text)
                 else p.corrected_text
             )
             docx_patches.append({
-                "patch_ids": para_patch_ids.get(pidx, []),
-                "paragraph_index": pidx,
-                "location": "",
+                "patch_ids": para_patch_ids.get(key, []),
+                "paragraph_index": p.paragraph_index if p.paragraph_index is not None else 0,
+                "location": p.location or "",
                 "original_text": p.original_text,
                 "corrected_text": final_text,
                 "source": p.source,
@@ -2029,24 +2152,29 @@ def rerender_candidate_preview(self, doc_id: str):
                 "severity": p.severity,
                 "explanation": p.explanation,
                 "confidence": p.confidence,
+                "group_id": str(p.group_id) if p.group_id else None,
+                "group_call_index": p.group_call_index,
+                "structural_role": p.structural_role,
             })
 
-        # Cargar locations desde patches_docx.json
-        try:
-            patch_key = f"docx/{doc_id}/patches_docx.json"
-            if minio_client.file_exists(patch_key):
-                stored_patches = _json.loads(
-                    minio_client.download_file(patch_key).decode("utf-8")
-                )
-                location_index: dict[tuple, str] = {}
-                for sp in stored_patches:
-                    key = (sp.get("paragraph_index", 0), sp.get("original_text", "")[:50])
-                    location_index[key] = sp.get("location", "")
-                for dp in docx_patches:
-                    key = (dp["paragraph_index"], dp["original_text"][:50])
-                    dp["location"] = location_index.get(key, "")
-        except Exception as loc_err:
-            logger.warning(f"[Rerender] Error cargando locations: {loc_err}")
+        # Fallback legacy: cargar locations desde patches_docx.json
+        missing_loc = [dp for dp in docx_patches if not dp["location"]]
+        if missing_loc:
+            try:
+                patch_key = f"docx/{doc_id}/patches_docx.json"
+                if minio_client.file_exists(patch_key):
+                    stored_patches = _json.loads(
+                        minio_client.download_file(patch_key).decode("utf-8")
+                    )
+                    location_index: dict[tuple, str] = {}
+                    for sp in stored_patches:
+                        key = (sp.get("paragraph_index", 0), sp.get("original_text", "")[:50])
+                        location_index[key] = sp.get("location", "")
+                    for dp in missing_loc:
+                        key = (dp["paragraph_index"], dp["original_text"][:50])
+                        dp["location"] = location_index.get(key, "")
+            except Exception as loc_err:
+                logger.warning(f"[Rerender] Error cargando locations: {loc_err}")
 
         logger.info(
             f"[Rerender] {len(docx_patches)} patches → re-renderizando candidato para {doc_id}"

@@ -103,8 +103,12 @@ def partition_table_group(
     batch: ElementGroupBatch, max_cells: int = 60
 ) -> list[ElementGroupBatch]:
     """Particiona un grupo de tabla grande en sub-batches contiguos por
-    rangos de filas, manteniendo header y totals al inicio/fin de cada
-    sub-batch para preservar contexto.
+    rangos de filas.
+
+    NOTA (Fase 0): los sub-batches NO incluyen la fila header repetida como
+    contexto; los encabezados de columna llegan vía metadata/neighbors en el
+    prompt. Incluir la fila header read-only en cada chunk es trabajo de la
+    Fase 5 del plan de refactorización.
 
     Devuelve [batch] si la tabla cabe en una sola llamada.
     """

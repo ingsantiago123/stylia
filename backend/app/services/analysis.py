@@ -13,9 +13,7 @@ Sub-etapas:
 import json
 import logging
 import re
-import tempfile
 from collections import Counter
-from pathlib import Path
 
 from docx import Document as DocxDocument
 
@@ -577,17 +575,15 @@ def analyze_document_sync(
 
     usage_records = []
 
-    # Descargar DOCX (con cache si disponible)
+    # Descargar DOCX (con cache si disponible). BytesIO en vez de
+    # tempfile.mktemp (API insegura/deprecada).
     if docx_bytes_cached is not None:
         docx_bytes = docx_bytes_cached
     else:
         docx_bytes = minio_client.download_file(docx_uri)
-    tmpfile = tempfile.mktemp(suffix=".docx")
-    with open(tmpfile, "wb") as f:
-        f.write(docx_bytes)
 
-    doc = DocxDocument(tmpfile)
-    Path(tmpfile).unlink(missing_ok=True)
+    import io as _io
+    doc = DocxDocument(_io.BytesIO(docx_bytes))
 
     # Recolectar párrafos con metadatos
     all_paras = _collect_all_paragraphs_with_styles(doc)

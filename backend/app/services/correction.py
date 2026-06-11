@@ -8,11 +8,9 @@ no de bloques del PDF, para evitar fragmentación y mayúsculas erróneas.
 
 import json
 import logging
-import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from pathlib import Path
 
 import httpx
 from docx import Document as DocxDocument
@@ -583,17 +581,15 @@ def correct_docx_sync(
     if profile and profile.get("lt_disabled_rules"):
         disabled_rules = list(set(disabled_rules + profile["lt_disabled_rules"]))
 
-    # Descargar DOCX (con cache si disponible)
+    # Descargar DOCX (con cache si disponible). BytesIO en vez de
+    # tempfile.mktemp (API insegura/deprecada, riesgo de race condition).
     if docx_bytes_cached is not None:
         docx_bytes = docx_bytes_cached
     else:
         docx_bytes = minio_client.download_file(docx_uri)
-    tmpfile = tempfile.mktemp(suffix=".docx")
-    with open(tmpfile, "wb") as f:
-        f.write(docx_bytes)
 
-    doc = DocxDocument(tmpfile)
-    Path(tmpfile).unlink(missing_ok=True)
+    import io as _io
+    doc = DocxDocument(_io.BytesIO(docx_bytes))
 
     patches = []
     corrected_context: list[str] = []
@@ -1389,18 +1385,26 @@ import re as _re_groupal  # alias para no chocar con imports locales
 import uuid as _uuid_groupal
 
 
+# Fase 0: SOLO viñetas y numeración decimal. El patrón anterior incluía
+# `[a-zA-Z][.)]` y romanos, lo que corrompía texto legítimo en celdas y
+# listas ("E. coli es…" → "coli es…", "I. Kant sostiene…" → "Kant sostiene…").
 _LIST_PREFIX = _re_groupal.compile(
-    r"^\s*(?:[•·▪‒–—●\-\*]|\d{1,3}[.)]|[a-zA-Z][.)]|[ivxlcdmIVXLCDM]+[.)])\s+"
+    r"^\s*(?:[•·▪‒–—●\-\*]|\d{1,3}[.)])\s+"
 )
 
 
-def _strip_list_prefix(text: str) -> str:
+def _strip_list_prefix(text: str, original: str | None = None) -> str:
     """Quita prefijos de viñeta/numeración que el LLM pueda haber dejado.
 
     El prompt grupal pide "escribe SOLO el texto del ítem", pero si el LLM
     fallara duplicaríamos la viñeta en el DOCX final.
+
+    Fase 0: si el ORIGINAL ya empezaba con el mismo patrón, el prefijo es
+    contenido del autor y se preserva tal cual.
     """
     if not text:
+        return text
+    if original and _LIST_PREFIX.match(original):
         return text
     return _LIST_PREFIX.sub("", text, count=1)
 
@@ -1612,11 +1616,14 @@ def correct_group_with_llm_sync(
         else:
             raw_corrected = it.get("corrected_text") or ""
             # En listas manuales el prefijo es parte del texto y debe quedarse.
-            # En el resto (listas nativas, tablas) hacemos strip defensivo.
+            # En el resto (listas nativas, tablas) hacemos strip defensivo,
+            # SOLO si el original no traía ese prefijo (Fase 0).
             if batch.group_type == "list" and list_detection == "manual":
                 corrected_texts_for_gates.append(raw_corrected)
             else:
-                corrected_texts_for_gates.append(_strip_list_prefix(raw_corrected))
+                corrected_texts_for_gates.append(
+                    _strip_list_prefix(raw_corrected, original=blocks[i].original_text)
+                )
 
     group_gate_results: list[dict] = []
     if batch.group_type == "list":
@@ -1635,11 +1642,11 @@ def correct_group_with_llm_sync(
         if action == "skip":
             continue
         raw_corrected = it.get("corrected_text") or ""
+        original = blk.original_text or ""
         if batch.group_type == "list" and list_detection == "manual":
             corrected = raw_corrected
         else:
-            corrected = _strip_list_prefix(raw_corrected)
-        original = blk.original_text or ""
+            corrected = _strip_list_prefix(raw_corrected, original=original)
         if not corrected or corrected == original:
             continue
 

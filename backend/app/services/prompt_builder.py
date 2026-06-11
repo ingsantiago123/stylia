@@ -647,7 +647,10 @@ def _build_lista_item(block: dict, neighbors: dict) -> str:
     lines.append("REGLAS PARA ESTE ELEMENTO:")
     lines.append("- Preservar el formato detectado (capitalización inicial, puntuación final).")
     lines.append("- Mantener paralelismo gramatical con los hermanos.")
-    lines.append("- Estandariza la numeración inicial o viñetas que estén dentro del texto (ej. de '1.', '2)', '3.' a '1.', '2.', '3.').")
+    # Fase 0: política unificada con el prompt grupal manual — el prefijo
+    # escrito por el autor se preserva EXACTAMENTE (antes este prompt pedía
+    # "estandarizar" la numeración mientras el grupal lo prohibía).
+    lines.append("- Si la numeración o viñeta forma parte del texto del ítem, consérvala EXACTAMENTE como está escrita (no cambies '2)' a '2.' ni similares).")
     lines.append("- Si la numeración ya la gestiona el formato del documento y no está en el texto, no la añadas.")
     lines.append("- Brevedad: NO añadir conectores ni transiciones de párrafo.")
     lines.append(_SEP_CLOSE)
@@ -1055,10 +1058,16 @@ def build_group_user_prompt_table(
         lines.append("ENCABEZADOS DE COLUMNA: " + ", ".join(f'"{_truncate(h, 40)}"' for h in headers))
     if data_hints:
         lines.append("TIPOS DE DATO POR COLUMNA: " + ", ".join(str(d) for d in data_hints))
+    # H2 (Fase 0): el "index" es el número [N] mostrado junto a cada celda
+    # (posición secuencial), NO una fórmula fila*cols+col. La fórmula anterior
+    # se desalineaba con el orden de enumeración del parser ante celdas
+    # vacías, multipárrafo o particiones, aplicando correcciones a celdas
+    # equivocadas o descartándolas por fuera de rango.
     lines.extend([
         "",
         "REGLAS PARA ESTE ELEMENTO:",
-        "- Corrige las celdas devolviendo un array \"items\" con \"index\" = fila * num_cols + columna.",
+        "- Corrige las celdas devolviendo un array \"items\" donde \"index\" es EXACTAMENTE",
+        "  el número [N] mostrado junto a cada celda (no lo calcules de otra forma).",
         "- Preserva uniformidad de columna: capitalización inicial y puntuación final consistentes.",
         "- NO conviertas números, fechas, monedas, ni símbolos.",
         "- NO modifiques valores en filas de totales.",
@@ -1068,11 +1077,10 @@ def build_group_user_prompt_table(
         "",
         "CELDAS:",
     ])
-    for cell in cells:
-        idx = cell.get("row", 0) * (cols or 1) + cell.get("col", 0)
+    for i, cell in enumerate(cells):
         role = cell.get("role") or "data"
         txt = cell.get("text") or ""
-        lines.append(f'[{idx}] (r={cell.get("row")}, c={cell.get("col")}, rol={role}) "{txt}"')
+        lines.append(f'[{i}] (r={cell.get("row")}, c={cell.get("col")}, rol={role}) "{txt}"')
     lines.extend([
         "",
         "FORMATO DE RESPUESTA (grupo):",

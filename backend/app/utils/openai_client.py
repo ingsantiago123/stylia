@@ -189,16 +189,69 @@ Formato de respuesta JSON requerido:
 
         t0 = time.monotonic()
         try:
-            with self._semaphore:
-                response = self._retry(self.client.chat.completions.create)(
-                    **{k: v for k, v in request_payload.items()},
-                    response_format={"type": "json_object"},
+            # Fase 0: detectar truncamiento por max_tokens (finish_reason ==
+            # "length"). Antes el JSON truncado fallaba el parse y se
+            # interpretaba silenciosamente como "el LLM no corrigió".
+            response = None
+            finish_reason = None
+            usage = dict(empty_usage)
+            for attempt_tokens in (max_tokens, max_tokens * 2):
+                request_payload["max_completion_tokens"] = attempt_tokens
+                with self._semaphore:
+                    response = self._retry(self.client.chat.completions.create)(
+                        **{k: v for k, v in request_payload.items()},
+                        response_format={"type": "json_object"},
+                    )
+                attempt_usage = _extract_usage(response)
+                # Acumular usage de todos los intentos (costo honesto)
+                for k in usage:
+                    usage[k] += attempt_usage.get(k, 0)
+                finish_reason = (
+                    response.choices[0].finish_reason if response.choices else None
+                )
+                if finish_reason != "length":
+                    break
+                logger.warning(
+                    f"Respuesta LLM truncada por max_tokens={attempt_tokens} "
+                    f"(modelo={model}) — reintentando con {attempt_tokens * 2}"
                 )
 
             latency_ms = int((time.monotonic() - t0) * 1000)
             content = response.choices[0].message.content
-            usage = _extract_usage(response)
-            data = json.loads(content)
+
+            if finish_reason == "length":
+                logger.error(
+                    f"Respuesta LLM truncada incluso con max_tokens={max_tokens * 2} "
+                    f"(modelo={model}) — descartando (fallback a LT)"
+                )
+                if on_audit_log:
+                    on_audit_log({
+                        "request_payload": request_payload,
+                        "response_payload": None,
+                        "latency_ms": latency_ms,
+                        "model_used": model,
+                        **usage,
+                        "error_text": "truncated_by_max_tokens",
+                    })
+                return None, usage
+
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError as je:
+                logger.error(
+                    f"Respuesta LLM no es JSON válido (finish_reason={finish_reason}, "
+                    f"modelo={model}): {je} — contenido[:200]={content[:200]!r}"
+                )
+                if on_audit_log:
+                    on_audit_log({
+                        "request_payload": request_payload,
+                        "response_payload": {"raw_content": content[:2000]},
+                        "latency_ms": latency_ms,
+                        "model_used": model,
+                        **usage,
+                        "error_text": f"json_decode_error: {je}",
+                    })
+                return None, usage
 
             # Captura RAW para auditoría
             if on_audit_log:
