@@ -79,10 +79,6 @@ tabla, cita, pie de figura, nota al pie, diálogo, etc.). DEBES respetar las
 generales cuando entren en conflicto, salvo si contradicen REGLAS DE
 CORRECCIÓN 1, 2 o 3 (preservación de significado, tono y términos protegidos).
 
-En modo grupal (lista o tabla completa), se enviarán varios ítems en una sola
-llamada con el formato indicado al final del bloque estructural. Devuelve UN
-objeto JSON con un array "items" donde cada elemento incluya su "index".
-
 SEVERIDADES:
 - critico: error que afecta comprensión o cambia significado
 - importante: mejora notable en calidad del texto
@@ -126,9 +122,79 @@ class ParagraphMeta:
         }
 
 
-def build_system_prompt() -> str:
-    """System prompt estático, cacheable por el proveedor LLM."""
+# System prompt para MODO GRUPAL (lista/tabla completa en una llamada).
+# Fase 5: separado del individual — antes el system prompt de párrafo
+# describía dos contratos de respuesta a la vez, ruido para el 95% de
+# las llamadas y ambigüedad de formato en modo json_object.
+SYSTEM_PROMPT_GROUP = """Eres un corrector de estilo profesional en español. Recibirás un GRUPO de elementos (los ítems de una lista o las celdas de una tabla) para corregir EN CONJUNTO, armonizándolos entre sí.
+
+REGLAS DE CORRECCIÓN:
+1. NUNCA cambies el significado del texto
+2. Preserva el tono y la voz del autor según el nivel de intervención indicado
+3. Los términos protegidos NO se reemplazan por sinónimos
+4. Respeta las "REGLAS PARA ESTE ELEMENTO" del bloque estructural del mensaje
+5. NO añadas ni elimines elementos; el conteo es inalterable
+6. Cada elemento que no necesite cambios se devuelve con action "skip"
+
+CATEGORÍAS DE CAMBIOS: redundancia, claridad, registro, cohesion, lexico,
+estructura, puntuacion, ritmo, muletilla.
+SEVERIDADES: critico, importante, sugerencia.
+
+FORMATO DE RESPUESTA (JSON estricto):
+{
+  "items": [
+    {"index": N, "action": "correct"|"skip"|"flag", "corrected_text": "...",
+     "changes": [{"original_fragment": "...", "corrected_fragment": "...",
+                  "category": "...", "severity": "...", "explanation": "..."}],
+     "confidence": 0.0-1.0, "rewrite_ratio": 0.0-1.0},
+    ...
+  ]
+}
+"index" es EXACTAMENTE el número [N] mostrado junto a cada elemento.
+
+IMPORTANTE: Responde SOLO con el JSON, sin texto adicional."""
+
+
+def build_system_prompt(mode: str = "individual") -> str:
+    """System prompt estático, cacheable por el proveedor LLM.
+
+    Args:
+        mode: "individual" (párrafo a párrafo) | "group" (lista/tabla completa).
+    """
+    if mode == "group":
+        return SYSTEM_PROMPT_GROUP
     return SYSTEM_PROMPT
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Fase 5: filtro de relevancia para términos protegidos.
+# Antes la lista completa (perfil + n-gramas de Etapa C + globales C.6,
+# potencialmente cientos) se inyectaba en CADA prompt. Ahora solo se emiten
+# los términos que de verdad aparecen en el texto a corregir, con tope.
+# ────────────────────────────────────────────────────────────────────────
+
+def _relevant_protected_terms(
+    protected: list, text: str | None, cap: int | None = None
+) -> list[str]:
+    """Términos protegidos que aparecen en `text` (case-insensitive), con tope.
+
+    Si no hay texto de referencia, devuelve los primeros `cap` (mejor algo
+    que la lista entera).
+    """
+    if not protected:
+        return []
+    if cap is None:
+        try:
+            from app.config import settings as _settings
+            cap = _settings.prompt_protected_terms_cap
+        except Exception:
+            cap = 20
+    terms = [str(t) for t in protected if t]
+    if not text:
+        return terms[:cap]
+    low = text.lower()
+    relevant = [t for t in terms if t.lower() in low]
+    return relevant[:cap]
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -314,9 +380,12 @@ def build_user_prompt(
         if priorities:
             parts.append(f"PRIORIDADES: {', '.join(str(p) for p in priorities)}")
 
-        protected = profile.get("protected_terms") or []
+        # Fase 5: solo términos que aparecen en ESTE párrafo (con tope)
+        protected = _relevant_protected_terms(
+            profile.get("protected_terms") or [], text
+        )
         if protected:
-            parts.append(f"PROTEGER TÉRMINOS: {', '.join(str(p) for p in protected)}")
+            parts.append(f"PROTEGER TÉRMINOS: {', '.join(protected)}")
 
     # ═══ BLOQUE 2: UBICACIÓN ESTRUCTURAL ════════════════════════════════
     # Solo metadatos OBJETIVOS (tipo, sección, página, vecinos). Las
@@ -851,6 +920,7 @@ def _build_profile_prelude(
     profile: dict | None,
     global_context: dict | None,
     paragraph_type: str | None = None,
+    text_sample: str | None = None,
 ) -> str:
     """Construye un prelude reutilizable con perfil + contexto global +
     restricciones de registro + idiolectos. Comparte la lógica de
@@ -898,9 +968,12 @@ def _build_profile_prelude(
         priorities = profile.get("style_priorities") or []
         if priorities:
             parts.append(f"PRIORIDADES: {', '.join(str(p) for p in priorities)}")
-        protected = profile.get("protected_terms") or []
+        # Fase 5: solo términos presentes en el texto del grupo (con tope)
+        protected = _relevant_protected_terms(
+            profile.get("protected_terms") or [], text_sample
+        )
         if protected:
-            parts.append(f"PROTEGER TÉRMINOS: {', '.join(str(p) for p in protected)}")
+            parts.append(f"PROTEGER TÉRMINOS: {', '.join(protected)}")
 
     if profile and emit("register_constraints"):
         rc: list[str] = profile.get("register_constraints") or []
@@ -954,7 +1027,10 @@ def build_group_user_prompt_list(
     following = neighbors.get("following_paragraph")
 
     lines: list[str] = []
-    prelude = _build_profile_prelude(profile, global_context, paragraph_type="lista")
+    prelude = _build_profile_prelude(
+        profile, global_context, paragraph_type="lista",
+        text_sample="\n".join(items),
+    )
     if prelude:
         lines.append(prelude)
         lines.append("")
@@ -1044,7 +1120,10 @@ def build_group_user_prompt_table(
     data_hints = table_metadata.get("column_data_type_hints") or []
 
     lines: list[str] = []
-    prelude = _build_profile_prelude(profile, global_context, paragraph_type="celda_tabla")
+    prelude = _build_profile_prelude(
+        profile, global_context, paragraph_type="celda_tabla",
+        text_sample="\n".join((c.get("text") or "") for c in cells),
+    )
     if prelude:
         lines.append(prelude)
         lines.append("")

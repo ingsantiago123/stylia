@@ -235,6 +235,8 @@ def _correct_single_paragraph(
     audit_log_collector: list | None = None,
     term_registry: list | None = None,
     global_context: dict | None = None,
+    block_meta: dict | None = None,
+    total_pages: int | None = None,
 ) -> tuple[dict | None, dict | None, str, str]:
     """
     Corrige un párrafo individual.
@@ -356,6 +358,13 @@ def _correct_single_paragraph(
     elif profile and system_prompt:
         # MVP2: Prompt parametrizado con perfil + contexto jerárquico enriquecido
         protected_regions_text = regions_to_prompt_text(protected_regions) if protected_regions else None
+
+        # Fase 3/5: página real (B.7) y metadata estructural (B.5) por fin
+        # llegan al prompt — antes estos parámetros existían pero ningún
+        # caller los pasaba.
+        page_no = (block_meta or {}).get("page_start")
+        crosses_page = bool((block_meta or {}).get("crosses_page"))
+
         user_prompt = build_user_prompt(
             text=post_lt_text,
             profile=profile,
@@ -366,10 +375,13 @@ def _correct_single_paragraph(
             paragraph_type=paragraph_type,
             next_paragraph_type=next_paragraph_type,
             table_context=table_context,
-            has_page_break=has_page_break,
+            has_page_break=has_page_break or crosses_page,
             protected_regions_text=protected_regions_text,
+            page_no=page_no,
+            total_pages=total_pages,
             global_context=global_context,
             substitution_patches=substitution_patches,
+            block_meta=block_meta,
         )
 
         if route_decision.route == CorrectionRoute.EDITORIAL:
@@ -390,6 +402,7 @@ def _correct_single_paragraph(
                     "call_purpose": "mechanical_correction",
                 })
 
+        from app.services.llm_schemas import INDIVIDUAL_CORRECTION_SCHEMA
         llm_response, llm_usage = openai_client.correct_with_profile(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -397,6 +410,8 @@ def _correct_single_paragraph(
             model_override=model_override,
             max_tokens_override=max_tokens_for_route,
             on_audit_log=_p1_audit_cb,
+            response_schema=INDIVIDUAL_CORRECTION_SCHEMA,
+            schema_name="correccion_parrafo",
         )
         if llm_usage["total_tokens"] > 0:
             _cost = (llm_usage["prompt_tokens"] / 1e6 * settings.openai_pricing_input) + \
@@ -562,6 +577,8 @@ def correct_docx_sync(
     docx_bytes_cached: bytes | None = None,
     global_context: dict | None = None,
     grouped_locations: set[str] | None = None,
+    block_meta_map: dict[str, dict] | None = None,
+    total_pages: int | None = None,
 ) -> tuple[list[dict], list[dict], list[tuple[str, str, bool]], list[dict]]:
     """
     Corrige un DOCX directamente, párrafo por párrafo.
@@ -705,6 +722,8 @@ def correct_docx_sync(
             audit_log_collector=audit_log_entries,
             term_registry=term_registry_list,
             global_context=global_context,
+            block_meta=(block_meta_map or {}).get(location),
+            total_pages=total_pages,
         )
 
         # ── Plan v4: PASADA 2 — Auditoría Contextual ────────────────────
@@ -1017,6 +1036,7 @@ def correct_batch_with_llm_sync(
     term_registry: list | None = None,
     context_seed_window: list[str] | None = None,
     grouped_paragraph_indexes: set[int] | None = None,
+    block_meta_map: dict[str, dict] | None = None,
 ) -> tuple[list[dict], list[dict], str, list[dict]]:
     """
     Pass 1 LLM + Pass 2 auditoría para el rango [start_para..end_para] (inclusive).
@@ -1083,6 +1103,7 @@ def correct_batch_with_llm_sync(
             audit_log_collector=audit_log_entries,
             term_registry=term_registry,
             global_context=global_context,
+            block_meta=(block_meta_map or {}).get(location),
         )
 
         # ── Plan v4: PASADA 2 — Auditoría Contextual ────────────────────
@@ -1531,7 +1552,11 @@ def correct_group_with_llm_sync(
         logger.warning("correct_group: tipo desconocido %s", batch.group_type)
         return patches, usage_records, audit_entries
 
-    system_prompt = build_system_prompt()
+    # Fase 5: system prompt DEDICADO al modo grupal + schema estricto.
+    # Antes se reutilizaba el system prompt individual (que describe otro
+    # formato de respuesta) y json_object sin contrato.
+    from app.services.llm_schemas import GROUP_CORRECTION_SCHEMA
+    system_prompt = build_system_prompt(mode="group")
 
     # 2) Llamada al LLM (formato JSON) usando el wrapper con max_completion_tokens
     model = settings.openai_editorial_model or settings.openai_model
@@ -1542,6 +1567,8 @@ def correct_group_with_llm_sync(
         max_length=None,
         model_override=model,
         max_tokens_override=max_tokens,
+        response_schema=GROUP_CORRECTION_SCHEMA,
+        schema_name="correccion_grupal",
     )
     if not data:
         logger.warning(

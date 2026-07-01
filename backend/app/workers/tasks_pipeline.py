@@ -239,9 +239,17 @@ def _persist_patches(db: Session, doc_id: str, docx_patches: list[dict]) -> None
         select(Page).where(Page.doc_id == doc_id).order_by(Page.page_no)
     ).scalars().all()
 
-    if not docx_patches or doc.original_format != "docx":
+    # PDF nativo: hay DOCX de trabajo (doc.docx_uri) → los patches SÍ se
+    # persisten y renderizan. Antes este stub descartaba todo el trabajo
+    # de corrección de cualquier entrada no-DOCX en silencio.
+    _has_workable_docx = doc.original_format == "docx" or bool(doc.docx_uri)
+    if not docx_patches or not _has_workable_docx:
         if not docx_patches:
             logger.info("[Persist] Sin correcciones — documento limpio, completando directo")
+        elif not _has_workable_docx:
+            logger.warning(
+                "[Persist] Documento sin DOCX de trabajo — patches no aplicables"
+            )
         elapsed = round(time.time() - t0, 1)
         existing_timings["D_persist"] = elapsed
         _update_document_status(db, doc_id, "completed")
@@ -549,10 +557,11 @@ def _run_candidate_render(db: Session, doc_id: str) -> None:
 
     logger.info(f"[Candidato] {len(docx_patches)} párrafos a renderizar como candidato")
 
-    _docx_bytes = _get_cached_docx_bytes(str(doc_id), doc.source_uri)
+    _render_docx_uri = doc.docx_uri or doc.source_uri
+    _docx_bytes = _get_cached_docx_bytes(str(doc_id), _render_docx_uri)
     render_result = render_docx_first_sync(
         doc_id=str(doc_id),
-        docx_uri=doc.source_uri,
+        docx_uri=_render_docx_uri,
         filename=doc.filename,
         all_patches=docx_patches,
         docx_bytes_cached=_docx_bytes,
@@ -683,10 +692,11 @@ def _run_stage_e(db: Session, doc_id: str, apply_mode: str = "accepted_and_auto"
 
     logger.info(f"[Etapa E] {len(docx_patches)} correcciones aprobadas a aplicar")
 
-    _docx_bytes_for_render = _get_cached_docx_bytes(str(doc_id), doc.source_uri)
+    _render_docx_uri = doc.docx_uri or doc.source_uri
+    _docx_bytes_for_render = _get_cached_docx_bytes(str(doc_id), _render_docx_uri)
     render_result = render_docx_first_sync(
         doc_id=str(doc_id),
-        docx_uri=doc.source_uri,
+        docx_uri=_render_docx_uri,
         filename=doc.filename,
         all_patches=docx_patches,
         docx_bytes_cached=_docx_bytes_for_render,
@@ -754,6 +764,7 @@ def _dispatch_parallel_correction(
     analysis_result: dict,
     job: Job,
     global_context_dict: dict | None = None,
+    block_meta_map: dict | None = None,
 ) -> bool:
     """
     Orquesta la corrección paralela por lotes (Stage D).
@@ -774,7 +785,8 @@ def _dispatch_parallel_correction(
     )
 
     # Descargar DOCX y recolectar párrafos (BytesIO: sin tempfile inseguro)
-    docx_bytes = _get_cached_docx_bytes(str(doc_id), doc.source_uri)
+    # PDF nativo: doc.docx_uri apunta al DOCX convertido por pdf2docx
+    docx_bytes = _get_cached_docx_bytes(str(doc_id), doc.docx_uri or doc.source_uri)
     docx_doc = DocxDocument(_io.BytesIO(docx_bytes))
     all_paragraphs = _collect_all_paragraphs(docx_doc)
 
@@ -858,6 +870,16 @@ def _dispatch_parallel_correction(
             content_type="application/json",
         )
 
+    # Fase 3/5: metadata estructural + página real para los prompts de los lotes
+    block_meta_key: str | None = None
+    if block_meta_map:
+        block_meta_key = f"correction/{doc_id}/block_meta.json"
+        minio_client.upload_file(
+            block_meta_key,
+            json.dumps(block_meta_map, ensure_ascii=False).encode("utf-8"),
+            content_type="application/json",
+        )
+
     # Context seeds: texto post-LT del último párrafo no-vacío del batch anterior
     # seed_windows: ventana de N párrafos previos (configurable context_window_size)
     seeds: list[str | None] = [None]
@@ -911,6 +933,7 @@ def _dispatch_parallel_correction(
             disabled_rules=disabled_rules,
             global_context_key=global_context_key,
             grouped_indexes=grouped_indexes,
+            block_meta_key=block_meta_key,
         )
         for b_idx, (start, end) in enumerate(batch_boundaries)
     )
@@ -1005,7 +1028,22 @@ def process_document_pipeline(self, doc_id: str):
         pdf_uri = ingestion_result["pdf_uri"]
         total_pages = ingestion_result["total_pages"]
 
-        _update_document_status(db, doc_id, "extracting", pdf_uri=pdf_uri, total_pages=total_pages)
+        # PDF nativo: la ingesta generó un DOCX de trabajo (pdf2docx).
+        # Todo el pipeline DOCX-first opera sobre él.
+        _status_extra = {}
+        if ingestion_result.get("docx_uri"):
+            doc.docx_uri = ingestion_result["docx_uri"]
+            _status_extra["docx_uri"] = ingestion_result["docx_uri"]
+            logger.info(f"[Etapa A] PDF nativo → DOCX de trabajo: {doc.docx_uri}")
+
+        _update_document_status(
+            db, doc_id, "extracting",
+            pdf_uri=pdf_uri, total_pages=total_pages, **_status_extra,
+        )
+
+        # URI del DOCX sobre el que corre TODO el pipeline (source para DOCX
+        # nativos; el convertido para PDFs)
+        docx_source_uri = doc.docx_uri or doc.source_uri
 
         for page_no in range(1, total_pages + 1):
             db.add(Page(
@@ -1026,7 +1064,7 @@ def process_document_pipeline(self, doc_id: str):
         try:
             _rcache = _redis.Redis.from_url(settings.redis_url)
             _docx_cache_key = f"docx_cache:{doc_id}"
-            _docx_bytes_cached = minio_client.download_file(doc.source_uri)
+            _docx_bytes_cached = minio_client.download_file(docx_source_uri)
             _rcache.setex(_docx_cache_key, 7200, _docx_bytes_cached)  # TTL 2h
             logger.info(f"[Cache] DOCX cacheado en Redis ({len(_docx_bytes_cached)} bytes)")
         except Exception as _cache_err:
@@ -1145,6 +1183,41 @@ def process_document_pipeline(self, doc_id: str):
         _save_stage_timing(db, doc_id, stage_timings)
 
         # =============================================
+        # ETAPA B.6: AST DOCUMENTAL (Fases 1-2)
+        # Parsea el DOCX a document_nodes en orden REAL del documento
+        # (identidad determinista oxml_path + content_hash). Captura tablas
+        # anidadas, textboxes y footnotes invisibles para el flujo legacy.
+        # ETAPA B.7: PAGINACIÓN REAL (Fase 3)
+        # Alinea las palabras del PDF contra los nodos y escribe la página
+        # real de cada párrafo — reemplaza la estimación lineal.
+        # =============================================
+        _node_page_map: dict[str, dict] = {}
+        t0_b6 = time.time()
+        try:
+            if settings.structural_parser_enabled:
+                from app.services.document_parser import parse_document_to_nodes_sync
+                _docx_b6 = _get_cached_docx_bytes(doc_id, doc.docx_uri or doc.source_uri)
+                b6_summary = parse_document_to_nodes_sync(
+                    doc_id=str(doc_id), docx_bytes=_docx_b6, session=db,
+                )
+                logger.info(f"[Etapa B.6] {b6_summary}")
+                if settings.page_alignment_enabled:
+                    try:
+                        from app.services.page_alignment import align_nodes_to_pdf_sync
+                        _node_page_map = align_nodes_to_pdf_sync(str(doc_id), pdf_bytes, db)
+                        logger.info(
+                            f"[Etapa B.7] {len(_node_page_map)} ubicaciones con página real"
+                        )
+                    except Exception as _pa_err:
+                        logger.warning(
+                            f"[Etapa B.7] Alineación de páginas falló (no bloqueante): {_pa_err}"
+                        )
+        except Exception as _b6_err:
+            logger.warning(f"[Etapa B.6] Parser estructural falló (no bloqueante): {_b6_err}")
+        stage_timings["B6"] = round(time.time() - t0_b6, 1)
+        _save_stage_timing(db, doc_id, stage_timings)
+
+        # =============================================
         # ETAPA C: ANÁLISIS EDITORIAL
         # =============================================
         _update_document_status(db, doc_id, "analyzing")
@@ -1180,10 +1253,10 @@ def process_document_pipeline(self, doc_id: str):
             }
             logger.info(f"[Etapa C] Perfil editorial: {profile_row.preset_name or 'custom'}")
 
-        _docx_bytes = _get_cached_docx_bytes(str(doc_id), doc.source_uri)
+        _docx_bytes = _get_cached_docx_bytes(str(doc_id), docx_source_uri)
         analysis_result = analyze_document_sync(
             doc_id=str(doc_id),
-            docx_uri=doc.source_uri,
+            docx_uri=docx_source_uri,
             profile=profile_dict,
             docx_bytes_cached=_docx_bytes,
         )
@@ -1344,6 +1417,47 @@ def process_document_pipeline(self, doc_id: str):
 
         config = doc.config_json or {}
 
+        # ── Mapa de metadata estructural por ubicación (B.5 + B.7) ──
+        # Fase 3/5: antes los parámetros block_meta/page_no de build_user_prompt
+        # NUNCA se pasaban — toda la metadata de B.5 moría en la BD sin llegar
+        # a un solo prompt. Este mapa la conecta de verdad.
+        block_meta_map: dict[str, dict] = {}
+        try:
+            _meta_rows = db.execute(
+                select(Block)
+                .join(Page, Block.page_id == Page.id)
+                .where(Page.doc_id == doc_id, Block.docx_location.isnot(None))
+            ).scalars().all()
+            for _b in _meta_rows:
+                block_meta_map[_b.docx_location] = {
+                    "style_name": _b.style_name,
+                    "style_level": _b.style_level,
+                    "list_id": _b.list_id,
+                    "list_position": _b.list_position,
+                    "list_total": _b.list_total,
+                    "list_format_type": _b.list_format_type,
+                    "list_level": _b.list_level,
+                    "table_id": _b.table_id,
+                    "row_index": _b.row_index,
+                    "column_index": _b.column_index,
+                    "row_total": _b.row_total,
+                    "col_total": _b.col_total,
+                    "table_cell_role": _b.table_cell_role,
+                }
+            # Página real por ubicación (Etapa B.7)
+            for _loc, _pinfo in (_node_page_map or {}).items():
+                meta = block_meta_map.setdefault(_loc, {})
+                meta["page_start"] = _pinfo.get("page_start")
+                meta["page_end"] = _pinfo.get("page_end")
+                meta["crosses_page"] = _pinfo.get("crosses_page")
+            if block_meta_map:
+                logger.info(
+                    f"[Etapa D] block_meta_map: {len(block_meta_map)} ubicaciones "
+                    f"con metadata estructural/página para prompts"
+                )
+        except Exception as _bm_err:
+            logger.warning(f"[Etapa D] No se pudo construir block_meta_map: {_bm_err}")
+
         # Recargar páginas después del commit de Etapa C
         pages = db.execute(
             select(Page).where(Page.doc_id == doc_id).order_by(Page.page_no)
@@ -1352,7 +1466,8 @@ def process_document_pipeline(self, doc_id: str):
         docx_patches = []
         usage_records = []
 
-        if doc.original_format == "docx":
+        # PDF nativo cuenta como DOCX-first: opera sobre el DOCX convertido
+        if doc.original_format == "docx" or doc.docx_uri:
             # ── Ruta paralela (feature flag) ──
             if settings.parallel_correction_enabled:
                 dispatched = _dispatch_parallel_correction(
@@ -1360,6 +1475,7 @@ def process_document_pipeline(self, doc_id: str):
                     config=config, profile_dict=profile_dict,
                     analysis_result=analysis_result, job=job,
                     global_context_dict=global_context_dict,
+                    block_meta_map=block_meta_map or None,
                 )
                 if dispatched:
                     stage_timings["D"] = round(time.time() - t0_d, 1)
@@ -1381,7 +1497,7 @@ def process_document_pipeline(self, doc_id: str):
             logger.info("[Etapa D] Ruta 1: corrigiendo párrafos (doble pasada Plan v4)...")
             docx_patches, usage_records, _all_paragraphs, audit_log_entries = correct_docx_sync(
                 doc_id=str(doc_id),
-                docx_uri=doc.source_uri,
+                docx_uri=docx_source_uri,
                 config=config,
                 profile=profile_dict,
                 analysis_data=analysis_result,
@@ -1389,6 +1505,8 @@ def process_document_pipeline(self, doc_id: str):
                 docx_bytes_cached=_docx_bytes,
                 global_context=global_context_dict,
                 grouped_locations=_grouped_locations or None,
+                block_meta_map=block_meta_map or None,
+                total_pages=doc.total_pages,
             )
 
             # Sprint 2: persistir mapa canónico paragraph_index → página
@@ -1555,6 +1673,7 @@ def correct_batch_llm(
     global_context_key: str | None = None,
     context_seed_window: list | None = None,
     grouped_indexes: list[int] | None = None,
+    block_meta_key: str | None = None,
 ) -> str:
     """
     Tarea Celery: Pass 2 (LLM) para un batch de párrafos [start_para..end_para].
@@ -1621,6 +1740,18 @@ def correct_batch_llm(
         # S1: Extraer term_registry del analysis_data para proteger términos en LT/LLM
         term_registry_list = analysis_data.get("terms", [])
 
+        # Fase 3/5: metadata estructural + página real por ubicación
+        block_meta_map: dict | None = None
+        if block_meta_key:
+            try:
+                block_meta_map = json.loads(
+                    minio_client.download_file(block_meta_key).decode("utf-8")
+                )
+            except Exception as bm_err:
+                logger.warning(
+                    f"[correct_batch_llm] No se pudo cargar block_meta ({block_meta_key}): {bm_err}"
+                )
+
         # LLM secuencial para este batch — Plan v4: doble pasada activada
         patches, usage_records, last_corrected_text, audit_log_entries = correct_batch_with_llm_sync(
             batch_index=batch_index,
@@ -1640,6 +1771,7 @@ def correct_batch_llm(
             global_context=global_context_dict,
             term_registry=term_registry_list,
             grouped_paragraph_indexes=set(grouped_indexes) if grouped_indexes else None,
+            block_meta_map=block_meta_map,
         )
 
         # Guardar resultado en MinIO
@@ -1931,7 +2063,7 @@ def render_approved_patches(self, doc_id: str, apply_mode: str = "accepted_and_a
             _docx_cache_key = f"docx_cache:{doc_id}"
             cached = _rcache.get(_docx_cache_key)
             if not cached:
-                _docx_bytes = minio_client.download_file(doc.source_uri)
+                _docx_bytes = minio_client.download_file(doc.docx_uri or doc.source_uri)
                 _rcache.setex(_docx_cache_key, 3600, _docx_bytes)
                 logger.info(f"[render_approved] DOCX re-cacheado ({len(_docx_bytes)} bytes)")
         except Exception as e:
@@ -2021,21 +2153,21 @@ def recorrect_single_patch(self, doc_id: str, patch_id: str, feedback: str):
         except Exception:
             pass
 
-        from app.utils.openai_client import OpenAIStyleCorrector
+        # Fase 0: este bloque importaba clases INEXISTENTES (OpenAIStyleCorrector,
+        # PromptBuilder) — toda recorrección moría con ImportError. Reescrito
+        # sobre las funciones reales del módulo.
+        from app.utils.openai_client import openai_client as _llm_client
+        from app.services.prompt_builder import build_system_prompt, build_user_prompt
         original_text = patch.original_text
 
         try:
-            corrector = OpenAIStyleCorrector()
-
             if profile_dict:
-                # Usar correct_with_profile con prompt de recorrección
-                from app.services.prompt_builder import PromptBuilder
-                builder = PromptBuilder(profile_dict)
-                system_prompt = builder.system_prompt()
-                user_prompt = builder.user_prompt(
-                    paragraph_text=original_text,
+                from app.services.llm_schemas import INDIVIDUAL_CORRECTION_SCHEMA
+                system_prompt = build_system_prompt()
+                user_prompt = build_user_prompt(
+                    text=original_text,
+                    profile=profile_dict,
                     paragraph_index=patch.paragraph_index or 0,
-                    context_paragraphs=[],
                 )
                 # Inyectar feedback al user prompt
                 user_prompt += (
@@ -2044,10 +2176,12 @@ def recorrect_single_patch(self, doc_id: str, patch_id: str, feedback: str):
                     f"Texto corregido anterior: \"{patch.corrected_text}\"\n"
                     f"Corrige nuevamente considerando este feedback."
                 )
-                data, usage = corrector.correct_with_profile(
+                data, usage = _llm_client.correct_with_profile(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
-                    max_length=int(len(original_text) * 1.1),
+                    max_length=int(len(original_text) * 1.5),
+                    response_schema=INDIVIDUAL_CORRECTION_SCHEMA,
+                    schema_name="recorreccion",
                 )
             else:
                 # Fallback: correct_text_style con contexto de feedback
@@ -2056,7 +2190,7 @@ def recorrect_single_patch(self, doc_id: str, patch_id: str, feedback: str):
                     f"[FEEDBACK del usuario: {feedback}. "
                     f"Corrección anterior: {patch.corrected_text}]"
                 )
-                corrected, usage = corrector.correct_text_style(
+                corrected, usage = _llm_client.correct_text_style(
                     original_text=feedback_text,
                     context_blocks=[],
                 )
@@ -2069,7 +2203,7 @@ def recorrect_single_patch(self, doc_id: str, patch_id: str, feedback: str):
                     patch.review_status = "pending"
                     patch.decision_source = "ai_recorrection"
                     patch.explanation = data.get("explanation", f"Recorrección #{patch.recorrection_count}")
-                    patch.model_used = corrector.model
+                    patch.model_used = settings.openai_model
                     logger.info(f"[recorrect] Patch {patch_id} recorregido exitosamente")
 
         except Exception as llm_err:
@@ -2180,10 +2314,11 @@ def rerender_candidate_preview(self, doc_id: str):
             f"[Rerender] {len(docx_patches)} patches → re-renderizando candidato para {doc_id}"
         )
 
-        _docx_bytes = _get_cached_docx_bytes(str(doc_id), doc.source_uri)
+        _rr_docx_uri = doc.docx_uri or doc.source_uri
+        _docx_bytes = _get_cached_docx_bytes(str(doc_id), _rr_docx_uri)
         render_docx_first_sync(
             doc_id=str(doc_id),
-            docx_uri=doc.source_uri,
+            docx_uri=_rr_docx_uri,
             filename=doc.filename,
             all_patches=docx_patches,
             docx_bytes_cached=_docx_bytes,

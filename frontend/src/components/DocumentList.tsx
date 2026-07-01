@@ -84,7 +84,7 @@ export function DocumentList({ documents, onRefresh }: Props) {
         </div>
         <p className="font-semibold text-bruma text-lg">Sin documentos</p>
         <p className="text-sm text-plomo mt-2 max-w-xs mx-auto">
-          Sube tu primer archivo .docx para comenzar a corregir con IA
+          Sube un archivo .docx o .pdf para comenzar a corregir con IA
         </p>
       </div>
     );

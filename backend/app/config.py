@@ -94,6 +94,18 @@ class Settings(BaseSettings):
     openai_max_retries: int = 3
     openai_timeout: float = 60.0
 
+    # --- Fase 5: contrato estructurado del LLM ---
+    openai_use_json_schema: bool = True   # Structured Outputs (json_schema strict)
+    openai_seed: int | None = 42          # reproducibilidad del audit trail (None = sin seed)
+    prompt_protected_terms_cap: int = 20  # máx términos protegidos por prompt (filtrados por relevancia)
+
+    # --- Fases 1-3: AST documental y paginación real ---
+    structural_parser_enabled: bool = True   # Etapa B.6: parse a document_nodes
+    page_alignment_enabled: bool = True      # Etapa B.7: alineación PDF↔nodos
+
+    # --- Fase 6: motor de reconstrucción run-level ---
+    run_splicer_enabled: bool = True         # splice por diff de runs (preserva formato intra-párrafo)
+
     # --- Corrección paralela por lotes (Stage D) ---
     parallel_correction_enabled: bool = False       # OFF por defecto; activar cuando esté validado
     parallel_correction_batch_size: int = 150       # párrafos objetivo por lote

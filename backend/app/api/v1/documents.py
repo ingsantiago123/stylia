@@ -68,17 +68,21 @@ async def upload_document(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Sube un documento DOCX y lanza el pipeline de procesamiento.
+    Sube un documento DOCX o PDF (digital) y lanza el pipeline de procesamiento.
+
+    PDFs: se convierten internamente a DOCX (pdf2docx) en la Etapa A.
+    PDFs escaneados (sin capa de texto) fallan en ingesta con mensaje claro.
     """
     # Validar formato
     if not file.filename:
         raise HTTPException(400, "Nombre de archivo requerido")
 
     filename_lower = file.filename.lower()
-    if not filename_lower.endswith(".docx"):
+    if not (filename_lower.endswith(".docx") or filename_lower.endswith(".pdf")):
         raise HTTPException(
             400,
-            "MVP 1 solo acepta archivos .docx. Soporte PDF en fase posterior."
+            "Formatos aceptados: .docx y .pdf (digital, con capa de texto). "
+            "PDFs escaneados requieren OCR (fase posterior)."
         )
 
     # Validar tamaño

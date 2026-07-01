@@ -19,8 +19,9 @@ export function DocumentUploader({ onSuccess, onUploaded }: Props) {
       const file = acceptedFiles[0];
       if (!file) return;
 
-      if (!file.name.toLowerCase().endsWith(".docx")) {
-        setError("Solo se aceptan archivos .docx en el MVP");
+      const nameLower = file.name.toLowerCase();
+      if (!nameLower.endsWith(".docx") && !nameLower.endsWith(".pdf")) {
+        setError("Formatos aceptados: .docx y .pdf (digital, con texto seleccionable)");
         return;
       }
 
@@ -49,6 +50,7 @@ export function DocumentUploader({ onSuccess, onUploaded }: Props) {
     onDrop,
     accept: {
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+      "application/pdf": [".pdf"],
     },
     maxFiles: 1,
     disabled: uploading,
@@ -105,10 +107,10 @@ export function DocumentUploader({ onSuccess, onUploaded }: Props) {
           ) : (
             <div>
               <p className="text-bruma font-medium">
-                Arrastra un archivo <span className="text-gradient-krypton font-semibold">.docx</span>
+                Arrastra un archivo <span className="text-gradient-krypton font-semibold">.docx</span> o <span className="text-gradient-krypton font-semibold">.pdf</span>
               </p>
               <p className="text-plomo text-sm mt-1">
-                o haz clic para seleccionar &middot; Max. 500 MB
+                o haz clic para seleccionar &middot; Max. 500 MB &middot; PDF: solo digitales (con texto)
               </p>
             </div>
           )}

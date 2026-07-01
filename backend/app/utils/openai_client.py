@@ -9,7 +9,10 @@ import threading
 import time
 from typing import Optional, Callable
 
-from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError
+from openai import (
+    OpenAI, RateLimitError, APITimeoutError, APIConnectionError,
+    AuthenticationError,
+)
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.config import settings
@@ -50,6 +53,12 @@ class OpenAIClient:
         # Semáforo: max 3 llamadas concurrentes a OpenAI por proceso
         self._semaphore = threading.Semaphore(3)
 
+        # Circuit breaker: tras un 401 (API key inválida) se suspenden las
+        # llamadas de este proceso — antes se disparaban cientos de requests
+        # condenados (uno por párrafo) y el documento "completaba" sin que
+        # nadie viera que la IA nunca corrió.
+        self._auth_failed = False
+
         # Build tenacity retry decorator from config
         self._retry = retry(
             stop=stop_after_attempt(settings.openai_max_retries),
@@ -76,9 +85,15 @@ class OpenAIClient:
         """
         empty_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-        if not self.client:
-            logger.warning("OpenAI cliente no disponible, usando simulación")
-            return self._simulate_correction(original_text), empty_usage
+        if not self.client or self._auth_failed:
+            # Fase 0: antes aquí se "simulaba" una corrección con reemplazos
+            # hardcodeados — fabricaba cambios falsos en producción cuando
+            # faltaba la API key. Ahora se devuelve None (sin corrección).
+            logger.warning(
+                "OpenAI no disponible (API key ausente o inválida) — "
+                "párrafo sin corrección de estilo"
+            )
+            return None, empty_usage
             
         # Construir contexto
         context_text = ""
@@ -148,6 +163,8 @@ Formato de respuesta JSON requerido:
             return corrected_text, usage
 
         except Exception as e:
+            if isinstance(e, AuthenticationError):
+                self._mark_auth_failed()
             logger.error(f"Error al llamar OpenAI API: {e}")
             return None, empty_usage
     
@@ -159,6 +176,8 @@ Formato de respuesta JSON requerido:
         model_override: str | None = None,
         max_tokens_override: int | None = None,
         on_audit_log: Callable[[dict], None] | None = None,
+        response_schema: dict | None = None,
+        schema_name: str = "correccion",
     ) -> tuple[dict | None, dict]:
         """
         MVP2: Corrección con prompts parametrizados.
@@ -167,11 +186,17 @@ Formato de respuesta JSON requerido:
         Args:
             model_override: Modelo alternativo (ej. editorial). Si None usa self.model.
             max_tokens_override: Límite de tokens para esta llamada. Si None usa self.max_tokens.
+            response_schema: Fase 5 — JSON Schema estricto (Structured Outputs).
+                La API garantiza la forma de la respuesta; si el modelo/API no
+                lo soporta se cae automáticamente a json_object.
         """
         empty_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         if not self.client:
             logger.warning("OpenAI cliente no disponible")
+            return None, empty_usage
+        if self._auth_failed:
+            # Circuit breaker abierto: no quemar más llamadas con key inválida
             return None, empty_usage
 
         model = model_override or self.model
@@ -186,6 +211,20 @@ Formato de respuesta JSON requerido:
             "max_completion_tokens": max_tokens,
             "temperature": self.temperature,
         }
+        # Fase 5: reproducibilidad del audit trail
+        if settings.openai_seed is not None:
+            request_payload["seed"] = settings.openai_seed
+
+        response_format: dict = {"type": "json_object"}
+        if response_schema and settings.openai_use_json_schema:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": response_schema,
+                },
+            }
 
         t0 = time.monotonic()
         try:
@@ -197,11 +236,27 @@ Formato de respuesta JSON requerido:
             usage = dict(empty_usage)
             for attempt_tokens in (max_tokens, max_tokens * 2):
                 request_payload["max_completion_tokens"] = attempt_tokens
-                with self._semaphore:
-                    response = self._retry(self.client.chat.completions.create)(
-                        **{k: v for k, v in request_payload.items()},
-                        response_format={"type": "json_object"},
-                    )
+                try:
+                    with self._semaphore:
+                        response = self._retry(self.client.chat.completions.create)(
+                            **{k: v for k, v in request_payload.items()},
+                            response_format=response_format,
+                        )
+                except Exception as _sf_err:
+                    # Fallback: modelos/APIs sin soporte json_schema strict
+                    if response_format.get("type") == "json_schema":
+                        logger.warning(
+                            f"json_schema falló ({type(_sf_err).__name__}: {_sf_err}) "
+                            f"— fallback a json_object"
+                        )
+                        response_format = {"type": "json_object"}
+                        with self._semaphore:
+                            response = self._retry(self.client.chat.completions.create)(
+                                **{k: v for k, v in request_payload.items()},
+                                response_format=response_format,
+                            )
+                    else:
+                        raise
                 attempt_usage = _extract_usage(response)
                 # Acumular usage de todos los intentos (costo honesto)
                 for k in usage:
@@ -294,6 +349,8 @@ Formato de respuesta JSON requerido:
 
         except Exception as e:
             latency_ms = int((time.monotonic() - t0) * 1000)
+            if isinstance(e, AuthenticationError):
+                self._mark_auth_failed()
             logger.error(f"Error en correct_with_profile: {e}")
             if on_audit_log:
                 on_audit_log({
@@ -308,25 +365,21 @@ Formato de respuesta JSON requerido:
                 })
             return None, empty_usage
 
-    def _simulate_correction(self, text: str) -> str:
-        """Simulación de corrección cuando no hay API key."""
-        # Mejoras básicas de estilo como respaldo
-        style_improvements = {
-            "Este texto": "El presente texto",
-            "Sirve para": "Se utiliza para",
-            "tu sistema": "el sistema",
-            " más elegante y claro": " con mayor elegancia y claridad",
-            "A veces": "En ocasiones",
-            "por que": "porque"
-        }
-        
-        corrected = text
-        for original, improved in style_improvements.items():
-            if original in corrected:
-                corrected = corrected.replace(original, improved)
-                break
-                
-        return corrected
+    def _mark_auth_failed(self) -> None:
+        """Abre el circuit breaker tras un 401: la key es inválida/revocada.
+
+        Sin esto, un documento de N párrafos disparaba N llamadas HTTP
+        condenadas (con retries) y terminaba "completed" sin que el operador
+        viera que la IA jamás corrió.
+        """
+        if not self._auth_failed:
+            logger.error(
+                "OPENAI_API_KEY INVÁLIDA (401): se suspenden las llamadas LLM "
+                "de este proceso. El documento continuará SOLO con LanguageTool. "
+                "Verifica la clave en .env y RECREA los contenedores "
+                "(docker compose up -d — 'restart' NO recarga el .env)."
+            )
+        self._auth_failed = True
 
 
 # Instancia global del cliente

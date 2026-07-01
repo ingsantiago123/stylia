@@ -375,286 +375,61 @@ def _generate_original_page_annotations(
 _WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
-def _clear_run_text_preserve_breaks(run) -> None:
-    """Elimina elementos w:t del run preservando w:br y otros elementos estructurales."""
-    for t_elem in list(run._r.findall(qn('w:t'))):
-        run._r.remove(t_elem)
-
-
-def _get_page_break_info(paragraph) -> tuple[int, int, float] | None:
-    """
-    Encuentra el salto de página interno en un párrafo.
-
-    Returns (run_idx, text_before_break_len, fraction_before) or None if not found.
-    fraction_before: proporción de texto que está ANTES del salto (0.0–1.0).
-    """
-    total_text = paragraph.text or ""
-    total_len = max(len(total_text), 1)
-    text_so_far = 0
-
-    for run_idx, run in enumerate(paragraph.runs):
-        run_text = run.text or ""
-        # Buscar w:br type="page" dentro del run
-        for br_elem in run._r.findall(f".//{{{_WORD_NS}}}br"):
-            br_type = br_elem.get(f"{{{_WORD_NS}}}type")
-            if br_type == "page":
-                # Textos en w:t BEFORE el br en este run
-                text_before_br = ""
-                for child in run._r:
-                    tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-                    if tag == "br" and child.get(f"{{{_WORD_NS}}}type") == "page":
-                        break
-                    if tag == "t":
-                        text_before_br += child.text or ""
-                text_before_break = text_so_far + len(text_before_br)
-                fraction = text_before_break / total_len
-                return (run_idx, text_before_break, fraction)
-        text_so_far += len(run_text)
-    return None
-
-
-def _apply_text_with_page_break(paragraph, new_text: str, fraction_before: float) -> bool:
-    """
-    Aplica new_text a un párrafo que contiene un salto de página interno.
-
-    Divide new_text proporcionalmente según fraction_before:
-    - Texto antes del salto → runs anteriores al w:br
-    - Texto después del salto → runs posteriores al w:br
-
-    Preserva el w:br en su posición original.
-    Retorna True si aplicó cambios.
-    """
-    runs = paragraph.runs
-    if not runs:
-        return False
-
-    split_pos = max(0, min(int(len(new_text) * fraction_before), len(new_text)))
-
-    # Respetar palabra completa: no cortar en medio de una palabra
-    if 0 < split_pos < len(new_text):
-        # Buscar el espacio más cercano a la izquierda del split_pos
-        space_pos = new_text.rfind(" ", 0, split_pos + 1)
-        if space_pos > split_pos - 30:  # solo si el espacio está cerca
-            split_pos = space_pos + 1
-
-    text_before = new_text[:split_pos].rstrip()
-    text_after = new_text[split_pos:].lstrip()
-
-    # Encontrar el run que contiene el w:br type="page"
-    br_run_idx = None
-    for i, run in enumerate(runs):
-        for br_elem in run._r.findall(f".//{{{_WORD_NS}}}br"):
-            if br_elem.get(f"{{{_WORD_NS}}}type") == "page":
-                br_run_idx = i
-                break
-        if br_run_idx is not None:
-            break
-
-    if br_run_idx is None:
-        # Fallback: no encontró el break, usar comportamiento normal
-        runs[0].text = new_text
-        for run in runs[1:]:
-            _clear_run_text_preserve_breaks(run)
-        return True
-
-    # Runs antes del salto: poner text_before en el último run antes del br
-    if br_run_idx > 0:
-        dominant_before = max(runs[:br_run_idx], key=lambda r: len(r.text or ""))
-        _copy_run_format(runs[0], dominant_before)
-        runs[0].text = text_before
-        for run in runs[1:br_run_idx]:
-            _clear_run_text_preserve_breaks(run)
-    else:
-        # El br está en el run 0: texto_before va en este mismo run (antes del br)
-        _set_run_text_before_br(runs[0], text_before)
-
-    # Run del salto: preservar el w:br, poner text_after después de él
-    _set_run_text_after_br(runs[br_run_idx], text_after)
-
-    # Runs después del salto: limpiar
-    for run in runs[br_run_idx + 1:]:
-        _clear_run_text_preserve_breaks(run)
-
-    return True
-
-
-def _set_run_text_before_br(run, text: str) -> None:
-    """Coloca texto ANTES del primer w:br type="page" en el run, preservando el br."""
-    from lxml import etree
-    r_elem = run._r
-    # Eliminar w:t existentes que estén ANTES del br
-    br_pos = None
-    for i, child in enumerate(r_elem):
-        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-        if tag == "br" and child.get(f"{{{_WORD_NS}}}type") == "page":
-            br_pos = i
-            break
-        if tag == "t":
-            r_elem.remove(child)
-
-    if not text:
-        return
-
-    # Insertar w:t con el texto antes del br (o al inicio si no hay br)
-    t_elem = etree.SubElement(r_elem, qn("w:t"))
-    t_elem.text = text
-    if text.startswith(" ") or text.endswith(" "):
-        t_elem.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-
-    if br_pos is not None:
-        # Mover el w:t al índice correcto (antes del br)
-        r_elem.remove(t_elem)
-        r_elem.insert(br_pos, t_elem)
-
-
-def _set_run_text_after_br(run, text: str) -> None:
-    """Coloca texto DESPUÉS del primer w:br type="page" en el run."""
-    from lxml import etree
-    r_elem = run._r
-
-    # Eliminar w:t existentes DESPUÉS del br
-    br_found = False
-    for child in list(r_elem):
-        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-        if br_found and tag == "t":
-            r_elem.remove(child)
-        if tag == "br" and child.get(f"{{{_WORD_NS}}}type") == "page":
-            br_found = True
-
-    if not text:
-        return
-
-    # Añadir w:t con texto después (al final del run)
-    t_elem = etree.SubElement(r_elem, qn("w:t"))
-    t_elem.text = text
-    if text.startswith(" ") or text.endswith(" "):
-        t_elem.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-
-
-def _copy_run_format(target, source) -> None:
-    """Copia propiedades de formato clave de un run origen a un run destino."""
-    try:
-        if source.bold is not None:
-            target.bold = source.bold
-        if source.italic is not None:
-            target.italic = source.italic
-        if source.underline is not None:
-            target.underline = source.underline
-        if source.font.size is not None:
-            target.font.size = source.font.size
-        if source.font.name:
-            target.font.name = source.font.name
-    except Exception:
-        pass
-    try:
-        if source.font.color.type is not None:
-            target.font.color.rgb = source.font.color.rgb
-    except Exception:
-        pass
-
-
-def _get_hyperlink_text_ranges(paragraph) -> list[tuple[int, int]]:
-    """Calcula los rangos (start, end) de offset de texto que están dentro de hipervínculos.
-    Si no hay hipervínculos, retorna lista vacía.
-    """
-    hyperlinks = paragraph._p.findall('.//' + qn('w:hyperlink'))
-    if not hyperlinks:
-        return []
-
-    ranges: list[tuple[int, int]] = []
-    full_text = paragraph.text
-    cursor = 0
-    for hl in hyperlinks:
-        # Concatenar todo el w:t dentro del hyperlink
-        link_text = "".join(t.text or "" for t in hl.findall('.//' + qn('w:t')))
-        if not link_text:
-            continue
-        # Localizar el primer match a partir del cursor (handles repetidos)
-        idx = full_text.find(link_text, cursor)
-        if idx >= 0:
-            ranges.append((idx, idx + len(link_text)))
-            cursor = idx + len(link_text)
-    return ranges
-
-
-def _modification_overlaps_hyperlink(
-    original: str, corrected: str, hl_ranges: list[tuple[int, int]]
-) -> bool:
-    """True si las regiones modificadas (diff) solapan con alguno de los rangos de hyperlink."""
-    if not hl_ranges:
-        return False
-    matcher = SequenceMatcher(None, original, corrected, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        # Hay modificación entre i1..i2 del original
-        for hl_start, hl_end in hl_ranges:
-            if i1 < hl_end and i2 > hl_start:
-                return True
-    return False
+# Fase 6: los helpers de colapso de runs (_clear_run_text_preserve_breaks,
+# _copy_run_format), el split proporcional de saltos de página
+# (_get_page_break_info, _apply_text_with_page_break, _set_run_text_*_br)
+# y la detección parcial de hipervínculos (_get_hyperlink_text_ranges,
+# _modification_overlaps_hyperlink) fueron ELIMINADOS: el motor run_splicer
+# los reemplaza con edición segura por diff y verificación post-aplicación.
 
 
 def _apply_text_to_paragraph_runs(paragraph, new_text: str) -> bool:
     """
-    Aplica un nuevo texto a un párrafo preservando estructura de formato y elementos XML.
+    Aplica un nuevo texto a un párrafo preservando estructura de formato.
 
-    Reglas de prioridad:
-    1. Hipervínculos: si la corrección los toca, omitir (manual_review).
-    2. Salto de página interno: dividir new_text proporcionalmente para preservar el corte.
-    3. Run único: asignación directa.
-    4. Múltiples runs: formato del dominante → run 0 con todo el texto, resto limpio.
+    Fase 6: usa el motor de splice run-level (run_splicer), que edita SOLO
+    los w:t afectados por el diff. Preserva negritas/cursivas intra-párrafo,
+    hipervínculos, referencias de nota, drawings y saltos (tab/br) por
+    construcción, con verificación post-aplicación y rollback.
+
+    El colapso de runs anterior (todo el texto al run dominante) destruía el
+    formato interno del párrafo y duplicaba texto de hipervínculos: queda
+    eliminado. Si el splice no es aplicable, el único fallback permitido es
+    el caso trivial (un solo run de texto puro); en el resto el párrafo se
+    omite SIN modificarlo (el patch queda applied=False → revisión).
 
     Retorna True si hubo cambios aplicados al párrafo.
     """
-    runs = paragraph.runs
-    if not runs:
-        return False
-
     old_text = paragraph.text
     if old_text == new_text:
         return False
 
-    # Fase 0: omitir SIEMPRE párrafos con hipervínculos. python-docx excluye
-    # los runs de w:hyperlink de paragraph.runs pero los incluye en
-    # paragraph.text → escribir new_text (que contiene el texto del enlace)
-    # en runs[0] sin vaciar el hyperlink DUPLICABA el texto del enlace.
-    # Hasta que exista edición a nivel de run (Fase 6 del plan), la única
-    # opción segura es no tocar estos párrafos.
-    hl_ranges = _get_hyperlink_text_ranges(paragraph)
-    if hl_ranges:
-        logger.info(
-            f"Párrafo omitido: contiene hipervínculos (edición no destructiva "
-            f"no disponible para hyperlinks; rangos={hl_ranges})"
-        )
-        return False
+    from app.config import settings as _settings
+    if getattr(_settings, "run_splicer_enabled", True):
+        from app.services.run_splicer import splice_paragraph_text
+        if splice_paragraph_text(paragraph, new_text):
+            return True
 
-    # Detección de salto de página interno: dividir texto proporcionalmente
-    pb_info = _get_page_break_info(paragraph)
-    if pb_info is not None:
-        _run_idx, _text_before_len, fraction_before = pb_info
-        logger.debug(
-            f"Párrafo con salto de página interno "
-            f"(fracción antes: {fraction_before:.2f}) — aplicando división proporcional"
-        )
-        return _apply_text_with_page_break(paragraph, new_text, fraction_before)
-
-    if len(runs) == 1:
+    # Fallback seguro: SOLO un run, de texto puro, sin hyperlinks ni
+    # elementos especiales. Cualquier otra estructura se omite.
+    runs = paragraph.runs
+    if (
+        len(runs) == 1
+        and not paragraph._p.findall('.//' + qn('w:hyperlink'))
+        and not runs[0]._r.findall(qn('w:br'))
+        and not runs[0]._r.findall(qn('w:tab'))
+        and not runs[0]._r.findall(qn('w:drawing'))
+        and not runs[0]._r.findall(qn('w:footnoteReference'))
+        and (runs[0].text or "") == old_text
+    ):
         runs[0].text = new_text
         return True
 
-    # Múltiples runs: copiar formato del run con más texto al primer run
-    dominant = max(runs, key=lambda r: len(r.text or ""))
-    r0 = runs[0]
-    if dominant is not r0:
-        _copy_run_format(r0, dominant)
-
-    r0.text = new_text
-
-    # Limpiar runs secundarios preservando w:br (saltos de línea/página/columna)
-    for run in runs[1:]:
-        _clear_run_text_preserve_breaks(run)
-
-    return True
+    logger.info(
+        "Párrafo omitido: estructura compleja no editable de forma segura "
+        "(sin fallback destructivo)"
+    )
+    return False
 
 
 def _get_paragraph_by_location(doc: DocxDocument, location: str):

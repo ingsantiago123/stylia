@@ -29,7 +29,10 @@ export function UploadStep({ onUploaded }: UploadStepProps) {
 
   const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
     onDrop,
-    accept: { "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"] },
+    accept: {
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+      "application/pdf": [".pdf"],
+    },
     maxFiles: 1,
     maxSize: 500 * 1024 * 1024,
     disabled: uploading,
@@ -39,7 +42,8 @@ export function UploadStep({ onUploaded }: UploadStepProps) {
     <div className="flex flex-col items-center text-center max-w-lg mx-auto">
       <h2 className="text-heading-3 text-bruma mb-2">Sube tu documento</h2>
       <p className="text-sm text-plomo mb-8">
-        Acepta archivos <span className="text-bruma font-medium">.docx</span> de hasta 500 MB.
+        Acepta archivos <span className="text-bruma font-medium">.docx</span> y{" "}
+        <span className="text-bruma font-medium">.pdf</span> (digital) de hasta 500 MB.
         El formato original se preservará intacto.
       </p>
 
@@ -56,7 +60,7 @@ export function UploadStep({ onUploaded }: UploadStepProps) {
             : "border-border hover:border-krypton/50 hover:bg-krypton/5",
         ].join(" ")}
       >
-        <input {...getInputProps()} aria-label="Seleccionar archivo DOCX" />
+        <input {...getInputProps()} aria-label="Seleccionar archivo DOCX o PDF" />
 
         {/* Icon */}
         <div className={[
@@ -84,13 +88,13 @@ export function UploadStep({ onUploaded }: UploadStepProps) {
           {uploading ? (
             <p className="text-sm font-medium text-krypton">Subiendo documento…</p>
           ) : isDragReject ? (
-            <p className="text-sm font-medium text-red-400">Solo se aceptan archivos .docx</p>
+            <p className="text-sm font-medium text-red-400">Solo se aceptan archivos .docx o .pdf (digital)</p>
           ) : isDragActive ? (
             <p className="text-sm font-medium text-krypton">Suelta aquí para subir</p>
           ) : (
             <>
               <p className="text-sm font-medium text-bruma">
-                Arrastra tu archivo aquí
+                Arrastra tu <span className="text-krypton">.docx</span> o <span className="text-krypton">.pdf</span> aquí
               </p>
               <p className="text-xs text-plomo">
                 o{" "}
