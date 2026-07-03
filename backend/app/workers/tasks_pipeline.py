@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-from sqlalchemy import create_engine, delete, select, update
+from sqlalchemy import create_engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 import redis as _redis
@@ -28,6 +28,8 @@ from app.models.llm_usage import LlmUsage
 from app.models.correction_batch import CorrectionBatch
 from app.models.document_global_context import DocumentGlobalContext
 from app.models.llm_audit_log import LlmAuditLog
+from app.models.pipeline_run import PipelineRun
+from app.models.document_node import DocumentNode
 
 from app.utils import minio_client
 from app.services.ingestion import process_ingestion_sync
@@ -90,14 +92,23 @@ def _get_cached_docx_bytes(doc_id: str, docx_uri: str) -> bytes:
 
 
 def _acquire_pipeline_slot(doc_id: str) -> bool:
-    """Intenta adquirir un slot de pipeline. Retorna True si fue exitoso."""
+    """
+    Intenta adquirir un slot de pipeline. Retorna True si fue exitoso.
+
+    Fase 7: clave POR DOCUMENTO con TTL individual (SET NX EX). Antes era un
+    SET global cuyo expire se renovaba con cada adquisición: un worker muerto
+    dejaba su slot ocupado hasta que TODO el set expirara. Ahora cada slot
+    expira solo, sin afectar a los demás.
+    """
     try:
         r = _redis.Redis.from_url(settings.redis_url)
-        current = r.scard("active_pipelines")
-        if current >= settings.max_concurrent_pipelines:
+        slot_key = f"pipeline_slot:{doc_id}"
+        if not r.set(slot_key, "1", nx=True, ex=7200):
+            return True  # el mismo documento ya posee su slot (reintento)
+        active = len(r.keys("pipeline_slot:*"))
+        if active > settings.max_concurrent_pipelines:
+            r.delete(slot_key)
             return False
-        r.sadd("active_pipelines", doc_id)
-        r.expire("active_pipelines", 7200)
         return True
     except Exception as e:
         logger.warning(f"[Semáforo] Error adquiriendo slot: {e}")
@@ -108,7 +119,7 @@ def _release_pipeline_slot(doc_id: str) -> None:
     """Libera un slot de pipeline."""
     try:
         r = _redis.Redis.from_url(settings.redis_url)
-        r.srem("active_pipelines", doc_id)
+        r.delete(f"pipeline_slot:{doc_id}")
     except Exception:
         pass
 
@@ -162,6 +173,12 @@ def _update_progress(
     if start_stage or (now_ts - _last_progress_commit.get(key, 0)) >= commit_interval:
         db.commit()
         _last_progress_commit[key] = now_ts
+    # Fase 7: acotar el dict a nivel de módulo — antes crecía sin límite y
+    # sobrevivía entre documentos dentro del worker prefork.
+    if len(_last_progress_commit) > 512:
+        stale = [k for k in _last_progress_commit if not k.startswith(f"{doc_id}:")]
+        for k in stale:
+            _last_progress_commit.pop(k, None)
 
 
 def _save_stage_timing(db: Session, doc_id: str, stage_timings: dict) -> None:
@@ -221,6 +238,178 @@ def _complete_job(db: Session, job: Job, error: str = None) -> None:
     else:
         job.status = "completed"
     db.commit()
+
+
+# =====================================================================
+# FASE 4: PIPELINE RUNS — checkpoints, resumibilidad y kill-switch de costo
+# =====================================================================
+
+class CostLimitExceeded(Exception):
+    """Kill-switch: el costo LLM acumulado del documento superó el tope."""
+
+
+def _get_or_create_run(
+    db: Session, doc_id: str, celery_task_id: str, retries: int
+) -> PipelineRun | None:
+    """
+    Recupera el run 'running' del documento si esto es un reintento (para
+    reanudar desde el último checkpoint) o crea un run nuevo. Un run nuevo
+    supersede cualquier run 'running' huérfano.
+    Retorna None si los checkpoints están deshabilitados o si la tabla no
+    existe todavía (migración pendiente) — el pipeline funciona sin ellos.
+    """
+    if not settings.pipeline_checkpoints_enabled:
+        return None
+    try:
+        existing = db.execute(
+            select(PipelineRun)
+            .where(PipelineRun.doc_id == doc_id, PipelineRun.status == "running")
+            .order_by(PipelineRun.run_no.desc())
+        ).scalars().first()
+
+        if existing is not None and retries > 0:
+            existing.celery_task_id = celery_task_id
+            existing.retries = retries
+            db.commit()
+            done_stages = list((existing.checkpoint_json or {}).keys())
+            logger.info(
+                f"[Fase 4] Reanudando run #{existing.run_no} de {doc_id} "
+                f"(checkpoints completados: {done_stages or 'ninguno'})"
+            )
+            return existing
+
+        if existing is not None:
+            existing.status = "failed"
+            existing.error_message = "superseded por un run nuevo"
+            existing.finished_at = datetime.now(timezone.utc)
+
+        max_no = db.execute(
+            select(func.max(PipelineRun.run_no)).where(PipelineRun.doc_id == doc_id)
+        ).scalar() or 0
+        run = PipelineRun(
+            doc_id=doc_id,
+            run_no=max_no + 1,
+            celery_task_id=celery_task_id,
+            cost_limit_usd=settings.max_cost_per_doc_usd or None,
+        )
+        db.add(run)
+        db.commit()
+        return run
+    except Exception as e:
+        logger.warning(f"[Fase 4] pipeline_runs no disponible (¿migración pendiente?): {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _ckpt(run: PipelineRun | None, stage: str) -> dict | None:
+    """Checkpoint de una etapa, o None si no se completó (o no hay run)."""
+    if run is None:
+        return None
+    return (run.checkpoint_json or {}).get(stage)
+
+
+def _ckpt_set(db: Session, run: PipelineRun | None, stage: str, data: dict | None = None) -> None:
+    """Marca una etapa como completada persistiendo sus artefactos."""
+    if run is None:
+        return
+    try:
+        ck = dict(run.checkpoint_json or {})
+        ck[stage] = data if data is not None else {"done": True}
+        run.checkpoint_json = ck
+        run.current_stage = stage
+        db.commit()
+    except Exception as e:
+        logger.warning(f"[Fase 4] No se pudo guardar checkpoint {stage}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _finish_run(
+    db: Session, run: PipelineRun | None, status: str = "completed", error: str | None = None
+) -> None:
+    if run is None:
+        return
+    try:
+        run.status = status
+        if error:
+            run.error_message = error[:2000]
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _check_cost_limit(db: Session, doc_id: str, run: PipelineRun | None) -> None:
+    """
+    Kill-switch de costo (Fase 4): sincroniza el costo LLM acumulado del
+    documento en el run y aborta con CostLimitExceeded si supera el tope.
+    """
+    limit = None
+    if run is not None and run.cost_limit_usd:
+        limit = run.cost_limit_usd
+    elif settings.max_cost_per_doc_usd:
+        limit = settings.max_cost_per_doc_usd
+
+    total = 0.0
+    try:
+        total = float(db.execute(
+            select(func.sum(LlmUsage.cost_usd)).where(LlmUsage.doc_id == doc_id)
+        ).scalar() or 0.0)
+        if run is not None:
+            run.cost_usd = total
+            db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    if limit and total > limit:
+        raise CostLimitExceeded(
+            f"Costo LLM acumulado ${total:.4f} USD supera el tope ${limit:.4f} USD "
+            f"— run abortado por kill-switch"
+        )
+
+
+def _load_node_page_map(db: Session, doc_id: str) -> dict[str, dict]:
+    """
+    Fase 3: mapa location → página REAL desde document_nodes (alineación B.7).
+    Lo consumen las anotaciones de preview en lugar de la interpolación lineal.
+    """
+    page_map: dict[str, dict] = {}
+    try:
+        rows = db.execute(
+            select(
+                DocumentNode.legacy_location,
+                DocumentNode.page_start,
+                DocumentNode.page_end,
+                DocumentNode.revision,
+            )
+            .where(
+                DocumentNode.doc_id == doc_id,
+                DocumentNode.legacy_location.isnot(None),
+                DocumentNode.page_start.isnot(None),
+            )
+            .order_by(DocumentNode.revision.asc())
+        ).all()
+        # Revisión más alta gana (se itera ascendente y se sobreescribe)
+        for loc, p_start, p_end, _rev in rows:
+            page_map[loc] = {
+                "page_start": p_start,
+                "page_end": p_end,
+                "crosses_page": bool(p_end and p_start and p_end > p_start),
+            }
+    except Exception as e:
+        logger.warning(f"[Fase 3] No se pudo cargar el mapa de páginas de nodos: {e}")
+    return page_map
 
 
 # =====================================================================
@@ -567,6 +756,7 @@ def _run_candidate_render(db: Session, doc_id: str) -> None:
         docx_bytes_cached=_docx_bytes,
         apply_mode="all",
         render_mode="candidate",
+        location_pages=_load_node_page_map(db, str(doc_id)),
     )
 
     elapsed = round(time.time() - t0, 1)
@@ -701,6 +891,7 @@ def _run_stage_e(db: Session, doc_id: str, apply_mode: str = "accepted_and_auto"
         all_patches=docx_patches,
         docx_bytes_cached=_docx_bytes_for_render,
         apply_mode="all",  # Already filtered above
+        location_pages=_load_node_page_map(db, str(doc_id)),
     )
 
     # H4: marcar como aplicados SOLO los patches que el renderer aplicó de
@@ -969,6 +1160,7 @@ def process_document_pipeline(self, doc_id: str):
     """
     db = _get_sync_session()
     job = None
+    run = None
 
     try:
         # Semáforo: limitar pipelines concurrentes
@@ -979,7 +1171,17 @@ def process_document_pipeline(self, doc_id: str):
         doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one()
         job = _create_job(db, doc_id, "full_pipeline", self.request.id)
 
+        # Fase 4: run resumible con checkpoints por etapa. En un reintento de
+        # Celery las etapas ya completadas se saltan (no se re-paga LLM).
+        run = _get_or_create_run(db, doc_id, self.request.id, self.request.retries)
+        resuming = run is not None and bool(run.checkpoint_json)
+
         stage_timings: dict[str, float] = {}
+        if resuming:
+            _doc_timings = db.execute(
+                select(Document.stage_timings).where(Document.id == doc_id)
+            ).scalar_one_or_none()
+            stage_timings = dict(_doc_timings or {})
         worker_host = socket.gethostname()
         pipeline_start_dt = datetime.now(timezone.utc)
 
@@ -987,78 +1189,103 @@ def process_document_pipeline(self, doc_id: str):
             update(Document).where(Document.id == doc_id).values(
                 processing_started_at=pipeline_start_dt,
                 processing_completed_at=None,
-                stage_timings={},
+                stage_timings=stage_timings,
                 worker_hostname=worker_host,
             )
         )
         db.commit()
 
-        logger.info(f"=== INICIO PIPELINE: {doc.filename} ({doc_id}) worker={worker_host} ===")
+        logger.info(
+            f"=== INICIO PIPELINE: {doc.filename} ({doc_id}) worker={worker_host}"
+            f"{' [REANUDANDO]' if resuming else ''} ==="
+        )
 
         # ── Limpieza: eliminar datos previos (re-procesamiento) ──
-        existing_pages = db.execute(
-            select(Page).where(Page.doc_id == doc_id)
-        ).scalars().all()
-        if existing_pages:
-            logger.info(f"Limpiando {len(existing_pages)} páginas previas...")
-            for page in existing_pages:
-                db.delete(page)
-            db.commit()
+        # Fase 4: solo en un run FRESCO (sin checkpoint de A). Antes un
+        # reintento tardío borraba páginas/blocks/patches del propio run.
+        _resume_past_a = _ckpt(run, "A") is not None
+        if not _resume_past_a:
+            existing_pages = db.execute(
+                select(Page).where(Page.doc_id == doc_id)
+            ).scalars().all()
+            if existing_pages:
+                logger.info(f"Limpiando {len(existing_pages)} páginas previas...")
+                for page in existing_pages:
+                    db.delete(page)
+                db.commit()
 
-        db.execute(delete(LlmUsage).where(LlmUsage.doc_id == doc_id))
-        db.execute(delete(SectionSummary).where(SectionSummary.doc_id == doc_id))
-        db.execute(delete(TermRegistry).where(TermRegistry.doc_id == doc_id))
-        db.commit()
+            db.execute(delete(LlmUsage).where(LlmUsage.doc_id == doc_id))
+            db.execute(delete(SectionSummary).where(SectionSummary.doc_id == doc_id))
+            db.execute(delete(TermRegistry).where(TermRegistry.doc_id == doc_id))
+            db.commit()
 
         # =============================================
         # ETAPA A: INGESTA
         # =============================================
-        _update_document_status(db, doc_id, "converting")
-        _update_progress(db, doc_id, "converting", "Convirtiendo DOCX a PDF...", start_stage=True)
-        logger.info(f"[Etapa A] Convirtiendo {doc.filename}...")
-        t0_a = time.time()
+        _ck_a = _ckpt(run, "A")
+        if _ck_a:
+            # Fase 4: reanudación — artefactos de A ya generados
+            pdf_uri = _ck_a["pdf_uri"]
+            total_pages = _ck_a["total_pages"]
+            if _ck_a.get("docx_uri"):
+                doc.docx_uri = _ck_a["docx_uri"]
+            docx_source_uri = doc.docx_uri or doc.source_uri
+            _update_document_status(
+                db, doc_id, "extracting", pdf_uri=pdf_uri, total_pages=total_pages,
+            )
+            logger.info(f"[Etapa A] Saltada (checkpoint): {total_pages} páginas")
+        else:
+            _update_document_status(db, doc_id, "converting")
+            _update_progress(db, doc_id, "converting", "Convirtiendo DOCX a PDF...", start_stage=True)
+            logger.info(f"[Etapa A] Convirtiendo {doc.filename}...")
+            t0_a = time.time()
 
-        ingestion_result = process_ingestion_sync(
-            doc_id=str(doc_id),
-            source_key=doc.source_uri,
-            filename=doc.filename,
-            original_format=doc.original_format,
-        )
+            ingestion_result = process_ingestion_sync(
+                doc_id=str(doc_id),
+                source_key=doc.source_uri,
+                filename=doc.filename,
+                original_format=doc.original_format,
+            )
 
-        pdf_uri = ingestion_result["pdf_uri"]
-        total_pages = ingestion_result["total_pages"]
+            pdf_uri = ingestion_result["pdf_uri"]
+            total_pages = ingestion_result["total_pages"]
 
-        # PDF nativo: la ingesta generó un DOCX de trabajo (pdf2docx).
-        # Todo el pipeline DOCX-first opera sobre él.
-        _status_extra = {}
-        if ingestion_result.get("docx_uri"):
-            doc.docx_uri = ingestion_result["docx_uri"]
-            _status_extra["docx_uri"] = ingestion_result["docx_uri"]
-            logger.info(f"[Etapa A] PDF nativo → DOCX de trabajo: {doc.docx_uri}")
+            # PDF nativo: la ingesta generó un DOCX de trabajo (pdf2docx).
+            # Todo el pipeline DOCX-first opera sobre él.
+            _status_extra = {}
+            if ingestion_result.get("docx_uri"):
+                doc.docx_uri = ingestion_result["docx_uri"]
+                _status_extra["docx_uri"] = ingestion_result["docx_uri"]
+                logger.info(f"[Etapa A] PDF nativo → DOCX de trabajo: {doc.docx_uri}")
 
-        _update_document_status(
-            db, doc_id, "extracting",
-            pdf_uri=pdf_uri, total_pages=total_pages, **_status_extra,
-        )
+            _update_document_status(
+                db, doc_id, "extracting",
+                pdf_uri=pdf_uri, total_pages=total_pages, **_status_extra,
+            )
 
-        # URI del DOCX sobre el que corre TODO el pipeline (source para DOCX
-        # nativos; el convertido para PDFs)
-        docx_source_uri = doc.docx_uri or doc.source_uri
+            # URI del DOCX sobre el que corre TODO el pipeline (source para DOCX
+            # nativos; el convertido para PDFs)
+            docx_source_uri = doc.docx_uri or doc.source_uri
 
-        for page_no in range(1, total_pages + 1):
-            db.add(Page(
-                doc_id=doc_id,
-                page_no=page_no,
-                page_type="digital",
-                render_route="docx_first",
-                status="pending",
-            ))
-        db.commit()
+            for page_no in range(1, total_pages + 1):
+                db.add(Page(
+                    doc_id=doc_id,
+                    page_no=page_no,
+                    page_type="digital",
+                    render_route="docx_first",
+                    status="pending",
+                ))
+            db.commit()
 
-        _update_progress(db, doc_id, "converting", "Conversión completada", current=1, total=1)
-        logger.info(f"[Etapa A] Completada: {total_pages} páginas creadas")
-        stage_timings["A"] = round(time.time() - t0_a, 1)
-        _save_stage_timing(db, doc_id, stage_timings)
+            _update_progress(db, doc_id, "converting", "Conversión completada", current=1, total=1)
+            logger.info(f"[Etapa A] Completada: {total_pages} páginas creadas")
+            stage_timings["A"] = round(time.time() - t0_a, 1)
+            _save_stage_timing(db, doc_id, stage_timings)
+            _ckpt_set(db, run, "A", {
+                "pdf_uri": pdf_uri,
+                "total_pages": total_pages,
+                "docx_uri": ingestion_result.get("docx_uri"),
+            })
 
         # Cache DOCX bytes en Redis para evitar re-descargas en etapas C, D, E
         try:
@@ -1073,95 +1300,102 @@ def process_document_pipeline(self, doc_id: str):
         # =============================================
         # ETAPA B: EXTRACCIÓN
         # =============================================
-        _update_progress(
-            db, doc_id, "extracting",
-            f"Extrayendo layout de {total_pages} páginas...",
-            total=total_pages, start_stage=True,
-        )
-        logger.info(f"[Etapa B] Extrayendo layout de {total_pages} páginas...")
-        t0_b = time.time()
-
-        pages = db.execute(
-            select(Page).where(Page.doc_id == doc_id).order_by(Page.page_no)
-        ).scalars().all()
-
-        all_page_blocks = {}
-
-        # Descargar PDF una sola vez para todas las páginas
+        # Descargar PDF una sola vez (lo usan B y B.7, también al reanudar)
         pdf_bytes = minio_client.download_file(pdf_uri)
         logger.info(f"[Etapa B] PDF descargado una vez ({len(pdf_bytes)} bytes)")
 
-        batch_results = extract_all_pages_sync(doc_id=str(doc_id), pdf_bytes=pdf_bytes)
-
-        for page_idx, page in enumerate(pages):
-            _update_page_status(db, page.id, "extracting")
+        if _ckpt(run, "B"):
+            logger.info("[Etapa B] Saltada (checkpoint): layouts ya extraídos")
+        else:
             _update_progress(
                 db, doc_id, "extracting",
-                f"Extrayendo página {page.page_no}/{total_pages}",
-                current=page_idx, total=total_pages,
+                f"Extrayendo layout de {total_pages} páginas...",
+                total=total_pages, start_stage=True,
             )
-            try:
-                extraction_result = batch_results[page_idx]
-                _update_page_status(
-                    db, page.id, "extracted",
-                    layout_uri=extraction_result["layout_uri"],
-                    text_uri=extraction_result["text_uri"],
-                    preview_uri=extraction_result["preview_uri"],
-                )
-                for block_data in extraction_result["blocks"]:
-                    db.add(Block(
-                        page_id=page.id,
-                        block_no=block_data["block_no"],
-                        block_type=block_data["type"],
-                        bbox_x0=block_data["bbox"][0],
-                        bbox_y0=block_data["bbox"][1],
-                        bbox_x1=block_data["bbox"][2],
-                        bbox_y1=block_data["bbox"][3],
-                        original_text=block_data.get("text", ""),
-                        font_info=(
-                            block_data["lines"][0]["spans"][0]
-                            if block_data.get("lines") and block_data["lines"][0].get("spans")
-                            else None
-                        ),
-                    ))
-                all_page_blocks[page.page_no] = extraction_result["blocks"]
-            except Exception as e:
-                logger.error(f"Error extrayendo página {page.page_no}: {e}")
-                _update_page_status(db, page.id, "failed")
+            logger.info(f"[Etapa B] Extrayendo layout de {total_pages} páginas...")
+            t0_b = time.time()
 
-        db.commit()
-        logger.info(f"[Etapa B] Completada: layouts extraídos")
-        stage_timings["B"] = round(time.time() - t0_b, 1)
-        _save_stage_timing(db, doc_id, stage_timings)
+            pages = db.execute(
+                select(Page).where(Page.doc_id == doc_id).order_by(Page.page_no)
+            ).scalars().all()
+
+            batch_results = extract_all_pages_sync(doc_id=str(doc_id), pdf_bytes=pdf_bytes)
+
+            for page_idx, page in enumerate(pages):
+                _update_page_status(db, page.id, "extracting")
+                _update_progress(
+                    db, doc_id, "extracting",
+                    f"Extrayendo página {page.page_no}/{total_pages}",
+                    current=page_idx, total=total_pages,
+                )
+                try:
+                    extraction_result = batch_results[page_idx]
+                    _update_page_status(
+                        db, page.id, "extracted",
+                        layout_uri=extraction_result["layout_uri"],
+                        text_uri=extraction_result["text_uri"],
+                        preview_uri=extraction_result["preview_uri"],
+                    )
+                    for block_data in extraction_result["blocks"]:
+                        db.add(Block(
+                            page_id=page.id,
+                            block_no=block_data["block_no"],
+                            block_type=block_data["type"],
+                            bbox_x0=block_data["bbox"][0],
+                            bbox_y0=block_data["bbox"][1],
+                            bbox_x1=block_data["bbox"][2],
+                            bbox_y1=block_data["bbox"][3],
+                            original_text=block_data.get("text", ""),
+                            font_info=(
+                                block_data["lines"][0]["spans"][0]
+                                if block_data.get("lines") and block_data["lines"][0].get("spans")
+                                else None
+                            ),
+                        ))
+                except Exception as e:
+                    logger.error(f"Error extrayendo página {page.page_no}: {e}")
+                    _update_page_status(db, page.id, "failed")
+
+            db.commit()
+            logger.info(f"[Etapa B] Completada: layouts extraídos")
+            stage_timings["B"] = round(time.time() - t0_b, 1)
+            _save_stage_timing(db, doc_id, stage_timings)
+            _ckpt_set(db, run, "B")
 
         # =============================================
         # ETAPA B.5: EXTRACCIÓN ESTRUCTURAL DOCX (Nivel 3)
         # Enriquece los Block con metadata nativa del DOCX (style_name,
         # list_*, table_*) y crea ElementGroup por cada lista/tabla.
         # =============================================
-        _update_document_status(db, doc_id, "extracted_docx")
+        # Fase 7: B.5 ya no escribe el estado fantasma "extracted_docx" —
+        # el documento permanece en "extracting" (máquina de estados canónica)
+        # y el detalle va solo en progress_stage/message.
         _update_progress(
-            db, doc_id, "extracted_docx",
+            db, doc_id, "extracting",
             "Detectando estructura DOCX...", start_stage=True,
         )
         t0_b5 = time.time()
-        try:
-            from app.services.extraction_docx import extract_docx_structure_sync
-            docx_bytes = _get_cached_docx_bytes(doc_id, doc.docx_uri or doc.source_uri)
-            b5_summary = extract_docx_structure_sync(
-                doc_id=doc_id,
-                docx_uri=doc.docx_uri or doc.source_uri,
-                session=db,
-                docx_bytes_cached=docx_bytes,
-            )
-            logger.info(f"[Etapa B.5] {b5_summary}")
-        except Exception as e:
-            # NO bloqueante: si B.5 falla, el pipeline sigue con el flujo
-            # heurístico clásico. La metadata estructural simplemente no
-            # se persiste y los prompts caen a su comportamiento Nivel 1.
-            logger.warning(
-                f"[Etapa B.5] Falló enrichment estructural (se continúa sin él): {e}"
-            )
+        if _ckpt(run, "B5"):
+            logger.info("[Etapa B.5] Saltada (checkpoint)")
+        else:
+            try:
+                from app.services.extraction_docx import extract_docx_structure_sync
+                docx_bytes = _get_cached_docx_bytes(doc_id, doc.docx_uri or doc.source_uri)
+                b5_summary = extract_docx_structure_sync(
+                    doc_id=doc_id,
+                    docx_uri=doc.docx_uri or doc.source_uri,
+                    session=db,
+                    docx_bytes_cached=docx_bytes,
+                )
+                logger.info(f"[Etapa B.5] {b5_summary}")
+            except Exception as e:
+                # NO bloqueante: si B.5 falla, el pipeline sigue con el flujo
+                # heurístico clásico. La metadata estructural simplemente no
+                # se persiste y los prompts caen a su comportamiento Nivel 1.
+                logger.warning(
+                    f"[Etapa B.5] Falló enrichment estructural (se continúa sin él): {e}"
+                )
+            _ckpt_set(db, run, "B5")
         stage_timings["B5"] = round(time.time() - t0_b5, 1)
 
         # Recoger ubicaciones DOCX de bloques ya asignados a un grupo estructural.
@@ -1193,421 +1427,519 @@ def process_document_pipeline(self, doc_id: str):
         # =============================================
         _node_page_map: dict[str, dict] = {}
         t0_b6 = time.time()
-        try:
-            if settings.structural_parser_enabled:
-                from app.services.document_parser import parse_document_to_nodes_sync
-                _docx_b6 = _get_cached_docx_bytes(doc_id, doc.docx_uri or doc.source_uri)
-                b6_summary = parse_document_to_nodes_sync(
-                    doc_id=str(doc_id), docx_bytes=_docx_b6, session=db,
-                )
-                logger.info(f"[Etapa B.6] {b6_summary}")
-                if settings.page_alignment_enabled:
-                    try:
-                        from app.services.page_alignment import align_nodes_to_pdf_sync
-                        _node_page_map = align_nodes_to_pdf_sync(str(doc_id), pdf_bytes, db)
-                        logger.info(
-                            f"[Etapa B.7] {len(_node_page_map)} ubicaciones con página real"
-                        )
-                    except Exception as _pa_err:
-                        logger.warning(
-                            f"[Etapa B.7] Alineación de páginas falló (no bloqueante): {_pa_err}"
-                        )
-        except Exception as _b6_err:
-            logger.warning(f"[Etapa B.6] Parser estructural falló (no bloqueante): {_b6_err}")
+        if _ckpt(run, "B6"):
+            # Fase 4: reanudación — nodos y alineación ya persistidos en BD
+            _node_page_map = _load_node_page_map(db, str(doc_id))
+            logger.info(
+                f"[Etapa B.6] Saltada (checkpoint): {len(_node_page_map)} "
+                f"ubicaciones con página real recuperadas de BD"
+            )
+        else:
+            try:
+                if settings.structural_parser_enabled:
+                    from app.services.document_parser import parse_document_to_nodes_sync
+                    _docx_b6 = _get_cached_docx_bytes(doc_id, doc.docx_uri or doc.source_uri)
+                    b6_summary = parse_document_to_nodes_sync(
+                        doc_id=str(doc_id), docx_bytes=_docx_b6, session=db,
+                    )
+                    logger.info(f"[Etapa B.6] {b6_summary}")
+                    if settings.page_alignment_enabled:
+                        try:
+                            from app.services.page_alignment import align_nodes_to_pdf_sync
+                            _node_page_map = align_nodes_to_pdf_sync(str(doc_id), pdf_bytes, db)
+                            logger.info(
+                                f"[Etapa B.7] {len(_node_page_map)} ubicaciones con página real"
+                            )
+                        except Exception as _pa_err:
+                            logger.warning(
+                                f"[Etapa B.7] Alineación de páginas falló (no bloqueante): {_pa_err}"
+                            )
+            except Exception as _b6_err:
+                logger.warning(f"[Etapa B.6] Parser estructural falló (no bloqueante): {_b6_err}")
+            _ckpt_set(db, run, "B6")
         stage_timings["B6"] = round(time.time() - t0_b6, 1)
         _save_stage_timing(db, doc_id, stage_timings)
 
         # =============================================
         # ETAPA C: ANÁLISIS EDITORIAL
         # =============================================
-        _update_document_status(db, doc_id, "analyzing")
-        _update_progress(db, doc_id, "analyzing", "Análisis editorial en curso...", start_stage=True)
-        logger.info(f"[Etapa C] Analizando documento...")
-        t0_c = time.time()
+        _ck_c = _ckpt(run, "C")
+        if _ck_c:
+            # Fase 4: reanudación — el análisis ya se pagó; se recupera de MinIO
+            analysis_result = json.loads(
+                minio_client.download_file(_ck_c["analysis_key"]).decode("utf-8")
+            )
+            profile_dict = _ck_c.get("profile")
+            global_context_dict = _ck_c.get("global_context")
+            _docx_bytes = _get_cached_docx_bytes(str(doc_id), docx_source_uri)
+            logger.info(
+                f"[Etapa C] Saltada (checkpoint): "
+                f"{len(analysis_result.get('sections', []))} secciones recuperadas"
+            )
+        else:
+            _update_document_status(db, doc_id, "analyzing")
+            _update_progress(db, doc_id, "analyzing", "Análisis editorial en curso...", start_stage=True)
+            logger.info(f"[Etapa C] Analizando documento...")
+            t0_c = time.time()
 
-        profile_row = db.execute(
-            select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
-        ).scalar_one_or_none()
+            # Fase 4: si se reanuda con C incompleta, limpiar restos de un
+            # intento parcial para no duplicar secciones/términos.
+            if _resume_past_a:
+                db.execute(delete(SectionSummary).where(SectionSummary.doc_id == doc_id))
+                db.execute(delete(TermRegistry).where(TermRegistry.doc_id == doc_id))
+                db.commit()
 
-        profile_dict = None
-        if profile_row:
-            profile_dict = {
-                "register": profile_row.register,
-                "intervention_level": profile_row.intervention_level,
-                "audience_type": profile_row.audience_type,
-                "audience_expertise": profile_row.audience_expertise,
-                "tone": profile_row.tone,
-                "genre": getattr(profile_row, "genre", None),
-                "subgenre": getattr(profile_row, "subgenre", None),
-                "preserve_author_voice": profile_row.preserve_author_voice,
-                "max_rewrite_ratio": profile_row.max_rewrite_ratio,
-                "max_expansion_ratio": profile_row.max_expansion_ratio,
-                "style_priorities": profile_row.style_priorities or [],
-                "protected_terms": profile_row.protected_terms or [],
-                "forbidden_changes": profile_row.forbidden_changes or [],
-                "lt_disabled_rules": profile_row.lt_disabled_rules or [],
-                "register_constraints": getattr(profile_row, "register_constraints", None) or [],
-                "idiolect_protections": getattr(profile_row, "idiolect_protections", None) or [],
-                # Configuración granular del prompt (UI). None = todos los bloques activos.
-                "prompt_blocks": getattr(profile_row, "prompt_blocks", None),
-            }
-            logger.info(f"[Etapa C] Perfil editorial: {profile_row.preset_name or 'custom'}")
+            profile_row = db.execute(
+                select(DocumentProfile).where(DocumentProfile.doc_id == doc_id)
+            ).scalar_one_or_none()
 
-        _docx_bytes = _get_cached_docx_bytes(str(doc_id), docx_source_uri)
-        analysis_result = analyze_document_sync(
-            doc_id=str(doc_id),
-            docx_uri=docx_source_uri,
-            profile=profile_dict,
-            docx_bytes_cached=_docx_bytes,
-        )
+            profile_dict = None
+            if profile_row:
+                profile_dict = {
+                    "register": profile_row.register,
+                    "intervention_level": profile_row.intervention_level,
+                    "audience_type": profile_row.audience_type,
+                    "audience_expertise": profile_row.audience_expertise,
+                    "tone": profile_row.tone,
+                    "genre": getattr(profile_row, "genre", None),
+                    "subgenre": getattr(profile_row, "subgenre", None),
+                    "preserve_author_voice": profile_row.preserve_author_voice,
+                    "max_rewrite_ratio": profile_row.max_rewrite_ratio,
+                    "max_expansion_ratio": profile_row.max_expansion_ratio,
+                    "style_priorities": profile_row.style_priorities or [],
+                    "protected_terms": profile_row.protected_terms or [],
+                    "forbidden_changes": profile_row.forbidden_changes or [],
+                    "lt_disabled_rules": profile_row.lt_disabled_rules or [],
+                    "register_constraints": getattr(profile_row, "register_constraints", None) or [],
+                    "idiolect_protections": getattr(profile_row, "idiolect_protections", None) or [],
+                    # Configuración granular del prompt (UI). None = todos los bloques activos.
+                    "prompt_blocks": getattr(profile_row, "prompt_blocks", None),
+                }
+                logger.info(f"[Etapa C] Perfil editorial: {profile_row.preset_name or 'custom'}")
 
-        for sec_data in analysis_result.get("sections", []):
-            db.add(SectionSummary(
-                doc_id=doc_id,
-                section_index=sec_data["section_index"],
-                section_title=sec_data.get("section_title"),
-                start_paragraph=sec_data["start_paragraph"],
-                end_paragraph=sec_data["end_paragraph"],
-                summary_text=sec_data.get("summary_text"),
-                topic=sec_data.get("topic"),
-                local_tone=sec_data.get("local_tone"),
-                active_terms=sec_data.get("active_terms", []),
-                transition_from_previous=sec_data.get("transition_from_previous"),
-            ))
+            _docx_bytes = _get_cached_docx_bytes(str(doc_id), docx_source_uri)
+            analysis_result = analyze_document_sync(
+                doc_id=str(doc_id),
+                docx_uri=docx_source_uri,
+                profile=profile_dict,
+                docx_bytes_cached=_docx_bytes,
+            )
 
-        for term_data in analysis_result.get("terms", []):
-            db.add(TermRegistry(
-                doc_id=doc_id,
-                term=term_data["term"],
-                normalized_form=term_data["normalized_form"],
-                frequency=term_data["frequency"],
-                first_occurrence_paragraph=term_data["first_occurrence_paragraph"],
-                is_protected=term_data["is_protected"],
-                decision=term_data["decision"],
-            ))
+            for sec_data in analysis_result.get("sections", []):
+                db.add(SectionSummary(
+                    doc_id=doc_id,
+                    section_index=sec_data["section_index"],
+                    section_title=sec_data.get("section_title"),
+                    start_paragraph=sec_data["start_paragraph"],
+                    end_paragraph=sec_data["end_paragraph"],
+                    summary_text=sec_data.get("summary_text"),
+                    topic=sec_data.get("topic"),
+                    local_tone=sec_data.get("local_tone"),
+                    active_terms=sec_data.get("active_terms", []),
+                    transition_from_previous=sec_data.get("transition_from_previous"),
+                ))
 
-        for record in analysis_result.get("usage_records", []):
-            db.add(LlmUsage(doc_id=doc_id, **record))
+            for term_data in analysis_result.get("terms", []):
+                db.add(TermRegistry(
+                    doc_id=doc_id,
+                    term=term_data["term"],
+                    normalized_form=term_data["normalized_form"],
+                    frequency=term_data["frequency"],
+                    first_occurrence_paragraph=term_data["first_occurrence_paragraph"],
+                    is_protected=term_data["is_protected"],
+                    decision=term_data["decision"],
+                ))
 
-        profile_updates = analysis_result.get("profile_updates", {})
-        if profile_updates and profile_row:
-            for key, value in profile_updates.items():
-                if hasattr(profile_row, key):
-                    setattr(profile_row, key, value)
-            logger.info(f"[Etapa C] Perfil actualizado: {list(profile_updates.keys())}")
+            for record in analysis_result.get("usage_records", []):
+                db.add(LlmUsage(doc_id=doc_id, **record))
 
-        if profile_dict and profile_updates:
-            profile_dict.update(profile_updates)
+            profile_updates = analysis_result.get("profile_updates", {})
+            if profile_updates and profile_row:
+                for key, value in profile_updates.items():
+                    if hasattr(profile_row, key):
+                        setattr(profile_row, key, value)
+                logger.info(f"[Etapa C] Perfil actualizado: {list(profile_updates.keys())}")
 
-        if profile_dict:
-            analysis_protected = [
-                t["term"] for t in analysis_result.get("terms", []) if t["is_protected"]
-            ]
-            existing_protected = set(profile_dict.get("protected_terms", []))
-            new_terms = [t for t in analysis_protected if t not in existing_protected]
-            if new_terms:
-                profile_dict["protected_terms"] = list(existing_protected) + new_terms
-                logger.info(f"[Etapa C] {len(new_terms)} términos protegidos agregados")
+            if profile_dict and profile_updates:
+                profile_dict.update(profile_updates)
 
-        classifications = analysis_result.get("paragraph_classifications", [])
-        if classifications:
-            cls_key = f"analysis/{doc_id}/classifications.json"
+            if profile_dict:
+                analysis_protected = [
+                    t["term"] for t in analysis_result.get("terms", []) if t["is_protected"]
+                ]
+                existing_protected = set(profile_dict.get("protected_terms", []))
+                new_terms = [t for t in analysis_protected if t not in existing_protected]
+                if new_terms:
+                    profile_dict["protected_terms"] = list(existing_protected) + new_terms
+                    logger.info(f"[Etapa C] {len(new_terms)} términos protegidos agregados")
+
+            classifications = analysis_result.get("paragraph_classifications", [])
+            if classifications:
+                cls_key = f"analysis/{doc_id}/classifications.json"
+                minio_client.upload_file(
+                    cls_key,
+                    json.dumps(classifications, ensure_ascii=False).encode("utf-8"),
+                    content_type="application/json",
+                )
+                # Escribir paragraph_type en blocks (match por docx_location = location)
+                try:
+                    from app.models.block import Block as _BlockC
+                    from app.models.page import Page as _PageC
+                    loc_to_ptype = {pc["location"]: pc["paragraph_type"] for pc in classifications if pc.get("paragraph_type")}
+                    if loc_to_ptype:
+                        _blk_rows = db.execute(
+                            select(_BlockC)
+                            .join(_PageC, _BlockC.page_id == _PageC.id)
+                            .where(_PageC.doc_id == doc_id)
+                        ).scalars().all()
+                        updated_count = 0
+                        for blk in _blk_rows:
+                            loc = blk.docx_location or ""
+                            ptype = loc_to_ptype.get(loc)
+                            if ptype and blk.paragraph_type != ptype:
+                                blk.paragraph_type = ptype
+                                updated_count += 1
+                        if updated_count:
+                            db.flush()
+                            logger.info(f"[Etapa C] paragraph_type escrito en {updated_count} blocks")
+                except Exception as _pte:
+                    logger.warning(f"[Etapa C] No se pudo escribir paragraph_type en blocks (no bloqueante): {_pte}")
+
+            # =============================================
+            # C.6: Análisis de Contexto Global (Plan v4)
+            # =============================================
+            global_context_dict = None
+            try:
+                all_paras_for_c6 = [
+                    (pc["text_preview"], pc["location"])
+                    for pc in analysis_result.get("paragraph_classifications", [])
+                ]
+                protected_terms_for_c6 = [
+                    t["term"] for t in analysis_result.get("terms", []) if t["is_protected"]
+                ]
+                c6_result = analyze_global_context_sync(
+                    doc_id=str(doc_id),
+                    all_paragraphs=all_paras_for_c6,
+                    profile=profile_dict,
+                    protected_terms=protected_terms_for_c6,
+                )
+                global_context_dict = {
+                    "global_summary": c6_result.get("global_summary"),
+                    "dominant_voice": c6_result.get("dominant_voice"),
+                    "dominant_register": c6_result.get("dominant_register"),
+                    "key_themes_json": c6_result.get("key_themes_json", []),
+                    "protected_globals_json": c6_result.get("protected_globals_json", []),
+                    "style_fingerprint_json": c6_result.get("style_fingerprint_json", {}),
+                }
+                # Persistir en document_global_context
+                existing_gc = db.execute(
+                    select(DocumentGlobalContext).where(DocumentGlobalContext.doc_id == doc_id)
+                ).scalar_one_or_none()
+                if existing_gc:
+                    for k, v in global_context_dict.items():
+                        setattr(existing_gc, k, v)
+                    existing_gc.total_paragraphs = analysis_result.get("stats", {}).get("total_paragraphs")
+                else:
+                    db.add(DocumentGlobalContext(
+                        doc_id=doc_id,
+                        total_paragraphs=analysis_result.get("stats", {}).get("total_paragraphs"),
+                        **global_context_dict,
+                    ))
+                # Agregar uso LLM de C.6 si existe
+                if c6_result.get("usage_record"):
+                    db.add(LlmUsage(doc_id=doc_id, **c6_result["usage_record"]))
+                # Agregar términos globales protegidos al perfil activo
+                global_protected = [p.get("term") for p in c6_result.get("protected_globals_json", []) if p.get("term")]
+                if global_protected and profile_dict:
+                    existing_pt = set(profile_dict.get("protected_terms", []))
+                    new_global = [t for t in global_protected if t not in existing_pt]
+                    if new_global:
+                        profile_dict["protected_terms"] = list(existing_pt) + new_global
+                        logger.info(f"[Etapa C.6] {len(new_global)} términos globales protegidos añadidos al perfil")
+                logger.info(f"[Etapa C.6] Contexto global generado: register={c6_result.get('dominant_register')}")
+            except Exception as _c6_err:
+                logger.warning(f"[Etapa C.6] Error no bloqueante: {_c6_err}")
+
+            db.commit()
+            logger.info(
+                f"[Etapa C] Completada: "
+                f"{len(analysis_result.get('sections', []))} secciones, "
+                f"{len(analysis_result.get('terms', []))} términos"
+            )
+            stage_timings["C"] = round(time.time() - t0_c, 1)
+            _save_stage_timing(db, doc_id, stage_timings)
+
+            # Fase 4: checkpoint de C — el análisis y el perfil enriquecido
+            # quedan en MinIO/run para que un reintento no los re-pague.
+            _analysis_ck_key = f"pipeline/{doc_id}/analysis_result.json"
             minio_client.upload_file(
-                cls_key,
-                json.dumps(classifications, ensure_ascii=False).encode("utf-8"),
+                _analysis_ck_key,
+                json.dumps(analysis_result, ensure_ascii=False, default=str).encode("utf-8"),
                 content_type="application/json",
             )
-            # Escribir paragraph_type en blocks (match por docx_location = location)
-            try:
-                from app.models.block import Block as _BlockC
-                from app.models.page import Page as _PageC
-                loc_to_ptype = {pc["location"]: pc["paragraph_type"] for pc in classifications if pc.get("paragraph_type")}
-                if loc_to_ptype:
-                    _blk_rows = db.execute(
-                        select(_BlockC)
-                        .join(_PageC, _BlockC.page_id == _PageC.id)
-                        .where(_PageC.doc_id == doc_id)
-                    ).scalars().all()
-                    updated_count = 0
-                    for blk in _blk_rows:
-                        loc = blk.docx_location or ""
-                        ptype = loc_to_ptype.get(loc)
-                        if ptype and blk.paragraph_type != ptype:
-                            blk.paragraph_type = ptype
-                            updated_count += 1
-                    if updated_count:
-                        db.flush()
-                        logger.info(f"[Etapa C] paragraph_type escrito en {updated_count} blocks")
-            except Exception as _pte:
-                logger.warning(f"[Etapa C] No se pudo escribir paragraph_type en blocks (no bloqueante): {_pte}")
-
-        # =============================================
-        # C.6: Análisis de Contexto Global (Plan v4)
-        # =============================================
-        global_context_dict: dict | None = None
-        try:
-            all_paras_for_c6 = [
-                (pc["text_preview"], pc["location"])
-                for pc in analysis_result.get("paragraph_classifications", [])
-            ]
-            protected_terms_for_c6 = [
-                t["term"] for t in analysis_result.get("terms", []) if t["is_protected"]
-            ]
-            c6_result = analyze_global_context_sync(
-                doc_id=str(doc_id),
-                all_paragraphs=all_paras_for_c6,
-                profile=profile_dict,
-                protected_terms=protected_terms_for_c6,
-            )
-            global_context_dict = {
-                "global_summary": c6_result.get("global_summary"),
-                "dominant_voice": c6_result.get("dominant_voice"),
-                "dominant_register": c6_result.get("dominant_register"),
-                "key_themes_json": c6_result.get("key_themes_json", []),
-                "protected_globals_json": c6_result.get("protected_globals_json", []),
-                "style_fingerprint_json": c6_result.get("style_fingerprint_json", {}),
-            }
-            # Persistir en document_global_context
-            existing_gc = db.execute(
-                select(DocumentGlobalContext).where(DocumentGlobalContext.doc_id == doc_id)
-            ).scalar_one_or_none()
-            if existing_gc:
-                for k, v in global_context_dict.items():
-                    setattr(existing_gc, k, v)
-                existing_gc.total_paragraphs = analysis_result.get("stats", {}).get("total_paragraphs")
-            else:
-                db.add(DocumentGlobalContext(
-                    doc_id=doc_id,
-                    total_paragraphs=analysis_result.get("stats", {}).get("total_paragraphs"),
-                    **global_context_dict,
-                ))
-            # Agregar uso LLM de C.6 si existe
-            if c6_result.get("usage_record"):
-                db.add(LlmUsage(doc_id=doc_id, **c6_result["usage_record"]))
-            # Agregar términos globales protegidos al perfil activo
-            global_protected = [p.get("term") for p in c6_result.get("protected_globals_json", []) if p.get("term")]
-            if global_protected and profile_dict:
-                existing_pt = set(profile_dict.get("protected_terms", []))
-                new_global = [t for t in global_protected if t not in existing_pt]
-                if new_global:
-                    profile_dict["protected_terms"] = list(existing_pt) + new_global
-                    logger.info(f"[Etapa C.6] {len(new_global)} términos globales protegidos añadidos al perfil")
-            logger.info(f"[Etapa C.6] Contexto global generado: register={c6_result.get('dominant_register')}")
-        except Exception as _c6_err:
-            logger.warning(f"[Etapa C.6] Error no bloqueante: {_c6_err}")
-
-        db.commit()
-        logger.info(
-            f"[Etapa C] Completada: "
-            f"{len(analysis_result.get('sections', []))} secciones, "
-            f"{len(analysis_result.get('terms', []))} términos"
-        )
-        stage_timings["C"] = round(time.time() - t0_c, 1)
-        _save_stage_timing(db, doc_id, stage_timings)
+            _ckpt_set(db, run, "C", {
+                "analysis_key": _analysis_ck_key,
+                "profile": profile_dict,
+                "global_context": global_context_dict,
+            })
+            _check_cost_limit(db, doc_id, run)
 
         # =============================================
         # ETAPA D: CORRECCIÓN — LanguageTool + ChatGPT
         # =============================================
-        _update_document_status(db, doc_id, "correcting")
-        _update_progress(
-            db, doc_id, "correcting", "Iniciando corrección de párrafos...", start_stage=True
-        )
-        logger.info(f"[Etapa D] Corrigiendo texto...")
-        t0_d = time.time()
-
-        config = doc.config_json or {}
-
-        # ── Mapa de metadata estructural por ubicación (B.5 + B.7) ──
-        # Fase 3/5: antes los parámetros block_meta/page_no de build_user_prompt
-        # NUNCA se pasaban — toda la metadata de B.5 moría en la BD sin llegar
-        # a un solo prompt. Este mapa la conecta de verdad.
-        block_meta_map: dict[str, dict] = {}
-        try:
-            _meta_rows = db.execute(
-                select(Block)
-                .join(Page, Block.page_id == Page.id)
-                .where(Page.doc_id == doc_id, Block.docx_location.isnot(None))
-            ).scalars().all()
-            for _b in _meta_rows:
-                block_meta_map[_b.docx_location] = {
-                    "style_name": _b.style_name,
-                    "style_level": _b.style_level,
-                    "list_id": _b.list_id,
-                    "list_position": _b.list_position,
-                    "list_total": _b.list_total,
-                    "list_format_type": _b.list_format_type,
-                    "list_level": _b.list_level,
-                    "table_id": _b.table_id,
-                    "row_index": _b.row_index,
-                    "column_index": _b.column_index,
-                    "row_total": _b.row_total,
-                    "col_total": _b.col_total,
-                    "table_cell_role": _b.table_cell_role,
-                }
-            # Página real por ubicación (Etapa B.7)
-            for _loc, _pinfo in (_node_page_map or {}).items():
-                meta = block_meta_map.setdefault(_loc, {})
-                meta["page_start"] = _pinfo.get("page_start")
-                meta["page_end"] = _pinfo.get("page_end")
-                meta["crosses_page"] = _pinfo.get("crosses_page")
-            if block_meta_map:
-                logger.info(
-                    f"[Etapa D] block_meta_map: {len(block_meta_map)} ubicaciones "
-                    f"con metadata estructural/página para prompts"
-                )
-        except Exception as _bm_err:
-            logger.warning(f"[Etapa D] No se pudo construir block_meta_map: {_bm_err}")
-
-        # Recargar páginas después del commit de Etapa C
-        pages = db.execute(
-            select(Page).where(Page.doc_id == doc_id).order_by(Page.page_no)
-        ).scalars().all()
-
-        docx_patches = []
-        usage_records = []
-
-        # PDF nativo cuenta como DOCX-first: opera sobre el DOCX convertido
-        if doc.original_format == "docx" or doc.docx_uri:
-            # ── Ruta paralela (feature flag) ──
-            if settings.parallel_correction_enabled:
-                dispatched = _dispatch_parallel_correction(
-                    db=db, doc_id=str(doc_id), doc=doc,
-                    config=config, profile_dict=profile_dict,
-                    analysis_result=analysis_result, job=job,
-                    global_context_dict=global_context_dict,
-                    block_meta_map=block_meta_map or None,
-                )
-                if dispatched:
-                    stage_timings["D"] = round(time.time() - t0_d, 1)
-                    _save_stage_timing(db, doc_id, stage_timings)
-                    logger.info(f"[Etapa D] Lotes paralelos despachados — pipeline delega a chord")
-                    return  # assemble_correction_results maneja Etapa E + job completion
-
-            # ── Ruta secuencial ──
-            if profile_dict:
-                logger.info(f"[Etapa D] Usando perfil editorial enriquecido por análisis")
-
-            def _correction_progress(current: int, total: int):
-                _update_progress(
-                    db, doc_id, "correcting",
-                    f"Corrigiendo párrafo {current}/{total}",
-                    current=current, total=total,
-                )
-
-            logger.info("[Etapa D] Ruta 1: corrigiendo párrafos (doble pasada Plan v4)...")
-            docx_patches, usage_records, _all_paragraphs, audit_log_entries = correct_docx_sync(
-                doc_id=str(doc_id),
-                docx_uri=docx_source_uri,
-                config=config,
-                profile=profile_dict,
-                analysis_data=analysis_result,
-                on_progress=_correction_progress,
-                docx_bytes_cached=_docx_bytes,
-                global_context=global_context_dict,
-                grouped_locations=_grouped_locations or None,
-                block_meta_map=block_meta_map or None,
-                total_pages=doc.total_pages,
+        _ck_d = _ckpt(run, "D")
+        if _ck_d and _ck_d.get("patches_key"):
+            # Fase 4: reanudación — la corrección ya se pagó; recuperar patches
+            docx_patches = json.loads(
+                minio_client.download_file(_ck_d["patches_key"]).decode("utf-8")
             )
+            logger.info(
+                f"[Etapa D] Saltada (checkpoint): {len(docx_patches)} patches recuperados"
+            )
+        else:
+            _update_document_status(db, doc_id, "correcting")
+            _update_progress(
+                db, doc_id, "correcting", "Iniciando corrección de párrafos...", start_stage=True
+            )
+            logger.info(f"[Etapa D] Corrigiendo texto...")
+            t0_d = time.time()
 
-            # Sprint 2: persistir mapa canónico paragraph_index → página
+            config = doc.config_json or {}
+
+            # ── Mapa de metadata estructural por ubicación (B.5 + B.7) ──
+            # Fase 3/5: antes los parámetros block_meta/page_no de build_user_prompt
+            # NUNCA se pasaban — toda la metadata de B.5 moría en la BD sin llegar
+            # a un solo prompt. Este mapa la conecta de verdad.
+            block_meta_map: dict[str, dict] = {}
             try:
-                _para_cls = {
-                    pc["paragraph_index"]: pc
-                    for pc in (analysis_result or {}).get("paragraph_classifications", [])
-                }
-                save_paragraph_locations_sync(
+                _meta_rows = db.execute(
+                    select(Block)
+                    .join(Page, Block.page_id == Page.id)
+                    .where(Page.doc_id == doc_id, Block.docx_location.isnot(None))
+                ).scalars().all()
+                for _b in _meta_rows:
+                    block_meta_map[_b.docx_location] = {
+                        "style_name": _b.style_name,
+                        "style_level": _b.style_level,
+                        "list_id": _b.list_id,
+                        "list_position": _b.list_position,
+                        "list_total": _b.list_total,
+                        "list_format_type": _b.list_format_type,
+                        "list_level": _b.list_level,
+                        "table_id": _b.table_id,
+                        "row_index": _b.row_index,
+                        "column_index": _b.column_index,
+                        "row_total": _b.row_total,
+                        "col_total": _b.col_total,
+                        "table_cell_role": _b.table_cell_role,
+                    }
+                # Página real por ubicación (Etapa B.7)
+                for _loc, _pinfo in (_node_page_map or {}).items():
+                    meta = block_meta_map.setdefault(_loc, {})
+                    meta["page_start"] = _pinfo.get("page_start")
+                    meta["page_end"] = _pinfo.get("page_end")
+                    meta["crosses_page"] = _pinfo.get("crosses_page")
+                if block_meta_map:
+                    logger.info(
+                        f"[Etapa D] block_meta_map: {len(block_meta_map)} ubicaciones "
+                        f"con metadata estructural/página para prompts"
+                    )
+            except Exception as _bm_err:
+                logger.warning(f"[Etapa D] No se pudo construir block_meta_map: {_bm_err}")
+
+            # Recargar páginas después del commit de Etapa C
+            pages = db.execute(
+                select(Page).where(Page.doc_id == doc_id).order_by(Page.page_no)
+            ).scalars().all()
+
+            docx_patches = []
+            usage_records = []
+
+            # PDF nativo cuenta como DOCX-first: opera sobre el DOCX convertido
+            if doc.original_format == "docx" or doc.docx_uri:
+                # ── Ruta paralela (feature flag) ──
+                if settings.parallel_correction_enabled:
+                    dispatched = _dispatch_parallel_correction(
+                        db=db, doc_id=str(doc_id), doc=doc,
+                        config=config, profile_dict=profile_dict,
+                        analysis_result=analysis_result, job=job,
+                        global_context_dict=global_context_dict,
+                        block_meta_map=block_meta_map or None,
+                    )
+                    if dispatched:
+                        stage_timings["D"] = round(time.time() - t0_d, 1)
+                        _save_stage_timing(db, doc_id, stage_timings)
+                        _ckpt_set(db, run, "D", {"dispatched_parallel": True})
+                        logger.info(f"[Etapa D] Lotes paralelos despachados — pipeline delega a chord")
+                        return  # assemble_correction_results maneja Etapa E + job completion
+
+                # ── Ruta secuencial ──
+                if profile_dict:
+                    logger.info(f"[Etapa D] Usando perfil editorial enriquecido por análisis")
+
+                def _correction_progress(current: int, total: int):
+                    _update_progress(
+                        db, doc_id, "correcting",
+                        f"Corrigiendo párrafo {current}/{total}",
+                        current=current, total=total,
+                    )
+
+                logger.info("[Etapa D] Ruta 1: corrigiendo párrafos (doble pasada Plan v4)...")
+                docx_patches, usage_records, _all_paragraphs, audit_log_entries = correct_docx_sync(
                     doc_id=str(doc_id),
-                    all_paragraphs=_all_paragraphs,
-                    para_classifications=_para_cls,
-                    total_pages=doc.total_pages or 1,
-                    db=db,
+                    docx_uri=docx_source_uri,
+                    config=config,
+                    profile=profile_dict,
+                    analysis_data=analysis_result,
+                    on_progress=_correction_progress,
+                    docx_bytes_cached=_docx_bytes,
+                    global_context=global_context_dict,
+                    grouped_locations=_grouped_locations or None,
+                    block_meta_map=block_meta_map or None,
+                    total_pages=doc.total_pages,
                 )
-            except Exception as _e:
-                logger.warning(f"[Etapa D] paragraph_locations no guardadas (no bloqueante): {_e}")
 
-            for record in usage_records:
-                db.add(LlmUsage(doc_id=doc_id, **record))
+                # Sprint 2: persistir mapa canónico paragraph_index → página
+                try:
+                    _para_cls = {
+                        pc["paragraph_index"]: pc
+                        for pc in (analysis_result or {}).get("paragraph_classifications", [])
+                    }
+                    save_paragraph_locations_sync(
+                        doc_id=str(doc_id),
+                        all_paragraphs=_all_paragraphs,
+                        para_classifications=_para_cls,
+                        total_pages=doc.total_pages or 1,
+                        db=db,
+                    )
+                except Exception as _e:
+                    logger.warning(f"[Etapa D] paragraph_locations no guardadas (no bloqueante): {_e}")
 
-            # Plan v4: persistir audit log entries (RAW request/response)
-            if audit_log_entries:
-                for entry in audit_log_entries:
-                    db.add(LlmAuditLog(
-                        doc_id=doc_id,
-                        paragraph_index=entry.get("paragraph_index"),
-                        location=entry.get("location"),
-                        pass_number=entry.get("pass_number", 1),
-                        call_purpose=entry.get("call_purpose", "mechanical_correction"),
-                        model_used=entry.get("model_used"),
-                        request_payload=entry.get("request_payload"),
-                        response_payload=entry.get("response_payload"),
-                        prompt_tokens=entry.get("prompt_tokens"),
-                        completion_tokens=entry.get("completion_tokens"),
-                        total_tokens=entry.get("total_tokens"),
-                        latency_ms=entry.get("latency_ms"),
-                        error_text=entry.get("error_text"),
-                    ))
-                logger.info(f"[Etapa D] {len(audit_log_entries)} entradas de audit log guardadas")
+                for record in usage_records:
+                    db.add(LlmUsage(doc_id=doc_id, **record))
+
+                # Plan v4: persistir audit log entries (RAW request/response)
+                if audit_log_entries:
+                    for entry in audit_log_entries:
+                        db.add(LlmAuditLog(
+                            doc_id=doc_id,
+                            paragraph_index=entry.get("paragraph_index"),
+                            location=entry.get("location"),
+                            pass_number=entry.get("pass_number", 1),
+                            call_purpose=entry.get("call_purpose", "mechanical_correction"),
+                            model_used=entry.get("model_used"),
+                            request_payload=entry.get("request_payload"),
+                            response_payload=entry.get("response_payload"),
+                            prompt_tokens=entry.get("prompt_tokens"),
+                            completion_tokens=entry.get("completion_tokens"),
+                            total_tokens=entry.get("total_tokens"),
+                            latency_ms=entry.get("latency_ms"),
+                            error_text=entry.get("error_text"),
+                        ))
+                    logger.info(f"[Etapa D] {len(audit_log_entries)} entradas de audit log guardadas")
+
+                db.commit()
+
+                total_prompt = sum(r["prompt_tokens"] for r in usage_records)
+                total_completion = sum(r["completion_tokens"] for r in usage_records)
+                total_tokens = sum(r["total_tokens"] for r in usage_records)
+                total_cost = sum(r["cost_usd"] for r in usage_records)
+                logger.info(
+                    f"[Etapa D] Tokens: {total_tokens} "
+                    f"(prompt={total_prompt}, completion={total_completion}), "
+                    f"costo=${total_cost:.6f} USD, llamadas: {len(usage_records)}"
+                )
 
             db.commit()
+            logger.info(f"[Etapa D] Completada: {len(docx_patches)} párrafos corregidos")
+            stage_timings["D"] = round(time.time() - t0_d, 1)
+            _save_stage_timing(db, doc_id, stage_timings)
 
-            total_prompt = sum(r["prompt_tokens"] for r in usage_records)
-            total_completion = sum(r["completion_tokens"] for r in usage_records)
-            total_tokens = sum(r["total_tokens"] for r in usage_records)
-            total_cost = sum(r["cost_usd"] for r in usage_records)
-            logger.info(
-                f"[Etapa D] Tokens: {total_tokens} "
-                f"(prompt={total_prompt}, completion={total_completion}), "
-                f"costo=${total_cost:.6f} USD, llamadas: {len(usage_records)}"
-            )
-
-        db.commit()
-        logger.info(f"[Etapa D] Completada: {len(docx_patches)} párrafos corregidos")
-        stage_timings["D"] = round(time.time() - t0_d, 1)
-        _save_stage_timing(db, doc_id, stage_timings)
-
-        # =============================================
-        # ETAPA D.5: PASADA GRUPAL (Nivel 2/3)
-        # Corrige listas/tablas detectadas en B.5 en una sola llamada
-        # por grupo. Los patches grupales tienen prioridad sobre los
-        # individuales en _apply_docx_patches.
-        # =============================================
-        try:
-            from app.services.correction import correct_groups_for_doc_sync
-            group_patches, group_usage = correct_groups_for_doc_sync(
-                doc_id=doc_id,
-                session=db,
-                profile=profile_dict,
-                global_context=global_context_dict,
-            )
-            if group_patches:
-                docx_patches.extend(group_patches)
-                for r in group_usage:
-                    db.add(LlmUsage(doc_id=doc_id, **r))
-                db.commit()
-                logger.info(
-                    f"[Etapa D.5] Pasada grupal: +{len(group_patches)} patches"
+            # =============================================
+            # ETAPA D.5: PASADA GRUPAL (Nivel 2/3)
+            # Corrige listas/tablas detectadas en B.5 en una sola llamada
+            # por grupo. Los patches grupales tienen prioridad sobre los
+            # individuales en _apply_docx_patches.
+            # =============================================
+            try:
+                from app.services.correction import correct_groups_for_doc_sync
+                group_patches, group_usage = correct_groups_for_doc_sync(
+                    doc_id=doc_id,
+                    session=db,
+                    profile=profile_dict,
+                    global_context=global_context_dict,
                 )
-        except Exception as e:
-            logger.warning(
-                f"[Etapa D.5] Pasada grupal falló (no bloqueante): {e}"
+                if group_patches:
+                    docx_patches.extend(group_patches)
+                    for r in group_usage:
+                        db.add(LlmUsage(doc_id=doc_id, **r))
+                    db.commit()
+                    logger.info(
+                        f"[Etapa D.5] Pasada grupal: +{len(group_patches)} patches"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[Etapa D.5] Pasada grupal falló (no bloqueante): {e}"
+                )
+
+            # Guardar patches en MinIO para uso en Etapa E posterior
+            patches_key = f"docx/{doc_id}/patches_docx.json"
+            minio_client.upload_file(
+                patches_key,
+                json.dumps(docx_patches, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+                content_type="application/json",
             )
+            _ckpt_set(db, run, "D", {"patches_key": patches_key})
+            _check_cost_limit(db, doc_id, run)
 
         # =============================================
         # PERSISTIR PATCHES → PENDING_REVIEW
         # =============================================
-        # Guardar patches en MinIO para uso en Etapa E posterior
-        patches_key = f"docx/{doc_id}/patches_docx.json"
-        minio_client.upload_file(
-            patches_key,
-            json.dumps(docx_patches, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
-            content_type="application/json",
-        )
+        if _ckpt(run, "persist"):
+            logger.info("[Persist] Saltada (checkpoint): patches ya en BD")
+        else:
+            if resuming:
+                # Fase 4: reanudación — limpiar patches de un intento parcial
+                # para que la persistencia sea idempotente.
+                _blk_ids_sq = (
+                    select(Block.id)
+                    .join(Page, Block.page_id == Page.id)
+                    .where(Page.doc_id == doc_id)
+                )
+                db.execute(delete(Patch).where(Patch.block_id.in_(_blk_ids_sq)))
+                db.commit()
+            _persist_patches(db, str(doc_id), docx_patches)
+            _ckpt_set(db, run, "persist")
 
-        _persist_patches(db, str(doc_id), docx_patches)
         _run_candidate_render(db, str(doc_id))
+        _finish_run(db, run, "completed")
 
         _complete_job(db, job)
         logger.info(f"=== PIPELINE COMPLETADO (candidate_ready): {doc.filename} ===")
+
+    except CostLimitExceeded as e:
+        # Fase 4: kill-switch de costo — NO se reintenta (reintentarlo solo
+        # volvería a chocar con el mismo tope).
+        logger.error(f"[Fase 4] {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        if job:
+            _complete_job(db, job, error=str(e))
+        _finish_run(db, run, "cost_limit", str(e))
+        try:
+            _update_document_status(db, doc_id, "failed", error_message=str(e))
+            db.execute(
+                update(Document).where(Document.id == doc_id).values(
+                    processing_completed_at=datetime.now(timezone.utc),
+                    progress_message="Abortado por tope de costo LLM",
+                    heartbeat_at=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
+        except Exception:
+            pass
 
     except Exception as e:
         logger.exception(f"Error en pipeline: {e}")
@@ -1636,10 +1968,20 @@ def process_document_pipeline(self, doc_id: str):
             db.commit()
         except Exception:
             pass
-        # Retry con backoff exponencial (30s, 90s, 270s) en vez de fijo 60s
+        # Retry con backoff exponencial (30s, 90s, 270s) en vez de fijo 60s.
+        # Fase 4: el run queda 'running' con sus checkpoints — el reintento
+        # retoma desde la última etapa completada, sin re-pagar LLM.
         retry_countdown = 30 * (3 ** self.request.retries)
         logger.warning(f"Pipeline {doc_id}: reintentando en {retry_countdown}s (intento {self.request.retries + 1}/3)")
-        self.retry(exc=e, countdown=retry_countdown)
+        try:
+            self.retry(exc=e, countdown=retry_countdown)
+        except Exception as retry_exc:
+            from celery.exceptions import Retry as _CeleryRetry
+            if isinstance(retry_exc, _CeleryRetry):
+                raise
+            # Reintentos agotados: cerrar el run como failed
+            _finish_run(db, run, "failed", str(e))
+            raise
 
     finally:
         db.close()
@@ -1698,6 +2040,27 @@ def correct_batch_llm(
                 CorrectionBatch.batch_index == batch_index,
             )
         ).scalar_one_or_none()
+
+        # Fase 4: idempotencia por work-item — si este lote ya completó y su
+        # resultado existe en MinIO, un reintento NO re-paga las llamadas LLM.
+        _result_key = f"correction/{doc_id}/batch_{batch_index}_result.json"
+        if cb and cb.status == "completed" and minio_client.file_exists(_result_key):
+            logger.info(
+                f"[correct_batch_llm] Batch {batch_index} ya completado — "
+                f"resultado reutilizado (idempotente)"
+            )
+            return _result_key
+
+        # Fase 4: kill-switch de costo por documento
+        if settings.max_cost_per_doc_usd:
+            _total_cost = float(db.execute(
+                select(func.sum(LlmUsage.cost_usd)).where(LlmUsage.doc_id == doc_id)
+            ).scalar() or 0.0)
+            if _total_cost > settings.max_cost_per_doc_usd:
+                raise CostLimitExceeded(
+                    f"Batch {batch_index}: costo acumulado ${_total_cost:.4f} USD "
+                    f"supera el tope ${settings.max_cost_per_doc_usd:.4f} USD"
+                )
 
         if cb:
             cb.status = "running"
@@ -1835,6 +2198,18 @@ def correct_batch_llm(
             f"{len(patches)} parches, {p2_count} auditorías P2 → {result_key}"
         )
         return result_key
+
+    except CostLimitExceeded as e:
+        # Fase 4: kill-switch — no reintentar (volvería a chocar con el tope)
+        logger.error(f"[correct_batch_llm] {e}")
+        if cb:
+            try:
+                cb.status = "failed"
+                cb.error_message = str(e)[:500]
+                db.commit()
+            except Exception:
+                pass
+        raise
 
     except Exception as e:
         logger.exception(f"[correct_batch_llm] Error en batch {batch_index}: {e}")
@@ -1995,6 +2370,28 @@ def assemble_correction_results(
         # Persistir patches en BD y renderizar candidato
         _persist_patches(db, doc_id, all_patches)
         _run_candidate_render(db, doc_id)
+
+        # Fase 4: cerrar el run resumible (checkpoints + costo real)
+        try:
+            _run_row = db.execute(
+                select(PipelineRun)
+                .where(PipelineRun.doc_id == doc_id, PipelineRun.status == "running")
+                .order_by(PipelineRun.run_no.desc())
+            ).scalars().first()
+            if _run_row:
+                _ckpt_set(db, _run_row, "D", {
+                    "patches_key": patch_key, "dispatched_parallel": True,
+                })
+                _ckpt_set(db, _run_row, "persist")
+                try:
+                    _run_row.cost_usd = float(db.execute(
+                        select(func.sum(LlmUsage.cost_usd)).where(LlmUsage.doc_id == doc_id)
+                    ).scalar() or 0.0)
+                except Exception:
+                    pass
+                _finish_run(db, _run_row, "completed")
+        except Exception as _run_err:
+            logger.warning(f"[assemble] No se pudo cerrar el pipeline run: {_run_err}")
 
         if job:
             _complete_job(db, job)
@@ -2324,6 +2721,7 @@ def rerender_candidate_preview(self, doc_id: str):
             docx_bytes_cached=_docx_bytes,
             apply_mode="all",
             render_mode="candidate",
+            location_pages=_load_node_page_map(db, str(doc_id)),
         )
 
         logger.info(f"[Rerender] Preview candidato actualizado para {doc_id}")

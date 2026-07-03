@@ -20,11 +20,12 @@ from app.models.document_global_context import DocumentGlobalContext
 from app.models.llm_audit_log import LlmAuditLog
 from app.models.element_group import ElementGroup
 from app.models.document_node import DocumentNode
+from app.models.pipeline_run import PipelineRun
 
 __all__ = [
     "Document", "Page", "Block", "Patch", "Job",
     "DocumentProfile", "LlmUsage", "SectionSummary", "TermRegistry",
     "CorrectionBatch", "ParagraphLocation",
     "DocumentGlobalContext", "LlmAuditLog",
-    "ElementGroup", "DocumentNode",
+    "ElementGroup", "DocumentNode", "PipelineRun",
 ]

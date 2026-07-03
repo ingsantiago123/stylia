@@ -30,6 +30,7 @@ import { AnalysisView } from "@/components/AnalysisView";
 import { StructuralTree } from "@/components/StructuralTree";
 import { EditorialProfilePanel } from "@/components/EditorialProfilePanel";
 import { MacroCorrectionView } from "@/components/MacroCorrectionView";
+import { MetricsPanel } from "@/components/MetricsPanel";
 type Tab = "pipeline" | "analysis" | "corrections" | "adn" | "pages" | "api-flow";
 
 export default function DocumentDetailPage() {
@@ -920,6 +921,9 @@ function SummaryTab({ doc, corrections, pages, isProcessing, profile }: {
         <ProcessingTimeCard doc={doc} isProcessing={isProcessing} />
       )}
 
+      {/* Fase 7: métricas operativas (applied real, rutas, runs con checkpoints) */}
+      {!isProcessing && corrections.length > 0 && <MetricsPanel docId={doc.id} />}
+
       {/* Document info */}
       <div className="glass-card rounded-xl p-5 md:col-span-2">
         <h3 className="text-sm font-semibold text-bruma uppercase tracking-wider mb-4">Informacion del documento</h3>
@@ -960,20 +964,28 @@ function formatDuration(seconds: number): string {
 const STAGE_LABELS: Record<string, string> = {
   A: "Conversion",
   B: "Extraccion",
+  B5: "Estructura DOCX",
+  B6: "AST + paginacion",
   C: "Analisis",
   D: "Correccion",
   D_dispatch: "Despacho lotes",
   D_parallel: "Correccion paralela",
+  D_persist: "Persistencia",
+  E_candidate: "Render candidato",
   E: "Renderizado",
 };
 
 const STAGE_COLORS: Record<string, string> = {
   A: "bg-blue-500",
   B: "bg-cyan-500",
+  B5: "bg-cyan-400",
+  B6: "bg-sky-500",
   C: "bg-violet-500",
   D: "bg-krypton",
   D_dispatch: "bg-krypton/70",
   D_parallel: "bg-krypton",
+  D_persist: "bg-amber-500",
+  E_candidate: "bg-emerald-400",
   E: "bg-emerald-500",
 };
 
@@ -1012,7 +1024,7 @@ function ProcessingTimeCard({ doc, isProcessing }: { doc: DocumentDetail; isProc
 
         <div className="bg-surface rounded-lg p-3 text-center border border-border-subtle">
           <div className="text-[10px] text-plomo-dark uppercase tracking-wider mb-1">Etapas</div>
-          <div className="text-xl font-bold text-bruma">{stageEntries.length} / 5</div>
+          <div className="text-xl font-bold text-bruma">{stageEntries.length}</div>
         </div>
       </div>
 
@@ -1021,7 +1033,7 @@ function ProcessingTimeCard({ doc, isProcessing }: { doc: DocumentDetail; isProc
           <span className="text-xs text-plomo-dark uppercase tracking-wider">Desglose por etapa</span>
           {stageEntries
             .sort(([a], [b]) => {
-              const order = ["A", "B", "C", "D", "D_dispatch", "D_parallel", "E"];
+              const order = ["A", "B", "B5", "B6", "C", "D", "D_dispatch", "D_parallel", "D_persist", "E_candidate", "E"];
               return (order.indexOf(a) ?? 99) - (order.indexOf(b) ?? 99);
             })
             .map(([stage, secs]) => (

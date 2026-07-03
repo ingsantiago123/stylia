@@ -114,6 +114,7 @@ def _generate_annotated_previews(
     corrected_pdf_bytes: bytes,
     all_patches: list[dict],
     render_mode: str = "final",
+    location_pages: dict | None = None,
 ) -> int:
     """
     Genera previews PNG anotados del PDF corregido.
@@ -152,8 +153,17 @@ def _generate_annotated_previews(
         color = HIGHLIGHT_COLORS.get(meta["category"], DEFAULT_HIGHLIGHT)
         p_ids = patch.get("patch_ids") or ([patch["patch_id"]] if patch.get("patch_id") else [])
 
-        para_idx = patch.get("paragraph_index", patch_idx)
-        est_page = min(int(para_idx / total_paragraphs * total_pages), total_pages - 1)
+        para_idx = patch.get("paragraph_index")
+        if para_idx is None:
+            para_idx = patch_idx
+        # Fase 3: página REAL desde la alineación PDF↔nodos (B.7) cuando el
+        # patch trae location. La interpolación lineal queda solo como
+        # fallback legacy para documentos sin nodos alineados.
+        _real = (location_pages or {}).get((patch.get("location") or "").strip())
+        if _real and _real.get("page_start"):
+            est_page = min(max(int(_real["page_start"]) - 1, 0), total_pages - 1)
+        else:
+            est_page = min(int(para_idx / total_paragraphs * total_pages), total_pages - 1)
         search_window = 2
         nearby = list(range(max(0, est_page - search_window),
                             min(total_pages, est_page + search_window + 1)))
@@ -262,6 +272,7 @@ def _generate_original_page_annotations(
     doc_id: str,
     original_pdf_bytes: bytes,
     all_patches: list[dict],
+    location_pages: dict | None = None,
 ) -> None:
     """
     Genera anotaciones JSON para las páginas del PDF ORIGINAL, marcando las
@@ -283,8 +294,16 @@ def _generate_original_page_annotations(
         meta = _get_patch_metadata(patch)
         p_ids = patch.get("patch_ids") or ([patch["patch_id"]] if patch.get("patch_id") else [])
 
-        para_idx = patch.get("paragraph_index", patch_idx)
-        est_page = min(int(para_idx / total_paragraphs * total_pages), total_pages - 1)
+        para_idx = patch.get("paragraph_index")
+        if para_idx is None:
+            para_idx = patch_idx
+        # Fase 3: página real de la alineación B.7 (el PDF original comparte
+        # paginación con la proyección alineada; fallback lineal legacy)
+        _real = (location_pages or {}).get((patch.get("location") or "").strip())
+        if _real and _real.get("page_start"):
+            est_page = min(max(int(_real["page_start"]) - 1, 0), total_pages - 1)
+        else:
+            est_page = min(int(para_idx / total_paragraphs * total_pages), total_pages - 1)
         search_window = 2
         nearby = list(range(max(0, est_page - search_window),
                             min(total_pages, est_page + search_window + 1)))
@@ -627,6 +646,7 @@ def render_docx_first_sync(
     docx_bytes_cached: bytes | None = None,
     apply_mode: str = "all",
     render_mode: str = "final",
+    location_pages: dict | None = None,
 ) -> dict:
     """
     Renderizado Ruta 1: DOCX-first.
@@ -678,14 +698,20 @@ def render_docx_first_sync(
 
         # Generar previews anotados (candidato/final): contorno + palabras cambiadas
         corrected_pdf_bytes = Path(corrected_pdf_path).read_bytes()
-        _generate_annotated_previews(doc_id, corrected_pdf_bytes, all_patches, render_mode=render_mode)
+        _generate_annotated_previews(
+            doc_id, corrected_pdf_bytes, all_patches,
+            render_mode=render_mode, location_pages=location_pages,
+        )
 
         # Generar anotaciones del PDF original: contorno + palabras eliminadas/cambiadas
         stem_inner = Path(filename).stem
         original_pdf_key = f"pdf/{doc_id}/{stem_inner}.pdf"
         try:
             original_pdf_bytes_data = minio_client.download_file(original_pdf_key)
-            _generate_original_page_annotations(doc_id, original_pdf_bytes_data, all_patches)
+            _generate_original_page_annotations(
+                doc_id, original_pdf_bytes_data, all_patches,
+                location_pages=location_pages,
+            )
         except Exception as _orig_err:
             logger.warning(f"No se pudieron generar anotaciones originales: {_orig_err}")
 

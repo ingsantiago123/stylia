@@ -1519,6 +1519,119 @@ async def get_document_costs(
     return [ParagraphCostItem.model_validate(r) for r in records]
 
 
+@router.get("/documents/{doc_id}/metrics")
+async def get_document_metrics(doc_id: UUID, db: AsyncSession = Depends(get_db)):
+    """
+    Fase 7: métricas operativas del documento.
+
+    - Patches: total, por estado de revisión, por ruta, grupales, y cuántos
+      de los APROBADOS se aplicaron DE VERDAD en el render (H4: `applied` ya
+      es veraz — un aprobado no aplicado indica mismatch/no_paragraph).
+    - LLM: tokens y costo por tipo de llamada.
+    - Pipeline: timings por etapa y runs con checkpoints (Fase 4).
+    """
+    doc = await _get_doc_or_404(db, doc_id)
+
+    patch_rows = (await db.execute(
+        select(Patch.review_status, Patch.route_taken, Patch.applied, Patch.group_id)
+        .join(Block, Patch.block_id == Block.id)
+        .join(Page, Block.page_id == Page.id)
+        .where(Page.doc_id == doc_id)
+    )).all()
+
+    total_patches = len(patch_rows)
+    by_status: dict[str, int] = {}
+    by_route: dict[str, int] = {}
+    applied_count = 0
+    group_patch_count = 0
+    approved_not_applied = 0
+    _approved = ("accepted", "auto_accepted", "bulk_finalized")
+    for review_status, route, applied, group_id in patch_rows:
+        by_status[review_status or "desconocido"] = by_status.get(review_status or "desconocido", 0) + 1
+        by_route[route or "desconocida"] = by_route.get(route or "desconocida", 0) + 1
+        if applied:
+            applied_count += 1
+        if group_id is not None:
+            group_patch_count += 1
+        if review_status in _approved and not applied:
+            approved_not_applied += 1
+
+    # Antes del render final TODO aprobado está "sin aplicar" por definición;
+    # la señal H4 (mismatch/no_paragraph) solo es significativa en completed.
+    if doc.status != "completed":
+        approved_not_applied = 0
+
+    usage_rows = (await db.execute(
+        select(
+            LlmUsage.call_type,
+            func.count(LlmUsage.id),
+            func.coalesce(func.sum(LlmUsage.prompt_tokens), 0),
+            func.coalesce(func.sum(LlmUsage.completion_tokens), 0),
+            func.coalesce(func.sum(LlmUsage.cost_usd), 0.0),
+        )
+        .where(LlmUsage.doc_id == doc_id)
+        .group_by(LlmUsage.call_type)
+    )).all()
+    llm_by_call_type = [
+        {
+            "call_type": ct or "desconocido",
+            "calls": int(calls),
+            "prompt_tokens": int(pt),
+            "completion_tokens": int(comp),
+            "cost_usd": round(float(cost), 6),
+        }
+        for ct, calls, pt, comp, cost in usage_rows
+    ]
+    total_cost = round(sum(r["cost_usd"] for r in llm_by_call_type), 6)
+
+    runs_payload: list[dict] = []
+    try:
+        from app.models.pipeline_run import PipelineRun
+        run_rows = (await db.execute(
+            select(PipelineRun)
+            .where(PipelineRun.doc_id == doc_id)
+            .order_by(PipelineRun.run_no.desc())
+            .limit(10)
+        )).scalars().all()
+        runs_payload = [
+            {
+                "run_no": r.run_no,
+                "status": r.status,
+                "current_stage": r.current_stage,
+                "stages_done": sorted((r.checkpoint_json or {}).keys()),
+                "retries": r.retries,
+                "cost_usd": round(r.cost_usd or 0.0, 6),
+                "cost_limit_usd": r.cost_limit_usd,
+                "started_at": r.started_at.isoformat() if r.started_at else None,
+                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+                "error_message": r.error_message,
+            }
+            for r in run_rows
+        ]
+    except Exception:
+        # Tabla pipeline_runs aún no migrada — métricas parciales
+        runs_payload = []
+
+    return {
+        "doc_id": str(doc_id),
+        "status": doc.status,
+        "patches": {
+            "total": total_patches,
+            "applied": applied_count,
+            "approved_not_applied": approved_not_applied,
+            "group_patches": group_patch_count,
+            "by_review_status": by_status,
+            "by_route": by_route,
+        },
+        "llm": {
+            "total_cost_usd": total_cost,
+            "by_call_type": llm_by_call_type,
+        },
+        "stage_timings": doc.stage_timings or {},
+        "pipeline_runs": runs_payload,
+    }
+
+
 # =============================================
 # PLAN V4: AUDITORÍA LLM
 # =============================================

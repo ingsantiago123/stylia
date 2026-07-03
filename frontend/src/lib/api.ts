@@ -1039,3 +1039,53 @@ export async function simulateImpact(
   }
   return res.json();
 }
+
+// =============================================
+// Fase 7: Métricas operativas del documento
+// =============================================
+
+export interface LlmCallTypeMetric {
+  call_type: string;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost_usd: number;
+}
+
+export interface PipelineRunMetric {
+  run_no: number;
+  status: string; // running | completed | failed | cost_limit
+  current_stage: string | null;
+  stages_done: string[];
+  retries: number;
+  cost_usd: number;
+  cost_limit_usd: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_message: string | null;
+}
+
+export interface DocumentMetrics {
+  doc_id: string;
+  status: string;
+  patches: {
+    total: number;
+    applied: number;
+    approved_not_applied: number;
+    group_patches: number;
+    by_review_status: Record<string, number>;
+    by_route: Record<string, number>;
+  };
+  llm: {
+    total_cost_usd: number;
+    by_call_type: LlmCallTypeMetric[];
+  };
+  stage_timings: Record<string, number>;
+  pipeline_runs: PipelineRunMetric[];
+}
+
+export async function getDocumentMetrics(docId: string): Promise<DocumentMetrics> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/metrics`);
+  if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}

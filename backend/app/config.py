@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     # --- Fase 6: motor de reconstrucción run-level ---
     run_splicer_enabled: bool = True         # splice por diff de runs (preserva formato intra-párrafo)
 
+    # --- Fase 4: orquestación resumible ---
+    pipeline_checkpoints_enabled: bool = True  # checkpoints por etapa en pipeline_runs
+    max_cost_per_doc_usd: float = 0.0          # kill-switch de costo LLM por run (0 = sin límite)
+
     # --- Corrección paralela por lotes (Stage D) ---
     parallel_correction_enabled: bool = False       # OFF por defecto; activar cuando esté validado
     parallel_correction_batch_size: int = 150       # párrafos objetivo por lote

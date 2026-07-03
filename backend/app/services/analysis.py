@@ -221,6 +221,59 @@ def _detect_sections(
 # C.4: Extracción de términos
 # =============================================
 
+# §1.1.8: los n-gramas de frecuencia sin filtro sintáctico contaminaban los
+# prompts (costo cuadrático de contexto) y los gates (gate_protected_terms
+# rechazaba correcciones legítimas por bigramas ruidosos tipo "de la").
+_SPANISH_STOPWORDS: frozenset = frozenset({
+    "a", "al", "algo", "ante", "antes", "aquel", "aquella", "aquellas",
+    "aquellos", "aqui", "aquí", "así", "asi", "aunque", "bajo", "bien",
+    "cada", "casi", "como", "cómo", "con", "contra", "cual", "cuál",
+    "cuales", "cuando", "cuándo", "cuanto", "de", "del", "desde", "donde",
+    "dónde", "dos", "el", "él", "ella", "ellas", "ellos", "en", "entre",
+    "era", "eran", "es", "esa", "esas", "ese", "eso", "esos", "esta",
+    "está", "estaba", "estaban", "estas", "este", "esto", "estos", "estoy",
+    "fue", "fueron", "ha", "haber", "había", "habían", "hace", "hacia",
+    "han", "hasta", "hay", "la", "las", "le", "les", "lo", "los", "más",
+    "mas", "me", "mi", "mis", "mientras", "muy", "nada", "ni", "no", "nos",
+    "nuestra", "nuestro", "o", "otra", "otras", "otro", "otros", "para",
+    "pero", "poco", "por", "porque", "pues", "que", "qué", "quien",
+    "quién", "se", "sea", "según", "segun", "ser", "si", "sí", "sido",
+    "sin", "sino", "sobre", "solo", "sólo", "son", "su", "sus", "también",
+    "tambien", "tan", "tanto", "te", "tiene", "tienen", "toda", "todas",
+    "todo", "todos", "tras", "tu", "un", "una", "unas", "uno", "unos",
+    "y", "ya", "yo",
+})
+
+_WORD_RE_TERMS = re.compile(r"^[\wáéíóúüñÁÉÍÓÚÜÑ-]+$", re.UNICODE)
+
+
+def _is_meaningful_ngram(ngram_words: list[str]) -> bool:
+    """
+    §1.1.8: un n-grama solo es candidato a término del glosario si:
+    - ni empieza ni termina con stopword ("de la norma" no; "norma técnica" sí),
+    - contiene al menos una palabra con contenido (no-stopword de >3 chars
+      o con mayúscula inicial, p.ej. nombre propio/sigla),
+    - todas sus palabras son léxicas (sin números sueltos ni símbolos).
+    """
+    if not ngram_words:
+        return False
+    lowered = [w.lower() for w in ngram_words]
+    if lowered[0] in _SPANISH_STOPWORDS or lowered[-1] in _SPANISH_STOPWORDS:
+        return False
+    if all(w in _SPANISH_STOPWORDS for w in lowered):
+        return False
+    has_content = any(
+        (w.lower() not in _SPANISH_STOPWORDS and (len(w) > 3 or w[:1].isupper()))
+        for w in ngram_words
+    )
+    if not has_content:
+        return False
+    for w in ngram_words:
+        if not _WORD_RE_TERMS.match(w) or w.isdigit():
+            return False
+    return True
+
+
 def _extract_terms(
     all_paragraphs: list[tuple[str, str]],
     profile_protected: list[str] | None = None,
@@ -244,15 +297,19 @@ def _extract_terms(
     first_occurrence: dict[str, int] = {}
 
     for para_idx, (text, _loc) in enumerate(all_paragraphs):
-        text_words = text.strip().split()
+        text_words = [w.strip(".,;:()\"'«»¡!¿?") for w in text.strip().split()]
+        text_words = [w for w in text_words if w]
         for n in (2, 3):
             for i in range(len(text_words) - n + 1):
-                ngram = " ".join(text_words[i:i+n])
-                # Filtrar n-gramas que son solo stopwords o muy cortos
-                ngram_clean = ngram.strip(".,;:()\"'«»")
+                window = text_words[i:i + n]
+                # §1.1.8: filtro sintáctico real — sin él, bigramas de puras
+                # stopwords ("de la", "en el") acababan como "términos
+                # protegidos" en cada prompt del documento.
+                if not _is_meaningful_ngram(window):
+                    continue
+                ngram_clean = " ".join(window)
                 if len(ngram_clean) < 5:
                     continue
-                # Ignorar n-gramas con solo minúsculas comunes
                 ngram_lower = ngram_clean.lower()
                 term_counter[ngram_lower] += 1
                 if ngram_lower not in first_occurrence:
